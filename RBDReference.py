@@ -6,21 +6,21 @@ class RBDReference:
     def __init__(self, robotObj):
         self.robot = robotObj
 
-    def mxS(self, S, vec, alpha = 1.0):
-        if S[0] == 1:
-            return self.mx1(vec,alpha)
-        elif S[1] == 1:
-            return self.mx2(vec,alpha)
-        elif S[2] == 1:
-            return self.mx3(vec,alpha)
-        elif S[3] == 1:
-            return self.mx4(vec,alpha)
-        elif S[4] == 1:
-            return self.mx5(vec,alpha)
-        elif S[5] == 1:
-            return self.mx6(vec,alpha)
-        else:
-            return np.zeros((6))
+    def mxS(self, S, vec):
+        result = np.zeros((6))
+        if not S[0] == 0:
+            result += self.mx1(vec,S[0])
+        if not S[1] == 0:
+            result += self.mx2(vec,S[1])
+        if not S[2] == 0:
+            result += self.mx3(vec,S[2])
+        if not S[3] == 0:
+            result += self.mx4(vec,S[3])
+        if not S[4] == 0:
+            result += self.mx5(vec,S[4])
+        if not S[5] == 0:
+            result += self.mx6(vec,S[5])
+        return result
 
     def mx1(self, vec, alpha = 1.0):
         vecX = np.zeros((6))
@@ -127,56 +127,66 @@ class RBDReference:
 
     def rnea_fpass(self, q, qd, qdd = None, GRAVITY = -9.81):
         # allocate memory
-        n = len(qd)
-        v = np.zeros((6,n))
-        a = np.zeros((6,n))
-        f = np.zeros((6,n))
+        NB = self.robot.get_num_bodies()
+        v = np.zeros((6,NB))
+        a = np.zeros((6,NB))
+        f = np.zeros((6,NB))
         gravity_vec = np.zeros((6))
         gravity_vec[5] = -GRAVITY # a_base is gravity vec
-        
-        # forward pass
-        for ind in range(n):
-            parent_ind = self.robot.get_parent_id(ind)
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
-            S = self.robot.get_S_by_id(ind)
-            # compute v and a
-            if parent_ind == -1: # parent is base
-                # v_base is zero so v[:,ind] remains 0
-                a[:,ind] = np.matmul(Xmat,gravity_vec)
-            else:
-                v[:,ind] = np.matmul(Xmat,v[:,parent_ind])
-                a[:,ind] = np.matmul(Xmat,a[:,parent_ind])
-            v[:,ind] += S*qd[ind]
-            a[:,ind] += self.mxS(S,v[:,ind],qd[ind])
-            if qdd is not None:
-                a[:,ind] += S*qdd[ind]
 
+        # forward pass
+        for curr_id in range(NB):
+            parent_id = self.robot.get_parent_id(curr_id)
+            S = self.robot.get_S_by_id(curr_id)
+            inds_q = self.robot.get_joint_index_q(curr_id)
+            _q = q[inds_q]
+            Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+            # compute v and a
+            if parent_id == -1: # parent is fixed base or world
+                # v_base is zero so v[:,ind] remains 0
+                a[:,curr_id] = np.matmul(Xmat,gravity_vec)
+            else:
+                v[:,curr_id] = np.matmul(Xmat,v[:,parent_id])
+                a[:,curr_id] = np.matmul(Xmat,a[:,parent_id])
+            inds_v = self.robot.get_joint_index_v(curr_id)
+            _qd = qd[inds_v]
+            vJ = np.matmul(S,np.transpose(np.matrix(_qd)))
+            print("vJ",vJ)
+            # TODO fix the weird numpy error that is stopping this from
+            # ValueError: non-broadcastable output operand with shape (6,) doesn't match the broadcast shape (1,6)
+            # just being v[:,curr_id] += vJ
+            for j in range(6):
+                v[j,curr_id] += vJ[j]
+            a[:,curr_id] += self.mxS(vJ,v[:,curr_id])
+            if qdd is not None:
+                _qdd = qdd[inds_v]
+                a[:,curr_id] += np.matmul(S,np.transpose(np.matrix(_qdd)))
             # compute f
-            Imat = self.robot.get_Imat_by_id(ind)
-            f[:,ind] = np.matmul(Imat,a[:,ind]) + self.vxIv(v[:,ind],Imat)
+            Imat = self.robot.get_Imat_by_id(curr_id)
+            f[:,curr_id] = np.matmul(Imat,a[:,curr_id]) + self.vxIv(v[:,curr_id],Imat)
 
         return (v,a,f)
 
-    def rnea_bpass(self, q, qd, f):
+    def rnea_bpass(self, q, f):
         # allocate memory
-        n = len(q) # assuming len(q) = len(qd)
-        c = np.zeros(n)
-        
-        # backward pass
-        for ind in range(n-1,-1,-1):
-            S = self.robot.get_S_by_id(ind)
-            # compute c
-            c[ind] = np.matmul(np.transpose(S),f[:,ind])
-            # update f if applicable
-            parent_ind = self.robot.get_parent_id(ind)
-            if parent_ind != -1:
-                Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
-                temp = np.matmul(np.transpose(Xmat),f[:,ind])
-                f[:,parent_ind] = f[:,parent_ind] + temp.flatten()
+        NB = self.robot.get_num_bodies()
+        m = self.robot.get_num_vel()
+        c = np.zeros(m)
 
-        # add velocity damping (defaults to 0)
-        for k in range(n):
-            c[k] += self.robot.get_damping_by_id(k) * qd[k]
+        # backward pass
+        for curr_id in range(NB-1,-1,-1):
+            parent_id = self.robot.get_parent_id(curr_id)
+            S = self.robot.get_S_by_id(curr_id)
+            inds_f = self.robot.get_joint_index_f(curr_id)
+            # compute c
+            c[inds_f] = np.matmul(np.transpose(S),f[:,curr_id])
+            # update f if applicable
+            if parent_id != -1:
+                inds_q = self.robot.get_joint_index_q(curr_id)
+                _q = q[inds_q]
+                Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+                temp = np.matmul(np.transpose(Xmat),f[:,curr_id])
+                f[:,parent_id] = f[:,parent_id] + temp.flatten()
 
         return (c,f)
 
@@ -184,7 +194,7 @@ class RBDReference:
         # forward pass
         (v,a,f) = self.rnea_fpass(q, qd, qdd, GRAVITY)
         # backward pass
-        (c,f) = self.rnea_bpass(q, qd, f)
+        (c,f) = self.rnea_bpass(q, f)
 
         return (c,v,a,f)
 
@@ -296,10 +306,6 @@ class RBDReference:
                 Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
                 df_dqd[:,:,parent_ind] += np.matmul(np.transpose(Xmat),df_dqd[:,:,ind]) 
 
-        # add in the damping
-        for ind in range(n):
-            dc_dqd[ind,ind] += self.robot.get_damping_by_id(ind)
-
         return dc_dqd
 
     def rnea_grad(self, q, qd, qdd = None, GRAVITY = -9.81):
@@ -321,56 +327,107 @@ class RBDReference:
         return dc_du
 
     def minv_bpass(self, q):
+
         # allocate memory
-        n = len(q)
+        NB = self.robot.get_num_bodies()
+        n = self.robot.get_num_vel()
+
         Minv = np.zeros((n,n))
         F = np.zeros((n,6,n))
         U = np.zeros((n,6))
-        Dinv = np.zeros(n)
+        Dinv = {}
 
         # set initial IA to I
         IA = copy.deepcopy(self.robot.get_Imats_dict_by_id())
-        
+
         # backward pass
-        for ind in range(n-1,-1,-1):
+        for curr_id in range(NB-1,-1,-1):
             # Compute U, D
-            S = self.robot.get_S_by_id(ind)
-            subtreeInds = self.robot.get_subtree_by_id(ind)
-            U[ind,:] = np.matmul(IA[ind],S)
-            Dinv[ind] = 1/np.matmul(S.transpose(),U[ind,:])
-            # Update Minv
-            Minv[ind,ind] = Dinv[ind]
-            for subInd in subtreeInds:
-                Minv[ind,subInd] -= Dinv[ind] * np.matmul(S.transpose(),F[ind,:,subInd])
+            S = self.robot.get_S_by_id(curr_id)
+            inds_v = self.robot.get_joint_index_v(curr_id)
+            subtreeInds = self.robot.get_subtree_by_id(curr_id)
+            temp = np.matmul(IA[curr_id],S)
+
+            if curr_id == 0 and self.robot.floating_base:
+                U[0:6,:] = temp
+                Dinv[curr_id] = 1/np.matmul(S.transpose(),U[0:6,:])
+                # Update Minv
+                Minv[0:6,0:6] = Dinv[curr_id]
+                # TODO WHAT IS UP WITH THE SIZING HERE?!?!?!
+                for subInd in subtreeInds:
+                    for row in range(S.shape[1]):
+                        Minv[0:6,subInd] -= np.matmul(Dinv[curr_id],np.matmul(S.transpose()[row,:],F[0:6,:,subInd]))      
+            else:
+                # TODO again numpy?!?
+                # ValueError: non-broadcastable output operand with shape (6,) doesn't match the broadcast shape (1,6)
+                for j in range(6):
+                    U[inds_v,j] = temp[j]
+                Dinv[curr_id] = 1/np.matmul(S.transpose(),U[inds_v,:])
+                # Update Minv
+                Minv[inds_v] = Dinv[curr_id]
+                for subInd in subtreeInds:
+                    Minv[inds_v,subInd] -= Dinv[curr_id] * np.matmul(S.transpose(),F[inds_v,:,subInd])
+                
             # update parent if applicable
-            parent_ind = self.robot.get_parent_id(ind)
-            if parent_ind != -1:
-                Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+            parent_id = self.robot.get_parent_id(curr_id)
+            if parent_id != -1:
+                parent_ind = self.robot.get_joint_index_v(parent_id)
+                inds_q = self.robot.get_joint_index_q(curr_id)
+                _q = q[inds_q]
+                Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
                 # update F
                 for subInd in subtreeInds:
-                    F[ind,:,subInd] += U[ind,:]*Minv[ind,subInd]
-                    F[parent_ind,:,subInd] += np.matmul(np.transpose(Xmat),F[ind,:,subInd]) 
+                    F[inds_v,:,subInd] += U[inds_v,:]*Minv[inds_v,subInd]
+                    F[parent_ind,:,subInd] += np.matmul(np.transpose(Xmat),F[inds_v,:,subInd]) 
                 # update IA
-                Ia = IA[ind] - np.outer(U[ind,:],Dinv[ind]*U[ind,:])
+                Ia = IA[curr_id] - np.outer(U[inds_v,:],Dinv[curr_id]*U[inds_v,:])
                 IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
-                IA[parent_ind] += IaParent
+                IA[parent_id] += IaParent
 
+        print(Minv)
         return (Minv, F, U, Dinv)
 
     def minv_fpass(self, q, Minv, F, U, Dinv):
-        n = len(q)
-        
+        NB = self.robot.get_num_bodies()
+
         # forward pass
-        for ind in range(n):
-            parent_ind = self.robot.get_parent_id(ind)
-            S = self.robot.get_S_by_id(ind)
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
-            if parent_ind != -1:
-                Minv[ind,ind:] -= Dinv[ind]*np.matmul(np.matmul(U[ind,:].transpose(),Xmat),F[parent_ind,:,ind:])
+        for curr_id in range(NB):
+            inds_v = self.robot.get_joint_index_v(curr_id)
+            inds_q = self.robot.get_joint_index_q(curr_id)
+            _q = q[inds_q]
+            Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+            S = self.robot.get_S_by_id(curr_id)
+            parent_id = self.robot.get_parent_id(curr_id)
+            parent_inds = self.robot.get_joint_index_v(parent_id)
+
+            if parent_id != -1:
+                UX = np.matmul(U[inds_v,:].transpose(),Xmat)
+                if parent_id == 0 and self.robot.floating_base:
+                    Minv[inds_v,:] = 0
+                    for parent_ind in parent_inds:
+                        temp = Dinv[curr_id]*np.matmul(UX,F[parent_ind,:,inds_v:])
+                        # Minv[inds_v,inds_v:] += temp
+                        for j in range(Minv.shape[0]-inds_v):
+                            Minv[inds_v,inds_v+j] = temp[0,j]
+                else:
+                    # TODO Numpy again!!!!
+                    temp = Dinv[curr_id]*np.matmul(UX,F[parent_inds,:,inds_v:])
+                    # Minv[inds_v,inds_v:] += temp
+                    for j in range(Minv.shape[0]-inds_v):
+                        Minv[inds_v,inds_v+j] = temp[0,j]
+
+            if curr_id == 0 and self.robot.floating_base:
+                for j in range(6):
+                    F[0:6,j,:] = Minv[0:6,:]
+            else:
+                F[inds_v,:,inds_v:] = np.outer(S,Minv[inds_v,inds_v:])
             
-            F[ind,:,ind:] = np.outer(S,Minv[ind,ind:])
-            if parent_ind != -1:
-                F[ind,:,ind:] += np.matmul(Xmat,F[parent_ind,:,ind:])
+            if parent_id != -1:
+                if parent_id == 0 and self.robot.floating_base:
+                    for parent_ind in parent_inds:
+                        F[inds_v,:,inds_v:] += np.matmul(Xmat,F[parent_ind,:,inds_v:])
+                else:
+                    F[inds_v,:,inds_v:] += np.matmul(Xmat,F[parent_inds,:,inds_v:])
 
         return Minv
 
@@ -385,9 +442,9 @@ class RBDReference:
 
         # fill in full matrix (currently only upper triangular)
         if output_dense:
-            n = len(q)
-            for col in range(n):
-                for row in range(n):
+            NB = self.robot.get_num_bodies()
+            for col in range(NB):
+                for row in range(NB):
                     if col < row:
                         Minv[row,col] = Minv[col,row]
 
