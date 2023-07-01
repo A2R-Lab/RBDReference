@@ -67,6 +67,109 @@ class RBDReference:
         return vecXIvec
 
     """
+    End Effector Posiitons
+
+    offests is an array of np matricies of the form (offset_x, offset_y, offset_z, 1)
+    """
+    def end_effector_positions(self, q, offsets = [np.matrix([[0,0,0,1]])]):
+
+        # do for each branch in the chain
+        eePos_arr = []
+        for jid in self.robot.get_leaf_nodes():
+            
+            # first get the joints in the chain
+            jidChain = sorted(self.robot.get_ancestors_by_id(jid))
+            jidChain.append(jid)
+            
+            # then chain them up
+            Xmat_hom = np.eye(4)
+            for ind in jidChain:
+                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                Xmat_hom = np.matmul(Xmat_hom,currX)
+
+
+            # Then extract the end-effector position with the given offset(s)
+            # TODO update for multiple offsets
+
+            # xyz position is easy
+            eePos_xyz1 = Xmat_hom * offsets[0].transpose()
+
+            # roll pitch yaw is a bit more difficult
+            eePos_roll = np.arctan2(Xmat_hom[2,1],Xmat_hom[2,2])
+            pitch_temp = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
+            eePos_pitch = np.arctan2(-Xmat_hom[2,0],pitch_temp)
+            eePos_yaw = np.arctan2(Xmat_hom[1,0],Xmat_hom[0,0])
+            eePos_rpy = np.matrix([[eePos_roll,eePos_pitch,eePos_yaw]])
+
+            # then stack it up!
+            eePos = np.vstack((eePos_xyz1[:3,:],eePos_rpy.transpose()))
+            eePos_arr.append(eePos)
+        return eePos_arr
+
+    """
+    End Effectors Position Gradients
+    """
+    def equals_or_hstack(self, obj, col):
+        if obj is None:
+            obj = col
+        else:
+            obj = np.hstack((obj,col))
+        return obj
+    def end_effector_position_gradients(self, q, offsets = [np.matrix([[0,0,0,1]])]):
+        n = self.robot.get_num_joints()
+        
+        # For each branch chain up the transformations across all possible derivatives
+        # Note: if not in branch then 0
+        deePos_arr = []
+        for jid in self.robot.get_leaf_nodes():
+            
+            # first get the joints in the chain
+            jidChain = sorted(self.robot.get_ancestors_by_id(jid))
+            jidChain.append(jid)
+
+            # then compute the gradients
+            deePos = None
+            for dind in range(n):
+
+                # Note: if not in branch then 0
+                if dind not in jidChain:
+                    deePos_col = np.zeros((6,1))
+                    deePos = self.equals_or_hstack(deePos,deePos_col)
+                
+                else:
+                    # first chain up the transforms
+                    Xmat_hom = np.eye(4)
+                    for ind in jidChain:
+                        if ind == dind: # use derivative
+                            currX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                        else: # use normal transform
+                            currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                        Xmat_hom = np.matmul(Xmat_hom,currX)
+
+                    # Then extract the end-effector position with the given offset(s)
+                    # TODO handle different offsets for different branches
+
+                    # xyz position is easy
+                    deePos_xyz1 = Xmat_hom * offsets[0].transpose()
+
+                    # roll pitch yaw is a bit more difficult
+                    # TODO THESE ARE WRONG BECUASE THERE IS CHAIN RULE HERE
+                    # see https://github.com/plancherb1/parallel-DDP/blob/master/plants/dynamics_arm.cuh
+                    # but note the mistake on indexing -- these are the corret indexes
+                    deePos_roll = np.arctan2(Xmat_hom[2,1],Xmat_hom[2,2])
+                    pitch_temp = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
+                    deePos_pitch = np.arctan2(-Xmat_hom[2,0],pitch_temp)
+                    deePos_yaw = np.arctan2(Xmat_hom[1,0],Xmat_hom[0,0])
+                    deePos_rpy = np.matrix([[deePos_roll,deePos_pitch,deePos_yaw]])
+
+                    # then stack it up!
+                    deePos_col = np.vstack((deePos_xyz1[:3,:],deePos_rpy.transpose()))
+                    deePos = self.equals_or_hstack(deePos,deePos_col)
+
+            deePos_arr.append(deePos)
+        return deePos_arr
+
+    """
     Recursive Newton-Euler Method is a recursive inverse dynamics algorithm to calculate the forces required for a specified trajectory
 
     RNEA divided into 3 parts: 
