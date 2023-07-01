@@ -10,6 +10,7 @@ class RBDReference:
         # for any vector v, computes the operator v x 
         # vec x = [wx   0]
         #         [vox wx]
+        #(crm in spatial_v2_extended)
         v_cross = np.array([0, -v[2], v[1], 0, 0, 0,
                             v[2], 0, -v[0], 0, 0, 0,
                             -v[1], v[0], 0, 0, 0, 0,
@@ -20,7 +21,20 @@ class RBDReference:
         return(v_cross)
     
     def dual_cross_operator(self, v):
+        #(crf in in spatial_v2_extended)
         return(-1 * self.cross_operator(v).T)
+    
+
+    def icrf(self, v):
+        #helper function defined in spatial_v2_extended library, called by idsva()
+        res = [[0,  -v[2],  v[1],    0,  -v[5],  v[4]],
+            [v[2],    0,  -v[0],  v[5],    0,  -v[3]],
+            [-v[1],  v[0],    0,  -v[4],  v[3],    0],
+            [    0,  -v[5],  v[4],    0,    0,    0],
+            [ v[5],    0,  -v[3],    0,    0,    0],
+            [-v[4],  v[3],    0,    0,    0,    0]]
+        return -np.asmatrix(res)
+
 
     def mxS(self, S, vec, alpha=1.0):
         # returns the spatial cross product between vectors S and vec. vec=[v0, v1 ... vn] and S = [s0, s1, s2, s3, s4, s5]
@@ -419,6 +433,120 @@ class RBDReference:
 
         dc_du = np.hstack((dc_dq,dc_dqd))
         return dc_du
+
+    
+
+    def idsva(self, q, qd, qdd, GRAVITY = -9.81):
+        """alternative to rnea_grad(), described in "Efficient Analytical Derivatives of Rigid-Body Dynamics using
+Spatial Vector Algebra" (Singh, Russel, and Wensing)
+
+        :param q: initial joint positions
+        :type q: array representing a 1 by n vector, where n is the number of joints
+        :param qd: initial joint velocities
+        :type qd: array representing a 1 by n vector
+        :param qdd: desired joint accelerations 
+        :type qdd: array representing a 1 by n vector
+        :param GRAVITY: defaults to -9.81
+        :type GRAVITY: float, optional
+        :return: dtau_dq, dtau_dqd-- the gradient of the resulting torque with respect to initial joint position and velocity
+        :rtype: list
+        """
+        # allocate memory
+        n = len(qd)
+        v = np.zeros((6,n))
+        a = np.zeros((6,n))
+        f = np.zeros((6,n))
+        Xup0 =  [None] * n #list of transformation matrices in the world frame 
+        Xdown0 = [None] * n
+        S = np.zeros((6,n))
+        Sd = np.zeros((6,n))
+        Sdd = np.zeros((6,n))
+        Sj = np.zeros((6,n)) 
+        IC = [None] * n 
+        BC  = [None] * n 
+        gravity_vec = np.zeros(6)
+        gravity_vec[5] = -GRAVITY # a_base is gravity vec
+
+        
+        # forward pass
+        for i in range(n):
+            parent_i = self.robot.get_parent_id(i)
+            Xmat = self.robot.get_Xmat_Func_by_id(i)(q[i])
+
+            # compute X, v and a
+            if parent_i == -1: # parent is base
+                Xup0[i] = Xmat
+                a[:,i] = Xmat @ gravity_vec
+            else:
+                Xup0[i] = Xmat @ Xup0[parent_i]
+                v[:,i] = v[:,parent_i]
+                a[:,i] = a[:,parent_i]
+
+            Xdown0[i] = np.linalg.inv(Xup0[i])
+
+            S[:,i] = self.robot.get_S_by_id(i)
+
+            S[:,i] = Xdown0[i] @ S[:,i]
+            Sd[:,i] = self.cross_operator(v[:,i]) @ S[:,i]
+            Sdd[:,i]= self.cross_operator(a[:,i])@ S[:,i]
+            Sdd[:,i] = Sdd[:,i] + self.cross_operator(v[:,i])@ Sd[:,i]
+            Sj[:,i] = 2*Sd[:,i] + self.cross_operator(S[:,i]*qd[i])@ S[:,i]
+
+            v6x6 = self.cross_operator(v[:,i])
+            v[:,i] = v[:,i] + S[:,i]*qd[i]
+            a[:,i] = a[:,i] + np.array(v6x6 @ S[:,i]*qd[i])
+
+            if qdd is not None:
+                a[:,i] += S[:,i]*qdd[i]
+            
+            # compute f, IC, BC
+            Imat = self.robot.get_Imat_by_id(i)
+
+            IC[i] = np.array(Xup0[i]).T  @ (Imat @ Xup0[i])
+            f[:,i] = IC[i] @ a[:,i] + self.dual_cross_operator(v[:,i]) @ IC[i] @ v[:,i]
+            f[:,i] = np.asarray(f[:,i]).flatten()
+            BC[i] = (self.dual_cross_operator(v[:,i])@IC[i] + self.icrf( IC[i] @ v[:,i]) - IC[i] @ self.cross_operator(v[:,i]))
+        
+
+        t1 = np.zeros((6,n))
+        t2 = np.zeros((6,n))
+        t3 = np.zeros((6,n))
+        t4 = np.zeros((6,n))
+        dtau_dq = np.zeros((n,n))
+        dtau_dqd = np.zeros((n,n))
+
+
+        #backward pass
+        for i in range(n-1,-1,-1):
+
+            t1[:,i] = IC[i] @ S[:,i]
+            t2[:,i] = BC[i] @ S[:,i].T + IC[i] @ Sj[:,i]
+            t3[:,i] = BC[i] @ Sd[:,i] + IC[i] @ Sdd[:,i] + self.icrf(f[:,i]) @ S[:,i]
+            t4[:,i] = BC[i].T @ S[:,i]
+
+            subtree_ids = self.robot.get_subtree_by_id(i) #list of all subtree ids (inclusive)
+
+
+
+            dtau_dq[i, subtree_ids[1:]] = S[:,i] @ t3[:,subtree_ids[1:]]
+            
+            dtau_dq[subtree_ids[0:], i] = Sdd[:,i] @ t1[:,subtree_ids[0:]] + \
+                                        Sd[:,i] @ t4[:,subtree_ids[0:]] 
+            
+            dtau_dqd[i, subtree_ids[1:]] = S[:,i] @ t2[:,subtree_ids[1:]]
+
+            dtau_dqd[subtree_ids[0:], i] = Sj[:,i] @ t1[:,subtree_ids[0:]] + \
+                                        S[:,i] @ t4[:,subtree_ids[0:]] 
+
+            p = self.robot.get_parent_id(i)
+            if p >= 0:
+                IC[p] = IC[p] + IC[i]
+                BC[p] = BC[p] + BC[i]
+                f[:,p] = f[:,p] + f[:,i]
+
+
+        return dtau_dq, dtau_dqd
+
 
     def minv_bpass(self, q):
         # allocate memory
