@@ -94,7 +94,7 @@ class RBDReference:
             # chain up the transforms (version 1 for starting from the root)
             # first get the joints in the chain
             jidChain = sorted(self.robot.get_ancestors_by_id(jid))
-            jidChain.append(jid)            
+            jidChain.append(jid)
             # then chain them up
             Xmat_hom = np.eye(4)
             for ind in jidChain:
@@ -168,6 +168,21 @@ class RBDReference:
                             currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
                         Xmat_hom = np.matmul(Xmat_hom,currX)
 
+                    # chain up the transforms (version 2 for starting from the leaf)
+                    currId = jid
+                    if currId == dind:
+                        Xmat_hom = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                    else:
+                        Xmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                    currId = self.robot.get_parent_id(currId)
+                    while(currId != -1):
+                        if currId == dind:
+                            currX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                        else:
+                            currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                        Xmat_hom = np.matmul(currX,Xmat_hom)
+                        currId = self.robot.get_parent_id(currId)
+                    
                     # Then extract the end-effector position with the given offset(s)
                     # TODO handle different offsets for different branches
 
