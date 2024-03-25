@@ -27,6 +27,7 @@ class RBDReference:
 
     def icrf(self, v):
         #helper function defined in spatial_v2_extended library, called by idsva()
+        v = np.array(v).flatten()
         res = [[0,  -v[2],  v[1],    0,  -v[5],  v[4]],
             [v[2],    0,  -v[0],  v[5],    0,  -v[3]],
             [-v[1],  v[0],    0,  -v[4],  v[3],    0],
@@ -570,7 +571,180 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
 
         return dtau_dq, dtau_dqd
 
+    # crf_idsva is being called by second_order IDSVA
+    def crf_idsva(self, v):
+        vcross = -self.crm(v).conj().T #negative complex conjugate transpose
+        return vcross
+    # dot_matrix is being called by second_order IDSVA
+    def dot_matrix(self, I, v):
+        return self.crf_idsva(v) @ I - I @ self.crm(v)
 
+    def second_order_idsva_series(self, q, qd, qdd, GRAVITY = -9.81):
+        """
+        :param q: initial joint positions
+        :type q: array representing a 1 by n vector, where n is the number of joints
+        :param qd: initial joint velocities
+        :type qd: array representing a 1 by n vector
+        :param qdd: desired joint accelerations 
+        :type qdd: array representing a 1 by n vector
+        :param GRAVITY: defaults to -9.81
+        :type GRAVITY: float, optional
+        :return: d2tau_dq, d2tau_dv, d2tau_dqv, dM_dq
+        :rtype: list
+        """    
+        # allocate memory
+        n = len(qd) # n = 7
+        v = np.zeros((6,n))
+        a = np.zeros((6,n))
+        f = np.zeros((6,n))
+        Xup0 =  [None] * n #list of transformation matrices in the world frame
+        Xdown0 = [None] * n
+        IC = [None] * n
+        BC = [None] * n
+        S = np.zeros((6,n))
+        Sd = np.zeros((6,n))
+        vJ = np.zeros((6,n))
+        aJ = np.zeros((6,n))
+        psid = np.zeros((6,n))
+        psidd = np.zeros((6,n))
+        gravity_vec = np.zeros(6)
+        gravity_vec[5] = -GRAVITY # a_base is gravity vec
+
+        # forward pass 
+        modelNB = n
+        modelNV = self.robot.get_num_joints()
+        for i in range(modelNB):
+            parent_i = self.robot.get_parent_id(i)
+            Xmat = self.robot.get_Xmat_Func_by_id(i)(q[i])
+          # compute X, v and a
+            if parent_i == -1: # parent is base
+                Xup0[i] = Xmat
+                a[:,i] = Xmat @ gravity_vec # 
+            else:
+                Xup0[i] = Xmat @ Xup0[parent_i]
+                v[:,i] = v[:,parent_i]
+                a[:,i] = a[:,parent_i]
+
+            Xdown0[i] = np.linalg.inv(Xup0[i]) 
+            S[:,i] = self.robot.get_S_by_id(i)
+            S[:,i] = Xdown0[i] @ S[:,i]
+            vJ[:,i] = S[:,i] * qd[i]
+            aJ[:,i] = self.crm(v[:,i])@vJ[:,i] + S[:,i] * qdd[i]
+            psid[:,i] = self.crm(v[:,i])@S[:,i]
+            psidd[:,i] = self.crm(a[:,i])@S[:,i] + self.crm(v[:,i])@psid[:,i]
+            v[:,i] = v[:,i] + vJ[:,i]
+            a[:,i] = a[:,i] + aJ[:,i]
+            I = self.robot.get_Imat_by_id(i)
+            IC[i] = np.array(Xup0[i]).T @ (I @ Xup0[i])
+            Sd[:, i] = self.crm(v[:,i]) @ S[:,i]
+            assert Sd[:, i].shape == (6,), f"Unexpected shape for Sd[:, {i}]: {Sd[:, i].shape}"
+            BC[i] = (self.crf_idsva(v[:,i])@IC[i] + self.icrf( IC[i] @ v[:,i]) - IC[i] @ self.crm(v[:,i]))
+            f[:,i] = IC[i] @ a[:,i] + self.crf_idsva(v[:,i]) @ IC[i] @v[:,i] 
+        
+        # Matrix Intialization
+        dM_dq = np.zeros((modelNV,modelNV,modelNV))
+        d2tau_dq = np.zeros((modelNV,modelNV,modelNV))
+        d2tau_dqd = np.zeros((modelNV,modelNV,modelNV))
+        d2tau_cross = np.zeros((modelNV,modelNV,modelNV))
+
+        #backward pass
+        for i in range(modelNB-1,-1,-1):
+            modelnv = 1 # DOF of ith joint, Since revolute type for iiwa so this is 1
+            for p in range(modelnv):
+                S_p = S[:, i]  
+                Sd_p = Sd[:, i]
+                psid_p = psid[:, i]
+                psidd_p = psidd[:, i]
+                
+                Bic_phii = self.icrf(IC[i] @ S_p)
+                Bic_psii_dot = 2 * 0.5 * (self.crf_idsva(psid_p) @ IC[i] + self.icrf(IC[i] @ psid_p) - IC[i] @ self.crm(psid_p))
+
+                A0 = self.icrf(IC[i] @ S_p )
+                A1 = self.dot_matrix(IC[i], S_p) 
+                A2 = 2 * A0 - Bic_phii
+                A3 = Bic_psii_dot + self.dot_matrix(BC[i], S_p)
+                A4 = self.icrf(BC[i].T @ S_p)
+                A5 = self.icrf(BC[i] @ psid_p  + IC[i]@psidd_p + self.crf_idsva(S_p) @ f[:, i])
+                A6 = self.crf_idsva(S_p) @ IC[i] + A0
+                A7 = self.icrf(BC[i] @ S_p + IC[i] @ (psid_p + Sd_p) )
+                ii = i
+                j = i 
+
+                while j >= 0 :
+                    jj = j 
+                    modelnvj = 1 # DOF of jth joint
+                    for t in range(modelnvj):
+                        S_t = S[:, j]
+                        Sd_t = Sd[:, j]
+                        psid_t = psid[:, j]
+                        psidd_t = psidd[:, j]    
+                        u1 = A3.T @ S_t
+                        u2 = A1.T @ S_t
+                        u3 = A3 @ psid_t + A1 @ psidd_t + A5 @ S_t
+                        u4 = A6 @ S_t
+                        u5 = A2 @ psid_t + A4 @ S_t
+                        u6 = Bic_phii @ psid_t + A7 @ S_t
+                        u7 = A3 @ S_t + A1 @ (psid_t + Sd_t)
+                        u8 = A4 @ S_t - Bic_phii.T @ psid_t
+                        u9 = A0 @ S_t
+                        u10 = Bic_phii @ S_t
+                        u11 = Bic_phii.T @ S_t
+                        u12 = A1 @ S_t
+                        
+                        k = j
+                        while k >= 0:
+                            kk = k 
+                            modelnvk = 1 # DOF of kth joint
+                            for r in range(modelnvk):
+                                S_r = S[:, k]
+                                Sd_r = Sd[:, k]
+                                psid_r = psid[:, k]
+                                psidd_r = psidd[:, k]
+                                p1 = psid_r @ u11.T
+                                p2 =  psid_r @ u8.T + psidd_r @ u9.T
+                                d2tau_dq[ii, jj, kk] = p2
+                                d2tau_cross[ii, kk, jj] = -p1
+
+                                if j != i:
+                                    d2tau_dq[jj, kk, ii] = psid_r @ u1.T + psidd_r @ u2.T
+                                    d2tau_dq[jj, ii, kk] = d2tau_dq[jj, kk, ii]
+                                    d2tau_cross[jj, kk, ii] = p1
+                                    d2tau_cross[jj, ii, kk] = S_r @ u1.T + (psid_r + Sd_r) @ u2.T
+                                    d2tau_dqd[jj, kk, ii] = S_r @ u11.T
+                                    d2tau_dqd[jj, ii, kk] = d2tau_dqd[jj, kk, ii]
+                                    dM_dq[kk, jj, ii] = u12 @ S_r.T
+                                    dM_dq[jj, kk, ii] = u12 @ S_r.T
+
+                                if k != j:
+                                    d2tau_dq[ii, kk, jj] = p2
+                                    d2tau_dq[kk, ii, jj] = u3 @ S_r.T
+                                    d2tau_dqd[ii, jj, kk] = -S_r @ u11.T
+                                    d2tau_dqd[ii, kk, jj] = -S_r @ u11.T
+                                    d2tau_cross[ii, jj, kk] = u5 @ S_r.T + (psid_r + Sd_r) @ u9.T
+                                    d2tau_cross[kk, jj, ii] = u6 @ S_r.T
+                                    dM_dq[kk, ii, jj] = u9 @ S_r.T
+                                    dM_dq[ii, kk, jj] = u9 @ S_r.T
+                                
+                                    if j != i:
+                                        d2tau_dq[kk, jj, ii] = d2tau_dq[kk, ii, jj]
+                                        d2tau_dqd[kk, ii, jj] = u10 @ S_r.T
+                                        d2tau_dqd[kk, jj, ii] = d2tau_dqd[kk, ii, jj]
+                                        d2tau_cross[kk, ii, jj] = u7 @ S_r.T
+                                    else:
+                                        d2tau_dqd[kk,jj,ii] = u4 @ S_r.T
+                                else:
+                                    d2tau_dqd[ii,jj,kk] = - S_r @ u2.T
+                            g = self.robot.get_parent_id(k)
+                            k = g
+                    z = self.robot.get_parent_id(j)
+                    j = z
+            pi = self.robot.get_parent_id(i)
+            if pi >= 0:
+                IC[pi] = IC[pi] + IC[i]
+                BC[pi] = BC[pi] + BC[i]
+                f[:, pi] = f[:, pi] + f[:, pi + 1]
+        return d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq
+    
     def minv_bpass(self, q):
         # allocate memory
         n = len(q)
