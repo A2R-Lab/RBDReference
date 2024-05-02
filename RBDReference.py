@@ -151,7 +151,6 @@ class RBDReference:
             inds_v = self.robot.get_joint_index_v(curr_id)
             _qd = qd[inds_v]
             vJ = np.matmul(S,np.transpose(np.matrix(_qd)))
-            print("vJ",vJ)
             # TODO fix the weird numpy error that is stopping this from
             # ValueError: non-broadcastable output operand with shape (6,) doesn't match the broadcast shape (1,6)
             # just being v[:,curr_id] += vJ
@@ -160,7 +159,9 @@ class RBDReference:
             a[:,curr_id] += self.mxS(vJ,v[:,curr_id])
             if qdd is not None:
                 _qdd = qdd[inds_v]
-                a[:,curr_id] += np.matmul(S,np.transpose(np.matrix(_qdd)))
+                aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
+                for j in range(6):
+                    a[j, curr_id] += aJ[j]
             # compute f
             Imat = self.robot.get_Imat_by_id(curr_id)
             f[:,curr_id] = np.matmul(Imat,a[:,curr_id]) + self.vxIv(v[:,curr_id],Imat)
