@@ -455,8 +455,8 @@ class RBDReference:
 
         return Minv
     
-    def test_minv(self, q, output_dense = True):
-        
+    def minv_fb_bpass(self,q):
+        """Floating base implementation of minv bpass, main adjustments are due to indexing."""
         # # Backward Pass
         n = len(q)
         NB = self.robot.get_num_bodies()
@@ -467,82 +467,74 @@ class RBDReference:
 
         # set initial IA to I
         IA = copy.deepcopy(self.robot.get_Imats_dict_by_id())
+
         # backward pass
-        for ind in range(n-1,-1,-1):
-            # Compute U, D
-            S = self.robot.get_S_by_id(ind) # NOTE What is S for floating base?
+        for ind in range(NB-1,-1,-1):
+            print(f'Ind: {ind}')
+            S = self.robot.get_S_by_id(ind)
+            print(f'S: {S}')
             subtreeInds = self.robot.get_subtree_by_id(ind)
-            U[ind,:] = np.matmul(IA[ind],S)
-            Dinv[ind] = 1/np.matmul(S.transpose(),U[ind,:])
-            # Update Minv
-            Minv[ind,ind] = Dinv[ind]
-            for subInd in subtreeInds:
-                Minv[ind,subInd] -= Dinv[ind] * np.matmul(S.transpose(),F[ind,:,subInd])
-            # update parent if applicable
-            parent_ind = self.robot.get_parent_id(ind)
-            if parent_ind != -1:
-                Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
-                # update F
-                for subInd in subtreeInds:
-                    F[ind,:,subInd] += U[ind,:]*Minv[ind,subInd]
-                    F[parent_ind,:,subInd] += np.matmul(np.transpose(Xmat),F[ind,:,subInd]) 
-                # update IA
-                Ia = IA[ind] - np.outer(U[ind,:],Dinv[ind]*U[ind,:])
-                IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
-                IA[parent_ind] += IaParent
-
-        # # Original backward pass
-        # allocate memory
-        NB = self.robot.get_num_bodies()
-        n = self.robot.get_num_vel()
-
-        # set initial IA to I
-        IA = copy.deepcopy(self.robot.get_Imats_dict_by_id())
-
-        # backward pass
-        for curr_id in range(NB-1,-1,-1):
-            # Compute U, D
-            S = self.robot.get_S_by_id(curr_id)
-            inds_v = self.robot.get_joint_index_v(curr_id)
-            subtreeInds = self.robot.get_subtree_by_id(curr_id)
-            temp = np.matmul(IA[curr_id],S)
-
-            if curr_id == 0 and self.robot.floating_base:
-                U[0:6,:] = temp
-                Dinv[curr_id] = 1/np.matmul(S.transpose(),U[0:6,:])
-                # Update Minv
-                Minv[0:6,0:6] = Dinv[curr_id]
-                # TODO WHAT IS UP WITH THE SIZING HERE?!?!?!
-                for subInd in subtreeInds:
-                    for row in range(S.shape[1]):
-                        Minv[0:6,subInd] -= np.matmul(Dinv[curr_id],np.matmul(S.transpose()[row,:],F[0:6,:,subInd]))      
+            print('Subtree Inds: {subtreeInds + 6}')
+        for ind in range(NB-1,-1,-1):
+            matrix_ind = ind + 6 # use for Minv, F, U, Dinv
+            if ind == 0: #floating base joint
+                # Compute U, D
+                S = self.robot.get_S_by_id(ind) # np.eye(6) for floating base
+                subtreeInds = self.robot.get_subtree_by_id(ind) #TODO fix subtree inds list
+                for fb_ind in range(5,-1,-1): #TODO check indexing accuracy
+                    U[fb_ind,:] = np.matmul(IA[ind], S[fb_ind])
+                    Dinv[fb_ind] = 1/np.matmul(S.transpose(),U[fb_ind])
+                    # Update Minv
+                    Minv[fb_ind,fb_ind] = Dinv[fb_ind]
+                    for subInd in subtreeInds:
+                        Minv[fb_ind,subInd] -= Dinv[fb_ind] * np.matmul(S.transpose(),F[fb_ind,:,subInd])
+                    # update parent if applicable
+                    # parent_ind = self.robot.get_parent_id(ind)
+                    if parent_ind != -1:
+                        Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+                        # update F
+                        for subInd in subtreeInds:
+                            F[fb_ind,:,subInd] += U[fb_ind,:]*Minv[fb_ind,subInd]
+                            F[fb_ind+1,:,subInd] += np.matmul(np.transpose(Xmat),F[fb_ind,:,subInd]) 
+                        # update IA
+                        Ia = IA[ind] - np.outer(U[fb_ind,:],Dinv[fb_ind]*U[fb_ind,:])
+                        IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
+                        IA[parent_ind] += IaParent
             else:
-                # TODO again numpy?!?
-                # ValueError: non-broadcastable output operand with shape (6,) doesn't match the broadcast shape (1,6)
-                for j in range(6):
-                    U[inds_v,j] = temp[j]
-                Dinv[curr_id] = 1/np.matmul(S.transpose(),U[inds_v,:])
+                # Compute U, D
+                S = self.robot.get_S_by_id(ind) # NOTE What is S for floating base?
+                subtreeInds = self.robot.get_subtree_by_id(ind)
+                adj_subtreeInds = list(np.array(subtreeInds)+6) # adjusted for matrix calculation 
+                U[matrix_ind,:] = np.matmul(IA[ind],S)
+                Dinv[matrix_ind] = 1/np.matmul(S.transpose(),U[matrix_ind,:])
                 # Update Minv
-                Minv[inds_v] = Dinv[curr_id]
-                for subInd in subtreeInds:
-                    Minv[inds_v,subInd] -= Dinv[curr_id] * np.matmul(S.transpose(),F[inds_v,:,subInd])
-                
-            # update parent if applicable
-            parent_id = self.robot.get_parent_id(curr_id)
-            if parent_id != -1:
-                parent_ind = self.robot.get_joint_index_v(parent_id)
-                inds_q = self.robot.get_joint_index_q(curr_id)
-                _q = q[inds_q]
-                Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
-                # update F
-                for subInd in subtreeInds:
-                    F[inds_v,:,subInd] += U[inds_v,:]*Minv[inds_v,subInd]
-                    F[parent_ind,:,subInd] += np.matmul(np.transpose(Xmat),F[inds_v,:,subInd]) 
-                # update IA
-                Ia = IA[curr_id] - np.outer(U[inds_v,:],Dinv[curr_id]*U[inds_v,:])
-                IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
-                IA[parent_id] += IaParent
+                Minv[matrix_ind,matrix_ind] = Dinv[matrix_ind]
+                # for subInd in subtreeInds:
+                for subInd in adj_subtreeInds:
+                    Minv[matrix_ind,subInd] -= Dinv[matrix_ind] * np.matmul(S.transpose(),F[matrix_ind,:,subInd])
+                # update parent if applicable
+                parent_ind = self.robot.get_parent_id(ind)
+                if parent_ind != -1:
+                    Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+                    # update F
+                    # for subInd in subtreeInds:
+                    for subInd in adj_subtreeInds:
+                        F[matrix_ind,:,subInd] += U[matrix_ind,:]*Minv[matrix_ind,subInd]
+                        F[parent_ind+6,:,subInd] += np.matmul(np.transpose(Xmat),F[matrix_ind,:,subInd]) 
+                    # update IA
+                    Ia = IA[ind] - np.outer(U[matrix_ind,:],Dinv[matrix_ind]*U[matrix_ind,:])
+                    IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
+                    IA[parent_ind] += IaParent
 
+        return Minv, F, U, Dinv
+    
+    def test_minv(self, q, output_dense = True):
+        
+        # # Backward Pass
+        if self.robot.floating_base:
+            (Minv, F, U, Dinv) = self.minv_fb_bpass(q)
+        else:
+            (Minv, F, U, Dinv) = self.minv_bpass(q)
         # # Forward Pass
 
         # forward pass
