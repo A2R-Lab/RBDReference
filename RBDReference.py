@@ -456,10 +456,15 @@ class RBDReference:
         return Minv
     
     def minv_fb_bpass(self,q):
-        """Floating base implementation of minv bpass, main adjustments are due to indexing."""
-        # # Backward Pass
-        n = len(q)
+        """Minv bpass floating base case, main adjustments are due to indexing.
+        Treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute. 
+        At the end of bpass when joint id = 0 = floating_base joint, 6 loop pass treating floating 
+         - base joint as 6 joints. Shift all indices to match.
+        NOTE: indexing from S, subtreeInds, and any other self.robot calls must have indices < NB not n = len(q). 
+        Main cause of index adjustments: floating base adds 6 vals to len(q)
+        """
         NB = self.robot.get_num_bodies()
+        n = NB + 5 # floating base joint already added, count it as 6 joints instead of 1 joint.
         Minv = np.zeros((n,n))
         F = np.zeros((n,6,n))
         U = np.zeros((n,6))
@@ -468,45 +473,29 @@ class RBDReference:
         # set initial IA to I
         IA = copy.deepcopy(self.robot.get_Imats_dict_by_id())
 
-        # backward pass
+        # # Backward pass
         for ind in range(NB-1,-1,-1):
-            print(f'Ind: {ind}')
-            S = self.robot.get_S_by_id(ind)
-            print(f'S: {S}')
-            subtreeInds = self.robot.get_subtree_by_id(ind)
-            print('Subtree Inds: {subtreeInds + 6}')
-        for ind in range(NB-1,-1,-1):
-            matrix_ind = ind + 6 # use for Minv, F, U, Dinv
+            matrix_ind = ind + 5 # use for Minv, F, U, Dinv
+            print(matrix_ind)
             if ind == 0: #floating base joint
                 # Compute U, D
                 S = self.robot.get_S_by_id(ind) # np.eye(6) for floating base
                 subtreeInds = self.robot.get_subtree_by_id(ind) #TODO fix subtree inds list
-                for fb_ind in range(5,-1,-1): #TODO check indexing accuracy
-                    U[fb_ind,:] = np.matmul(IA[ind], S[fb_ind])
-                    Dinv[fb_ind] = 1/np.matmul(S.transpose(),U[fb_ind])
-                    # Update Minv
-                    Minv[fb_ind,fb_ind] = Dinv[fb_ind]
-                    for subInd in subtreeInds:
-                        Minv[fb_ind,subInd] -= Dinv[fb_ind] * np.matmul(S.transpose(),F[fb_ind,:,subInd])
-                    # update parent if applicable
-                    # parent_ind = self.robot.get_parent_id(ind)
-                    if parent_ind != -1:
-                        Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
-                        # update F
-                        for subInd in subtreeInds:
-                            F[fb_ind,:,subInd] += U[fb_ind,:]*Minv[fb_ind,subInd]
-                            F[fb_ind+1,:,subInd] += np.matmul(np.transpose(Xmat),F[fb_ind,:,subInd]) 
-                        # update IA
-                        Ia = IA[ind] - np.outer(U[fb_ind,:],Dinv[fb_ind]*U[fb_ind,:])
-                        IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
-                        IA[parent_ind] += IaParent
+                U[ind:6,:] = np.matmul(IA[ind],S) # output is 6x6 matrix
+                print(f'U:\n {U[ind:6,:]},\nS:\n{S}')
+                fb_Dinv = np.linalg.inv(np.matmul(S.transpose(), U[ind:6,:])) # vectorized Dinv calc
+                # Update Minv
+                Minv[ind:6,ind:6] = fb_Dinv
+                for subInd in range(n):
+                    for row in range(S.shape[1]):
+                        Minv[ind:6,subInd] -= np.matmul(fb_Dinv.transpose(), np.matmul(S.transpose()[row,:],F[ind:6,:,subInd]))
             else:
                 # Compute U, D
                 S = self.robot.get_S_by_id(ind) # NOTE What is S for floating base?
                 subtreeInds = self.robot.get_subtree_by_id(ind)
-                adj_subtreeInds = list(np.array(subtreeInds)+6) # adjusted for matrix calculation 
-                U[matrix_ind,:] = np.matmul(IA[ind],S)
-                Dinv[matrix_ind] = 1/np.matmul(S.transpose(),U[matrix_ind,:])
+                adj_subtreeInds = list(np.array(subtreeInds)+5) # adjusted for matrix calculation 
+                U[matrix_ind,:] = np.matmul(IA[ind],S).reshape(6,)
+                Dinv[matrix_ind] = np.linalg.inv(np.matmul(S.transpose(),U[matrix_ind,:]))
                 # Update Minv
                 Minv[matrix_ind,matrix_ind] = Dinv[matrix_ind]
                 # for subInd in subtreeInds:
@@ -520,7 +509,7 @@ class RBDReference:
                     # for subInd in subtreeInds:
                     for subInd in adj_subtreeInds:
                         F[matrix_ind,:,subInd] += U[matrix_ind,:]*Minv[matrix_ind,subInd]
-                        F[parent_ind+6,:,subInd] += np.matmul(np.transpose(Xmat),F[matrix_ind,:,subInd]) 
+                        F[parent_ind+5,:,subInd] += np.matmul(np.transpose(Xmat),F[matrix_ind,:,subInd]) 
                     # update IA
                     Ia = IA[ind] - np.outer(U[matrix_ind,:],Dinv[matrix_ind]*U[matrix_ind,:])
                     IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
@@ -528,52 +517,55 @@ class RBDReference:
 
         return Minv, F, U, Dinv
     
+    def minv_fb_fpass(self, q, Minv, F, U, Dinv):
+        """Minv foward pass floating base case.
+        Treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute. 
+        At the beginning of the forward pass, 6 loop pass treating floating base joint as 6 joints, then continue 
+        - forward pass with shifted indices.
+        NOTE: indexing from S, subtreeInds, and any other self.robot calls must have indices < NB not n = len(q). 
+        Main cause of index adjustments: floating base adds 6 vals to len(q)
+        """
+        NB = self.robot.get_num_bodies()
+        n = NB + 5
+        # # Forward pass
+
+        # Initial floating base adjustment
+        S = self.robot.get_S_by_id(0) # Contains joint information - 6x6 identity matrix
+        for ind in range(6):
+            F[ind,:,ind:] = np.outer(S[ind],Minv[ind,ind:])
+        # Continue forward pass adjusting numbering for shape of F,U,Dinv,Minv matrices
+        for ind in range(1,NB): 
+            matrix_ind = ind + 5
+            inds_q = self.robot.get_joint_index_q(ind)
+            _q = q[inds_q]
+            parent_ind = self.robot.get_parent_id(ind)
+            S = self.robot.get_S_by_id(ind)
+            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q) #check xmat indexing
+
+            if parent_ind != -1:
+                Minv[matrix_ind,matrix_ind:] -= Dinv[matrix_ind]*np.matmul(np.matmul(U[matrix_ind,:].transpose(),Xmat),F[parent_ind+5,:,matrix_ind:])
+
+            F[matrix_ind,:,matrix_ind:] = np.outer(S,Minv[matrix_ind,matrix_ind:])
+            if parent_ind != -1:
+                F[matrix_ind,:,matrix_ind:] += np.matmul(Xmat,F[parent_ind+5,:,matrix_ind:])
+
+        return Minv
+    
     def test_minv(self, q, output_dense = True):
-        
         # # Backward Pass
         if self.robot.floating_base:
             (Minv, F, U, Dinv) = self.minv_fb_bpass(q)
+            Minv = self.minv_fb_fpass(q, Minv, F, U, Dinv)
         else:
             (Minv, F, U, Dinv) = self.minv_bpass(q)
-        # # Forward Pass
+            Minv = self.minv_fpass(q, Minv, F, U, Dinv)
 
-        # forward pass
-        for curr_id in range(NB):
-            inds_v = self.robot.get_joint_index_v(curr_id)
-            inds_q = self.robot.get_joint_index_q(curr_id)
-            _q = q[inds_q]
-            Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
-            S = self.robot.get_S_by_id(curr_id)
-            parent_id = self.robot.get_parent_id(curr_id)
-            parent_inds = self.robot.get_joint_index_v(parent_id)
-
-            if parent_id != -1:
-                UX = np.matmul(U[inds_v,:].transpose(),Xmat)
-                if parent_id == 0 and self.robot.floating_base:
-                    Minv[inds_v,:] = 0
-                    for parent_ind in parent_inds:
-                        temp = Dinv[curr_id]*np.matmul(UX,F[parent_ind,:,inds_v:])
-                        # Minv[inds_v,inds_v:] += temp
-                        for j in range(Minv.shape[0]-inds_v):
-                            Minv[inds_v,inds_v+j] = temp[0,j]
-                else:
-                    # TODO Numpy again!!!!
-                    temp = Dinv[curr_id]*np.matmul(UX,F[parent_inds,:,inds_v:])
-                    # Minv[inds_v,inds_v:] += temp
-                    for j in range(Minv.shape[0]-inds_v):
-                        Minv[inds_v,inds_v+j] = temp[0,j]
-
-            if curr_id == 0 and self.robot.floating_base:
-                for j in range(6):
-                    F[0:6,j,:] = Minv[0:6,:]
-            else:
-                F[inds_v,:,inds_v:] = np.outer(S,Minv[inds_v,inds_v:])
-            
-            if parent_id != -1:
-                if parent_id == 0 and self.robot.floating_base:
-                    for parent_ind in parent_inds:
-                        F[inds_v,:,inds_v:] += np.matmul(Xmat,F[parent_ind,:,inds_v:])
-                else:
-                    F[inds_v,:,inds_v:] += np.matmul(Xmat,F[parent_inds,:,inds_v:])
+        # fill in full matrix (currently only upper triangular)
+        if output_dense:
+            NB = self.robot.get_num_bodies()
+            for col in range(NB):
+                for row in range(NB):
+                    if col < row:
+                        Minv[row,col] = Minv[col,row]
 
         return Minv
