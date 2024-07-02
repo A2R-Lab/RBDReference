@@ -484,11 +484,12 @@ class RBDReference:
                 U[ind:6,:] = np.matmul(IA[ind],S) # output is 6x6 matrix
                 print(f'U:\n {U[ind:6,:]},\nS:\n{S}')
                 fb_Dinv = np.linalg.inv(np.matmul(S.transpose(), U[ind:6,:])) # vectorized Dinv calc
+                print(fb_Dinv)
                 # Update Minv
                 Minv[ind:6,ind:6] = fb_Dinv
                 for subInd in range(n):
                     for row in range(S.shape[1]):
-                        Minv[ind:6,subInd] -= np.matmul(fb_Dinv.transpose(), np.matmul(S.transpose()[row,:],F[ind:6,:,subInd]))
+                        Minv[ind:6,subInd] -= fb_Dinv.transpose()[row,:]*np.matmul(S.transpose()[row,:],F[ind:6,:,subInd])
             else:
                 # Compute U, D
                 S = self.robot.get_S_by_id(ind) # NOTE What is S for floating base?
@@ -539,8 +540,9 @@ class RBDReference:
             inds_q = self.robot.get_joint_index_q(ind)
             _q = q[inds_q]
             parent_ind = self.robot.get_parent_id(ind)
+            print(f'ind: {ind}, matrix_ind: {matrix_ind}, parent_ind: {parent_ind}, effecive parent: {parent_ind+5}')
             S = self.robot.get_S_by_id(ind)
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q) #check xmat indexing
+            Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind]) #check xmat indexing
 
             if parent_ind != -1:
                 Minv[matrix_ind,matrix_ind:] -= Dinv[matrix_ind]*np.matmul(np.matmul(U[matrix_ind,:].transpose(),Xmat),F[parent_ind+5,:,matrix_ind:])
