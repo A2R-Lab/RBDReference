@@ -533,8 +533,7 @@ class RBDReference:
         # Initial floating base adjustment
         S = self.robot.get_S_by_id(0) # Contains joint information - 6x6 identity matrix
         for ind in range(6):
-            F[ind,:,ind:] = np.outer(S[ind],Minv[ind,ind:])
-        # Continue forward pass adjusting numbering for shape of F,U,Dinv,Minv matrices
+            F[ind,:,ind:] = np.outer(S[ind],Minv[ind,ind:])        # Continue forward pass adjusting numbering for shape of F,U,Dinv,Minv matrices
         for ind in range(1,NB): 
             matrix_ind = ind + 5
             inds_q = self.robot.get_joint_index_q(ind)
@@ -571,3 +570,36 @@ class RBDReference:
                         Minv[row,col] = Minv[col,row]
 
         return Minv
+    
+    def crba( self, q, qd):
+        n = len(qd)
+        
+        # C = self.rnea(q, qd, qdd = None, GRAVITY = -9.81)[0]
+
+        IC = copy.deepcopy(self.robot.get_Imats_dict_by_id())# composite inertia calculation
+
+        for ind in range(n-1,-1,-1):
+            parent_ind = self.robot.get_parent_id(ind)
+            Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+
+            if parent_ind != -1:
+                IC[parent_ind] = IC[parent_ind] + np.matmul(np.matmul(Xmat.T, IC[ind]),Xmat);
+
+        H = np.zeros((n,n))
+
+        for ind in range(n):
+
+            S = self.robot.get_S_by_id(ind)
+            fh = np.matmul(IC[ind],S)
+            H[ind,ind] = np.matmul(S,fh)
+            j = ind;
+
+            while self.robot.get_parent_id(j) > -1:
+                Xmat = self.robot.get_Xmat_Func_by_id(j)(q[j])
+                fh = np.matmul(Xmat.T,fh);
+                j = self.robot.get_parent_id(j)
+                S = self.robot.get_S_by_id(j)
+                H[ind,j] = np.matmul(S.T, fh);
+                H[j,ind] = H[ind,j];
+
+        return H
