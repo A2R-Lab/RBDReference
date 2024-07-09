@@ -146,22 +146,17 @@ class RBDReference:
                 # v_base is zero so v[:,ind] remains 0
                 a[:,curr_id] = np.matmul(Xmat,gravity_vec)
             else:
-                v[:,curr_id] = np.matmul(Xmat,v[:,parent_id])
+                v[:,curr_id] = np.matmul(Xmat,v[:,parent_id]) 
                 a[:,curr_id] = np.matmul(Xmat,a[:,parent_id])
             inds_v = self.robot.get_joint_index_v(curr_id)
             _qd = qd[inds_v]
             vJ = np.matmul(S,np.transpose(np.matrix(_qd)))
-            # TODO fix the weird numpy error that is stopping this from
-            # ValueError: non-broadcastable output operand with shape (6,) doesn't match the broadcast shape (1,6)
-            # just being v[:,curr_id] += vJ
-            for j in range(6):
-                v[j,curr_id] += vJ[j]
+            v[:,curr_id] += np.squeeze(np.array(vJ)) # reduces shape to (6,) mattaching v[:,curr_id]
             a[:,curr_id] += self.mxS(vJ,v[:,curr_id])
             if qdd is not None:
                 _qdd = qdd[inds_v]
                 aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
-                for j in range(6):
-                    a[j, curr_id] += aJ[j]
+                a[:,curr_id] += np.squeeze(np.array(aJ)) #reduces shape to (6,) matching a[:,curr_id]
             # compute f
             Imat = self.robot.get_Imat_by_id(curr_id)
             f[:,curr_id] = np.matmul(Imat,a[:,curr_id]) + self.vxIv(v[:,curr_id],Imat)
@@ -572,34 +567,78 @@ class RBDReference:
         return Minv
     
     def crba( self, q, qd):
-        n = len(qd)
-        
-        # C = self.rnea(q, qd, qdd = None, GRAVITY = -9.81)[0]
+        if self.robot.floating_base:
+            NB = self.robot.get_num_bodies()
+            n = len(qd)
+            H = np.zeros((n,n)) # number of effective joints with floating base joint represented as 6 joints
 
-        IC = copy.deepcopy(self.robot.get_Imats_dict_by_id())# composite inertia calculation
+            IC = copy.deepcopy(self.robot.get_Imats_dict_by_id())# composite inertia calculation
+            for ind in range(NB-1,-1,-1):
+                parent_ind = self.robot.get_parent_id(ind)
+                matrix_ind = ind + 5
+                # print(f"n: {n}, ind: {ind}, parent_ind: {parent_ind}, matrix_ind: {matrix_ind}")
+                if ind > 0:
+                    _q = q[self.robot.get_joint_index_q(ind)]
+                    Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+                    # print(f"Xmat_curr:\n {Xmat_curr}\nXmat_parent:\n{Xmat_parent}\nXmat:\n{Xmat}")
+                    S = self.robot.get_S_by_id(ind)
+                    IC[parent_ind] = IC[parent_ind] + np.matmul(np.matmul(Xmat.T,IC[ind]),Xmat)
+                    fh = np.matmul(IC[ind],S)
+                    H[matrix_ind,matrix_ind] = np.matmul(S.T,fh)
+                    j = ind
+                    # print(f"Xmat:\n{Xmat}\nS:{S}\nIC[ind]:\n{IC[parent_ind]}\nH[i,i]:{H[ind,ind]}\nfh:\n{fh}")
+                    while self.robot.get_parent_id(j) > -1:
+                        Xmat = self.robot.get_Xmat_Func_by_id(j)(q[self.robot.get_joint_index_q(j)])
+                        fh = np.matmul(Xmat.T,fh)
+                        j = self.robot.get_parent_id(j)
+                        H[matrix_ind,j+6] = np.matmul(fh.T,S)
+                        H[j+6,matrix_ind] = H[matrix_ind,j+6]
+                    # # treat floating base 6 dof joint
+                    inds_q = self.robot.get_joint_index_q(j)
+                    _q = q[inds_q]
+                    Xmat = self.robot.get_Xmat_Func_by_id(j)(_q)
+                    S = np.eye(6)
+                    fh = np.matmul(Xmat.T, fh)
+                    # print(f'fb joint output: {np.matmul(fh.T,S)}')
+                    H[matrix_ind,:6] = np.matmul(fh.T,S)
+                    H[:6,matrix_ind] = H[matrix_ind,:6].T
+                else:
+                    ind = 0
+                    inds_q = self.robot.get_joint_index_q(ind)
+                    _q = q[inds_q]
+                    Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+                    S = self.robot.get_S_by_id(ind)
+                    parent_ind = self.robot.get_parent_id(ind)
+                    fh = np.matmul(IC[ind],S)
+                    print(f"fh ({fh.shape}): {fh}\n,S ({S.shape}): {S}, IC[ind] ({(IC[ind]).shape}): {IC[ind]}")
+                    H[ind:6,ind:6] = np.matmul(S.T,fh)
+        else:           
+        ## Main implementation
+            n = len(qd)
+            IC = copy.deepcopy(self.robot.get_Imats_dict_by_id())# composite inertia calculation
+            for ind in range(n-1,-1,-1):
+                parent_ind = self.robot.get_parent_id(ind)
+                Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
 
-        for ind in range(n-1,-1,-1):
-            parent_ind = self.robot.get_parent_id(ind)
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+                if parent_ind != -1:
+                    IC[parent_ind] = IC[parent_ind] + np.matmul(np.matmul(Xmat.T, IC[ind]),Xmat);
 
-            if parent_ind != -1:
-                IC[parent_ind] = IC[parent_ind] + np.matmul(np.matmul(Xmat.T, IC[ind]),Xmat);
+            H = np.zeros((n,n))
 
-        H = np.zeros((n,n))
+            for ind in range(n):
 
-        for ind in range(n):
+                S = self.robot.get_S_by_id(ind)
+                fh = np.matmul(IC[ind],S)
+                # print(f"fh ({fh.shape}): {fh}\n,S ({S.shape}): {S}, IC[ind] ({(IC[ind]).shape}): {IC[ind]}")
+                H[ind,ind] = np.matmul(S.T,fh)
+                j = ind
 
-            S = self.robot.get_S_by_id(ind)
-            fh = np.matmul(IC[ind],S)
-            H[ind,ind] = np.matmul(S,fh)
-            j = ind;
-
-            while self.robot.get_parent_id(j) > -1:
-                Xmat = self.robot.get_Xmat_Func_by_id(j)(q[j])
-                fh = np.matmul(Xmat.T,fh);
-                j = self.robot.get_parent_id(j)
-                S = self.robot.get_S_by_id(j)
-                H[ind,j] = np.matmul(S.T, fh);
-                H[j,ind] = H[ind,j];
+                while self.robot.get_parent_id(j) > -1:
+                    Xmat = self.robot.get_Xmat_Func_by_id(j)(q[j])
+                    fh = np.matmul(Xmat.T,fh);
+                    j = self.robot.get_parent_id(j)
+                    S = self.robot.get_S_by_id(j)
+                    H[ind,j] = np.matmul(S.T, fh);
+                    H[j,ind] = H[ind,j];
 
         return H
