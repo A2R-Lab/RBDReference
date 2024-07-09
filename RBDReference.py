@@ -586,22 +586,24 @@ class RBDReference:
                     fh = np.matmul(IC[ind],S)
                     H[matrix_ind,matrix_ind] = np.matmul(S.T,fh)
                     j = ind
-                    # print(f"Xmat:\n{Xmat}\nS:{S}\nIC[ind]:\n{IC[parent_ind]}\nH[i,i]:{H[ind,ind]}\nfh:\n{fh}")
-                    while self.robot.get_parent_id(j) > -1:
+                    # print(f"H: {H}\nXmat:\n{Xmat}\nS:{S}\nIC[ind]:\n{IC[parent_ind]}\nH[{matrix_ind},{matrix_ind}]:{H[matrix_ind,matrix_ind]}\nfh:\n{fh}")
+                    while self.robot.get_parent_id(j) > 0:
                         Xmat = self.robot.get_Xmat_Func_by_id(j)(q[self.robot.get_joint_index_q(j)])
                         fh = np.matmul(Xmat.T,fh)
                         j = self.robot.get_parent_id(j)
-                        H[matrix_ind,j+6] = np.matmul(fh.T,S)
-                        H[j+6,matrix_ind] = H[matrix_ind,j+6]
+                        H[matrix_ind,j+5] = np.matmul(fh.T,S)
+                        H[j+5,matrix_ind] = H[matrix_ind,j+5]
+                        # print(f'fh (while j={j}):\n {fh}')
+                        # print(f"H[{matrix_ind},{j+5}]={H[matrix_ind,j+5]}")
                     # # treat floating base 6 dof joint
                     inds_q = self.robot.get_joint_index_q(j)
                     _q = q[inds_q]
                     Xmat = self.robot.get_Xmat_Func_by_id(j)(_q)
                     S = np.eye(6)
                     fh = np.matmul(Xmat.T, fh)
-                    # print(f'fb joint output: {np.matmul(fh.T,S)}')
                     H[matrix_ind,:6] = np.matmul(fh.T,S)
                     H[:6,matrix_ind] = H[matrix_ind,:6].T
+                    print(f"fh.T:\n {fh}\nS:\n{S}")
                 else:
                     ind = 0
                     inds_q = self.robot.get_joint_index_q(ind)
@@ -638,7 +640,7 @@ class RBDReference:
                     fh = np.matmul(Xmat.T,fh);
                     j = self.robot.get_parent_id(j)
                     S = self.robot.get_S_by_id(j)
-                    H[ind,j] = np.matmul(S.T, fh);
-                    H[j,ind] = H[ind,j];
+                    H[ind,j] = np.matmul(S.T, fh)
+                    H[j,ind] = H[ind,j]
 
         return H
