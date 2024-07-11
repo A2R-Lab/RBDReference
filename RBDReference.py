@@ -153,21 +153,15 @@ class RBDReference:
             inds_v = self.robot.get_joint_index_v(curr_id)
             _qd = qd[inds_v]
             vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
-            v[:, curr_id] += np.squeeze(
-                np.array(vJ)
-            )  # reduces shape to (6,) matching v[:,curr_id]
+            v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
             a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
             if qdd is not None:
                 _qdd = qdd[inds_v]
                 aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
-                a[:, curr_id] += np.squeeze(
-                    np.array(aJ)
-                )  # reduces shape to (6,) matching a[:,curr_id]
+                a[:, curr_id] += np.squeeze(np.array(aJ))  # reduces shape to (6,) matching a[:,curr_id]
             # compute f
             Imat = self.robot.get_Imat_by_id(curr_id)
-            f[:, curr_id] = np.matmul(Imat, a[:, curr_id]) + self.vxIv(
-                v[:, curr_id], Imat
-            )
+            f[:, curr_id] = np.matmul(Imat, a[:, curr_id]) + self.vxIv(v[:, curr_id], Imat)
 
         return (v, a, f)
 
