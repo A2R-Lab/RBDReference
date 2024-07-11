@@ -336,10 +336,10 @@ class RBDReference:
 
         Returns:
             tuple: A tuple containing the following arrays:
-                - Minv (numpy.ndarray)
-                - F (numpy.ndarray)
-                - U (numpy.ndarray)
-                - Dinv (numpy.ndarray)
+            - Minv (numpy.ndarray): Analytical inverse of the joint space inertia matrix.
+            - F (numpy.ndarray): The joint forces.
+            - U (numpy.ndarray): The joint velocities multiplied by the inverse mass matrix.
+            - Dinv (numpy.ndarray): The inverse diagonal elements of the mass matrix.
         """
         # Allocate memory
         NB = self.robot.get_num_bodies()
