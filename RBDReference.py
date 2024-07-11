@@ -471,53 +471,25 @@ class RBDReference:
         # # Backward pass
         for ind in range(NB-1,-1,-1):
             matrix_ind = ind + 5 # use for Minv, F, U, Dinv
-            print(f"n: {n}, ind: {ind}, matrix_ind: {matrix_ind}")
             subtreeInds = self.robot.get_subtree_by_id(ind)
-            adj_subtreeInds = list(np.array(subtreeInds)+5) # adjusted for matrix calculation 
-            if ind == 0: #floating base joint
+            adj_subtreeInds = list(np.array(subtreeInds)+5) # adjusted for matrix calculation
+            if ind == 0: # floating base joint check
                 # Compute U, D
                 S = self.robot.get_S_by_id(ind) # np.eye(6) for floating base
-                print(f"subtreeInd: {adj_subtreeInds}")
-                print(f"IA:\n{IA[ind]}")
                 U[ind:ind+6,:] = np.matmul(IA[ind],S) # output is 6x6 matrix
-                print(f'U:\n {U[ind:6,:]},\nS:\n{S}')
-                D = np.matmul(S.T,U[ind:6,:]) 
-                fb_Dinv = np.linalg.inv(np.matmul(S.transpose(), U[ind:ind+6,:])) # vectorized Dinv calc
-                print(fb_Dinv)
-                # Update Minv
-                # Minv[ind:6,:] = -D /
-                print(f"D {D.shape}:\n{D})")
-                print(D.shape)
-                DinvT = np.transpose(np.linalg.inv(D)).T
-                # for i in range(6):
-                #     S_div_D = np.matmul(DinvT[i],np.transpose(S[i]))
-                #     print(f"S_div_D ({S_div_D.shape}):\n{S_div_D}")
-                #     F_slice = F[ind,:,adj_subtreeInds]
-                #     print(f"F_slice ({F_slice.shape}):\n{F_slice}")
-                #     Minv[ind,adj_subtreeInds] -= S_div_D*F_slice.T
-                #     print('Example Calc: ')
-                #     print(np.matmul(S_div_D,F[ind,:,adj_subtreeInds].T))
-
-                # Minv[ind:ind+6,adj_subtreeInds] = Minv[ind:ind+6,adj_subtreeInds] - (np.einsum('ij,jkl->ikl',(S.T/D),F[ind:6,:,adj_subtreeInds])).sum(axis=1)
-                for subInd in range(n):
-                    for row in range(S.shape[1]):
-                        Minv[ind:6,subInd] -= DinvT[row,:]*np.matmul(S.transpose()[row,:],F[ind:6,:,subInd])
-                        # print(f"subind: {subInd}, row: {row}\nMinv(0:6,{subInd})")
-                        # print(fb_Dinv.transpose()[row,:]*np.matmul(S.transpose()[row,:],F[ind:6,:,subInd]))
-                
+                fb_Dinv = np.linalg.inv(np.matmul(S.transpose(), U[ind:ind+6,:])) # vectorized Dinv calc)
+                # Update Minv and subtrees - subtree calculation for Minv -= Dinv * S.T * F with clever indexing
                 Minv[ind:ind+6,ind:ind+6] = Minv[ind,ind] + fb_Dinv
-                print(f"Minv:\n{Minv}")
+                Minv[ind:ind+6,adj_subtreeInds] -= (np.matmul(np.matmul(fb_Dinv,S),F[ind:ind+6,:,adj_subtreeInds]))[-1]        
             else:
                 # Compute U, D
-                S = self.robot.get_S_by_id(ind) # NOTE What is S for floating base?
-                print(f"adj_subtreeInds: {adj_subtreeInds}")
+                S = self.robot.get_S_by_id(ind) # NOTE Can S be an np.array not np.matrix? np.matrix outdated...
                 U[matrix_ind,:] = np.matmul(IA[ind],S).reshape(6,)
                 Dinv[matrix_ind] = np.linalg.inv(np.matmul(S.transpose(),U[matrix_ind,:]))
-                # Update Minv
+                # Update Minv and subtrees 
                 Minv[matrix_ind,matrix_ind] = Dinv[matrix_ind]
-                # for subInd in subtreeInds:
-                for subInd in adj_subtreeInds:
-                    Minv[matrix_ind,subInd] -= Dinv[matrix_ind] * np.matmul(S.transpose(),F[matrix_ind,:,subInd])
+                # Deals with issue where result is np.matrix instead of np.array (can't shape np.matrix as 1 dimension)
+                Minv[matrix_ind,adj_subtreeInds] -= np.squeeze(np.array(Dinv[matrix_ind] * np.matmul(S.transpose(),F[matrix_ind,:,adj_subtreeInds].T)))
                 # update parent if applicable
                 parent_ind = self.robot.get_parent_id(ind)
                 if parent_ind != -1:
@@ -525,10 +497,9 @@ class RBDReference:
                     _q = q[inds_q]
                     Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
                     # update F
-                    # TODO Fix F
                     for subInd in adj_subtreeInds:
                         F[matrix_ind,:,subInd] += U[matrix_ind,:]*Minv[matrix_ind,subInd]
-                        F[parent_ind+5,:,subInd] += np.matmul(np.transpose(Xmat),F[matrix_ind,:,subInd]) 
+                        F[parent_ind+5,:,subInd] += np.matmul(np.transpose(Xmat),F[matrix_ind,:,subInd])
                     # update IA
                     Ia = IA[ind] - np.outer(U[matrix_ind,:],(Dinv[matrix_ind]*np.transpose(U[matrix_ind,:] )))
                     IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
