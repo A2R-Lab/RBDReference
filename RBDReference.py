@@ -459,7 +459,10 @@ class RBDReference:
         Main cause of index adjustments: floating base adds 6 vals to len(q)
         """
         NB = self.robot.get_num_bodies()
-        n = NB + 5 # floating base joint already added, count it as 6 joints instead of 1 joint.
+        if self.robot.floating_base:
+            n = NB + 5 # floating base joint already added, count it as 6 joints instead of 1 joint.
+        else:
+            n = self.robot.get_num_vel()
         Minv = np.zeros((n,n))
         F = np.zeros((n,6,n))
         U = np.zeros((n,6))
@@ -470,10 +473,15 @@ class RBDReference:
 
         # # Backward pass
         for ind in range(NB-1,-1,-1):
-            matrix_ind = ind + 5 # use for Minv, F, U, Dinv
             subtreeInds = self.robot.get_subtree_by_id(ind)
-            adj_subtreeInds = list(np.array(subtreeInds)+5) # adjusted for matrix calculation
-            if ind == 0: # floating base joint check
+            if self.robot.floating_base:
+                matrix_ind = ind + 5 # use for Minv, F, U, Dinv
+                adj_subtreeInds = list(np.array(subtreeInds)+5) # adjusted for matrix calculation
+            else:
+                matrix_ind = ind
+                adj_subtreeInds = subtreeInds
+            parent_ind = self.robot.get_parent_id(ind)
+            if parent_ind == -1 and self.robot.floating_base: # floating base joint check
                 # Compute U, D
                 S = self.robot.get_S_by_id(ind) # np.eye(6) for floating base
                 U[ind:ind+6,:] = np.matmul(IA[ind],S) # output is 6x6 matrix
@@ -485,23 +493,28 @@ class RBDReference:
                 # Compute U, D
                 S = self.robot.get_S_by_id(ind) # NOTE Can S be an np.array not np.matrix? np.matrix outdated...
                 U[matrix_ind,:] = np.matmul(IA[ind],S).reshape(6,)
-                Dinv[matrix_ind] = np.linalg.inv(np.matmul(S.transpose(),U[matrix_ind,:]))
+                # Dinv[matrix_ind] = np.linalg.inv(np.matmul(S.transpose(),U[matrix_ind,:]))
+                Dinv[matrix_ind] = np.matmul(S.transpose(),U[matrix_ind,:])
                 # Update Minv and subtrees 
-                Minv[matrix_ind,matrix_ind] = Dinv[matrix_ind]
+                Minv[matrix_ind,matrix_ind] = 1/Dinv[matrix_ind] # replace 1/Dinv if using linlg.inv
                 # Deals with issue where result is np.matrix instead of np.array (can't shape np.matrix as 1 dimension)
-                Minv[matrix_ind,adj_subtreeInds] -= np.squeeze(np.array(Dinv[matrix_ind] * np.matmul(S.transpose(),F[matrix_ind,:,adj_subtreeInds].T)))
+                Minv[matrix_ind,adj_subtreeInds] -= np.squeeze(np.array(1/(Dinv[matrix_ind]) * np.matmul(S.transpose(),F[matrix_ind,:,adj_subtreeInds].T))) # replace 1/Dinv if using linalg.inv
                 # update parent if applicable
                 parent_ind = self.robot.get_parent_id(ind)
                 if parent_ind != -1:
+                    if self.robot.floating_base:
+                        matrix_parent_ind = parent_ind+ 5
+                    else:
+                        matrix_parent_ind = parent_ind
                     inds_q = self.robot.get_joint_index_q(ind)
                     _q = q[inds_q]
                     Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
                     # update F
                     for subInd in adj_subtreeInds:
                         F[matrix_ind,:,subInd] += U[matrix_ind,:]*Minv[matrix_ind,subInd]
-                        F[parent_ind+5,:,subInd] += np.matmul(np.transpose(Xmat),F[matrix_ind,:,subInd])
+                        F[matrix_parent_ind,:,subInd] += np.matmul(np.transpose(Xmat),F[matrix_ind,:,subInd])
                     # update IA
-                    Ia = IA[ind] - np.outer(U[matrix_ind,:],(Dinv[matrix_ind]*np.transpose(U[matrix_ind,:] )))
+                    Ia = IA[ind] - np.outer(U[matrix_ind,:],((1/Dinv[matrix_ind])*np.transpose(U[matrix_ind,:] ))) # replace 1/Dinv if using linalg.inv
                     IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
                     IA[parent_ind] += IaParent
 
@@ -516,39 +529,39 @@ class RBDReference:
         Main cause of index adjustments: floating base adds 6 vals to len(q)
         """
         NB = self.robot.get_num_bodies()
-        n = NB + 5
         # # Forward pass
-
-        # Initial floating base adjustment
-        S = self.robot.get_S_by_id(0) # Contains joint information - 6x6 identity matrix
-        for ind in range(6):
-            F[ind,:,ind:] = np.outer(S[ind],Minv[ind,ind:])        # Continue forward pass adjusting numbering for shape of F,U,Dinv,Minv matrices
-        for ind in range(1,NB): 
-            matrix_ind = ind + 5
+        for ind in range(NB): 
+            if self.robot.floating_base:
+                matrix_ind = ind + 5
+            else:
+                matrix_ind = ind
             inds_q = self.robot.get_joint_index_q(ind)
             _q = q[inds_q]
             parent_ind = self.robot.get_parent_id(ind)
-            print(f'ind: {ind}, matrix_ind: {matrix_ind}, parent_ind: {parent_ind}, effecive parent: {parent_ind+5}')
             S = self.robot.get_S_by_id(ind)
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind]) #check xmat indexing
-
+            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q) 
             if parent_ind != -1:
-                Minv[matrix_ind,matrix_ind:] -= Dinv[matrix_ind]*np.matmul(np.matmul(U[matrix_ind,:].transpose(),Xmat),F[parent_ind+5,:,matrix_ind:])
+                Minv[matrix_ind,:] -= (1/Dinv[matrix_ind])*np.matmul(np.matmul(U[matrix_ind].transpose(),Xmat),F[parent_ind])
+                F[ind] = np.matmul(Xmat, F[parent_ind]) + np.outer(S,Minv[matrix_ind,:])
+            else:
+                if self.robot.floating_base:
+                    F[ind] = np.matmul(S,Minv[ind:ind+6,ind:])
+                else:
+                    # inds_v = self.robot.get_joint_index_v(ind)
+                    # # F[inds_v,:,inds_v:] = np.outer(S,Minv[inds_v,inds_v:])
+                    F[ind] = np.outer(S,Minv[ind,:])
 
-            F[matrix_ind,:,matrix_ind:] = np.outer(S,Minv[matrix_ind,matrix_ind:])
-            if parent_ind != -1:
-                F[matrix_ind,:,matrix_ind:] += np.matmul(Xmat,F[parent_ind+5,:,matrix_ind:])
 
         return Minv
     
     def test_minv(self, q, output_dense = True):
         # # Backward Pass
-        if self.robot.floating_base:
-            (Minv, F, U, Dinv) = self.minv_fb_bpass(q)
-            Minv = self.minv_fb_fpass(q, Minv, F, U, Dinv)
-        else:
-            (Minv, F, U, Dinv) = self.minv_bpass(q)
-            Minv = self.minv_fpass(q, Minv, F, U, Dinv)
+        # if self.robot.floating_base:
+        (Minv, F, U, Dinv) = self.minv_fb_bpass(q)
+        Minv = self.minv_fb_fpass(q, Minv, F, U, Dinv)
+        # else:
+        #     (Minv, F, U, Dinv) = self.minv_bpass(q)
+        #     Minv = self.minv_fpass(q, Minv, F, U, Dinv)
 
         # fill in full matrix (currently only upper triangular)
         if output_dense:
@@ -570,25 +583,20 @@ class RBDReference:
             for ind in range(NB-1,-1,-1):
                 parent_ind = self.robot.get_parent_id(ind)
                 matrix_ind = ind + 5
-                # print(f"n: {n}, ind: {ind}, parent_ind: {parent_ind}, matrix_ind: {matrix_ind}")
                 if ind > 0:
                     _q = q[self.robot.get_joint_index_q(ind)]
                     Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
-                    # print(f"Xmat_curr:\n {Xmat_curr}\nXmat_parent:\n{Xmat_parent}\nXmat:\n{Xmat}")
                     S = self.robot.get_S_by_id(ind)
                     IC[parent_ind] = IC[parent_ind] + np.matmul(np.matmul(Xmat.T,IC[ind]),Xmat)
                     fh = np.matmul(IC[ind],S)
                     H[matrix_ind,matrix_ind] = np.matmul(S.T,fh)
                     j = ind
-                    # print(f"H: {H}\nXmat:\n{Xmat}\nS:{S}\nIC[ind]:\n{IC[parent_ind]}\nH[{matrix_ind},{matrix_ind}]:{H[matrix_ind,matrix_ind]}\nfh:\n{fh}")
                     while self.robot.get_parent_id(j) > 0:
                         Xmat = self.robot.get_Xmat_Func_by_id(j)(q[self.robot.get_joint_index_q(j)])
                         fh = np.matmul(Xmat.T,fh)
                         j = self.robot.get_parent_id(j)
                         H[matrix_ind,j+5] = np.matmul(fh.T,S)
                         H[j+5,matrix_ind] = H[matrix_ind,j+5]
-                        # print(f'fh (while j={j}):\n {fh}')
-                        # print(f"H[{matrix_ind},{j+5}]={H[matrix_ind,j+5]}")
                     # # treat floating base 6 dof joint
                     inds_q = self.robot.get_joint_index_q(j)
                     _q = q[inds_q]
@@ -597,7 +605,6 @@ class RBDReference:
                     fh = np.matmul(Xmat.T, fh)
                     H[matrix_ind,:6] = np.matmul(fh.T,S)
                     H[:6,matrix_ind] = H[matrix_ind,:6].T
-                    # print(f"fh.T:\n {fh}\nS:\n{S}")
                 else:
                     ind = 0
                     inds_q = self.robot.get_joint_index_q(ind)
@@ -606,7 +613,6 @@ class RBDReference:
                     S = self.robot.get_S_by_id(ind)
                     parent_ind = self.robot.get_parent_id(ind)
                     fh = np.matmul(IC[ind],S)
-                    # print(f"fh ({fh.shape}): {fh}\n,S ({S.shape}): {S}, IC[ind] ({(IC[ind]).shape}): {IC[ind]}")
                     H[ind:6,ind:6] = np.matmul(S.T,fh)
         else:           
         ## Main implementation
