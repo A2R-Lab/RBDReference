@@ -406,7 +406,7 @@ class RBDReference:
         Performs a forward pass to compute the inverse mass matrix Minv.
 
         NOTE:
-        Treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute.
+        If Floating base, treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute.
         Thus, allocate memroy and assign a "matrix_ind" shifting indices to match 6 joint representation. 
         See Spatial_v2_extended algorithm for alterations to fpass algorithm.
         Additionally, made convenient shift to F[i] accessing based on matrix structure in math.
@@ -467,126 +467,23 @@ class RBDReference:
 
         return Minv
     
-    # def minv_fb_bpass(self,q):
-    #     """Minv bpass floating base case, main adjustments are due to indexing.
-    #     Treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute. 
-    #     At the end of bpass when joint id = 0 = floating_base joint, 6 loop pass treating floating 
-    #      - base joint as 6 joints. Shift all indices to match.
-    #     NOTE: indexing from S, subtreeInds, and any other self.robot calls must have indices < NB not n = len(q). 
-    #     Main cause of index adjustments: floating base adds 6 vals to len(q)
-    #     """
-    #     NB = self.robot.get_num_bodies()
-    #     if self.robot.floating_base: n = NB + 5 # count fb_joint as 6 instead of 1 joint else set n = len(qd)
-    #     else: n = self.robot.get_num_vel()
-    #     Minv = np.zeros((n,n))
-    #     F = np.zeros((n,6,n))
-    #     U = np.zeros((n,6))
-    #     Dinv = np.zeros(n)
+    def crba(self, q, qd):
+        """
+        Computes the Composite Rigid Body Algorithm (CRBA) to calculate the joint-space inertia matrix.
+        # Based on Featherstone implementation of CRBA p.182 in rigid body dynamics algorithms book. 
 
-    #     # set initial IA to I
-    #     IA = copy.deepcopy(self.robot.get_Imats_dict_by_id())
+        NOTE:
+        If Floating base, treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute.
+        Thus, allocate memroy and assign a "matrix_ind" shifting indices to match 6 joint representation. 
+        Propagate changes to any indexing of j, F, U, Dinv, Minv, etc. to match 6 joint representation.
 
-    #     # # Backward pass
-    #     for ind in range(NB-1,-1,-1):
-    #         subtreeInds = self.robot.get_subtree_by_id(ind)
-    #         if self.robot.floating_base:
-    #             matrix_ind = ind + 5 # use for Minv, F, U, Dinv
-    #             adj_subtreeInds = list(np.array(subtreeInds)+5) # adjusted for matrix calculation
-    #         else:
-    #             matrix_ind = ind
-    #             adj_subtreeInds = subtreeInds
-    #         parent_ind = self.robot.get_parent_id(ind)
-    #         if parent_ind == -1 and self.robot.floating_base: # floating base joint check
-    #             # Compute U, D
-    #             S = self.robot.get_S_by_id(ind) # np.eye(6) for floating base
-    #             U[ind:ind+6,:] = np.matmul(IA[ind],S) # output is 6x6 matrix
-    #             fb_Dinv = np.linalg.inv(np.matmul(S.transpose(), U[ind:ind+6,:])) # vectorized Dinv calc)
-    #             # Update Minv and subtrees - subtree calculation for Minv -= Dinv * S.T * F with clever indexing
-    #             Minv[ind:ind+6,ind:ind+6] = Minv[ind,ind] + fb_Dinv
-    #             Minv[ind:ind+6,adj_subtreeInds] -= (np.matmul(np.matmul(fb_Dinv,S),F[ind:ind+6,:,adj_subtreeInds]))[-1]        
-    #         else:
-    #             # Compute U, D
-    #             S = self.robot.get_S_by_id(ind) # NOTE Can S be an np.array not np.matrix? np.matrix outdated...
-    #             U[matrix_ind,:] = np.matmul(IA[ind],S).reshape(6,)
-    #             # Dinv[matrix_ind] = np.linalg.inv(np.matmul(S.transpose(),U[matrix_ind,:]))
-    #             Dinv[matrix_ind] = np.matmul(S.transpose(),U[matrix_ind,:])
-    #             # Update Minv and subtrees 
-    #             Minv[matrix_ind,matrix_ind] = 1/Dinv[matrix_ind] # replace 1/Dinv if using linlg.inv
-    #             # Deals with issue where result is np.matrix instead of np.array (can't shape np.matrix as 1 dimension)
-    #             Minv[matrix_ind,adj_subtreeInds] -= np.squeeze(np.array(1/(Dinv[matrix_ind]) * np.matmul(S.transpose(),F[matrix_ind,:,adj_subtreeInds].T))) # replace 1/Dinv if using linalg.inv
-    #             # update parent if applicable
-    #             parent_ind = self.robot.get_parent_id(ind)
-    #             if parent_ind != -1:
-    #                 if self.robot.floating_base:
-    #                     matrix_parent_ind = parent_ind+ 5
-    #                 else:
-    #                     matrix_parent_ind = parent_ind
-    #                 inds_q = self.robot.get_joint_index_q(ind)
-    #                 _q = q[inds_q]
-    #                 Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
-    #                 # update F
-    #                 for subInd in adj_subtreeInds:
-    #                     F[matrix_ind,:,subInd] += U[matrix_ind,:]*Minv[matrix_ind,subInd]
-    #                     F[matrix_parent_ind,:,subInd] += np.matmul(np.transpose(Xmat),F[matrix_ind,:,subInd])
-    #                 # update IA
-    #                 Ia = IA[ind] - np.outer(U[matrix_ind,:],((1/Dinv[matrix_ind])*np.transpose(U[matrix_ind,:] ))) # replace 1/Dinv if using linalg.inv
-    #                 IaParent = np.matmul(np.transpose(Xmat),np.matmul(Ia,Xmat))
-    #                 IA[parent_ind] += IaParent
+        Parameters:
+        - q (numpy.ndarray): Joint positions.
+        - qd (numpy.ndarray): Joint velocities.
 
-    #     return Minv, F, U, Dinv
-    
-    # def minv_fb_fpass(self, q, Minv, F, U, Dinv):
-    #     """Minv foward pass floating base case.
-    #     Treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute. 
-    #     At the beginning of the forward pass, 6 loop pass treating floating base joint as 6 joints, then continue 
-    #     - forward pass with shifted indices.
-    #     NOTE: indexing from S, subtreeInds, and any other self.robot calls must have indices < NB not n = len(q). 
-    #     Main cause of index adjustments: floating base adds 6 vals to len(q)
-    #     """
-    #     NB = self.robot.get_num_bodies()
-    #     # # Forward pass
-    #     for ind in range(NB): 
-    #         if self.robot.floating_base:
-    #             matrix_ind = ind + 5
-    #         else:
-    #             matrix_ind = ind
-    #         inds_q = self.robot.get_joint_index_q(ind)
-    #         _q = q[inds_q]
-    #         parent_ind = self.robot.get_parent_id(ind)
-    #         S = self.robot.get_S_by_id(ind)
-    #         Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q) 
-    #         if parent_ind != -1:
-    #             Minv[matrix_ind,:] -= (1/Dinv[matrix_ind])*np.matmul(np.matmul(U[matrix_ind].transpose(),Xmat),F[parent_ind])
-    #             F[ind] = np.matmul(Xmat, F[parent_ind]) + np.outer(S,Minv[matrix_ind,:])
-    #         else:
-    #             if self.robot.floating_base:
-    #                 F[ind] = np.matmul(S,Minv[ind:ind+6,ind:])
-    #             else:
-    #                 F[ind] = np.outer(S,Minv[ind,:])
-
-
-    #     return Minv
-    
-    # def test_minv(self, q, output_dense = True):
-    #     # # Backward Pass
-    #     # if self.robot.floating_base:
-    #     (Minv, F, U, Dinv) = self.minv_fb_bpass(q)
-    #     Minv = self.minv_fb_fpass(q, Minv, F, U, Dinv)
-    #     # else:
-    #     #     (Minv, F, U, Dinv) = self.minv_bpass(q)
-    #     #     Minv = self.minv_fpass(q, Minv, F, U, Dinv)
-
-    #     # fill in full matrix (currently only upper triangular)
-    #     if output_dense:
-    #         NB = self.robot.get_num_bodies()
-    #         for col in range(NB):
-    #             for row in range(NB):
-    #                 if col < row:
-    #                     Minv[row,col] = Minv[col,row]
-
-    #     return Minv
-    
-    def crba( self, q, qd):
+        Returns:
+        - H (numpy.ndarray): Joint-space inertia matrix.
+        """
         if self.robot.floating_base:
             NB = self.robot.get_num_bodies()
             n = len(qd)
@@ -628,7 +525,7 @@ class RBDReference:
                     fh = np.matmul(IC[ind],S)
                     H[ind:6,ind:6] = np.matmul(S.T,fh)
         else:           
-        ## Main implementation
+            # # Fixed base implmentation of CRBA
             n = len(qd)
             IC = copy.deepcopy(self.robot.get_Imats_dict_by_id())# composite inertia calculation
             for ind in range(n-1,-1,-1):
