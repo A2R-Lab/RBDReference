@@ -105,27 +105,12 @@ class RBDReference:
         #   0     0     0   v(2)    0  -v(0)
         #   0     0     0  -v(1)  v(0)    0
         result = np.zeros((6))
-        result[0] = (
-            -fxVec[2] * timesVec[1]
-            + fxVec[1] * timesVec[2]
-            - fxVec[5] * timesVec[4]
-            + fxVec[4] * timesVec[5]
-        )
-        result[1] = (
-            fxVec[2] * timesVec[0]
-            - fxVec[0] * timesVec[2]
-            + fxVec[5] * timesVec[3]
-            - fxVec[3] * timesVec[5]
-        )
-        result[2] = (
-            -fxVec[1] * timesVec[0]
-            + fxVec[0] * timesVec[1]
-            - fxVec[4] * timesVec[3]
-            + fxVec[3] * timesVec[4]
-        )
-        result[3] = -fxVec[2] * timesVec[4] + fxVec[1] * timesVec[5]
-        result[4] = fxVec[2] * timesVec[3] - fxVec[0] * timesVec[5]
-        result[5] = -fxVec[1] * timesVec[3] + fxVec[0] * timesVec[4]
+        result[0] = -fxVec[2] * timesVec[1] + fxVec[1] * timesVec[2] - fxVec[5] * timesVec[4] + fxVec[4] * timesVec[5]
+        result[1] =  fxVec[2] * timesVec[0] - fxVec[0] * timesVec[2] + fxVec[5] * timesVec[3] - fxVec[3] * timesVec[5]
+        result[2] = -fxVec[1] * timesVec[0] + fxVec[0] * timesVec[1] - fxVec[4] * timesVec[3] + fxVec[3] * timesVec[4]
+        result[3] =                                                     -fxVec[2] * timesVec[4] + fxVec[1] * timesVec[5]
+        result[4] =                                                      fxVec[2] * timesVec[3] - fxVec[0] * timesVec[5]
+        result[5] =                                                     -fxVec[1] * timesVec[3] + fxVec[0] * timesVec[4]
         return result
 
     def fxS(self, S, vec, alpha=1.0):
@@ -134,27 +119,12 @@ class RBDReference:
     def vxIv(self, vec, Imat):
         temp = np.matmul(Imat, vec)
         vecXIvec = np.zeros((6))
-        vecXIvec[0] = (
-            -vec[2] * temp[1]
-            + vec[1] * temp[2]
-            + -vec[2 + 3] * temp[1 + 3]
-            + vec[1 + 3] * temp[2 + 3]
-        )
-        vecXIvec[1] = (
-            vec[2] * temp[0]
-            + -vec[0] * temp[2]
-            + vec[2 + 3] * temp[0 + 3]
-            + -vec[0 + 3] * temp[2 + 3]
-        )
-        vecXIvec[2] = (
-            -vec[1] * temp[0]
-            + vec[0] * temp[1]
-            + -vec[1 + 3] * temp[0 + 3]
-            + vec[0 + 3] * temp[1 + 3]
-        )
-        vecXIvec[3] = -vec[2] * temp[1 + 3] + vec[1] * temp[2 + 3]
-        vecXIvec[4] = vec[2] * temp[0 + 3] + -vec[0] * temp[2 + 3]
-        vecXIvec[5] = -vec[1] * temp[0 + 3] + vec[0] * temp[1 + 3]
+        vecXIvec[0] = -vec[2]*temp[1]   +  vec[1]*temp[2] + -vec[2+3]*temp[1+3] +  vec[1+3]*temp[2+3]
+        vecXIvec[1] =  vec[2]*temp[0]   + -vec[0]*temp[2] +  vec[2+3]*temp[0+3] + -vec[0+3]*temp[2+3]
+        vecXIvec[2] = -vec[1]*temp[0]   +  vec[0]*temp[1] + -vec[1+3]*temp[0+3] + vec[0+3]*temp[1+3]
+        vecXIvec[3] = -vec[2]*temp[1+3] +  vec[1]*temp[2+3]
+        vecXIvec[4] =  vec[2]*temp[0+3] + -vec[0]*temp[2+3]
+        vecXIvec[5] = -vec[1]*temp[0+3] +  vec[0]*temp[1+3]
         return vecXIvec
 
     def rnea_fpass(self, q, qd, qdd=None, GRAVITY=-9.81):
@@ -438,9 +408,7 @@ class RBDReference:
                 S = self.robot.get_S_by_id(
                     ind
                 )  # NOTE Can S be an np.array not np.matrix? np.matrix outdated...
-                U[matrix_ind, :] = np.matmul(IA[ind], S).reshape(
-                    6,
-                )
+                U[matrix_ind, :] = np.matmul(IA[ind], S).reshape(6,)
                 Dinv[matrix_ind] = np.matmul(S.transpose(), U[matrix_ind, :])
                 # Update Minv and subtrees
                 Minv[matrix_ind, matrix_ind] = 1 / Dinv[matrix_ind]
@@ -570,9 +538,7 @@ class RBDReference:
         if self.robot.floating_base:
             NB = self.robot.get_num_bodies()
             n = len(qd)
-            H = np.zeros(
-                (n, n)
-            )  # number of effective joints with floating base joint represented as 6 joints
+            H = np.zeros((n, n))
 
             IC = copy.deepcopy(
                 self.robot.get_Imats_dict_by_id()
@@ -635,7 +601,6 @@ class RBDReference:
             for ind in range(n):
                 S = self.robot.get_S_by_id(ind)
                 fh = np.matmul(IC[ind], S)
-                # print(f"fh ({fh.shape}): {fh}\n,S ({S.shape}): {S}, IC[ind] ({(IC[ind]).shape}): {IC[ind]}")
                 H[ind, ind] = np.matmul(S.T, fh)
                 j = ind
 
