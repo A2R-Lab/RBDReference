@@ -15,8 +15,25 @@ Currently implemented algorithms include the:
 + Recursive Newton Euler Algorithm (RNEA): ```(c,v,a,f) = rbdReference.rnea(q, qd, qdd = None, GRAVITY = -9.81)```
 + The Gradient of the RNEA: ```dc_du = rnea_grad(q, qd, qdd = None, GRAVITY = -9.81)``` where ```dc_du = np.hstack((dc_dq,dc_dqd))```
 + The Direct Inverse of the Mass Matrix Algorithm: ```Minv = rbdReference.minv(q, output_dense = True)```
++ The Composite Rigid Body Algorithm: ``` M = rbdReference.crba(q,qd)```
 
 We also include functions that break these algorithms down into there different passes and by their output types (dq vs dqd) to enable easier testing of downstream GPU, FPGA, and accelerator implementations.
+
+## Testing Algorithms on URDFs
+Run the following in terminal from forked repo here at base of the GRiD working directory in the floating base branch. 
+Run any URDF tests by replacing the desired urdf with the terminal scripts below. 
+
+iiwa14.urdf testing
+   ```python printReferenceValues.py iiwa.urdf -f```
+
+This runs the print printReferenceValues.py script located https://github.com/A2R-Lab/GRiD/blob/floating-base/printReferenceValues.py. This will output values for `RNEA`, `Minv`, `CRBA`, `RNEA_grad`, and more. 
+
+Once can test algorithm outputs using Matlab Spatial V2 using the following sequence:
+1. Run ```python compare_rnea_fb_spatial.py INSERT_URDF.urdf -f``` which will print the exact q, qd, qdd inputs for Spatial V2 floating base algorithms. (Matlab expects floating base joint to input quaternion xyzw and xyz location of Fb joint)
+2. After generating compatible inputs with Matlab, create a floating base URDF.m file by running ```python generate_spatial_model.py INSERT_URDF.urdf -f```. 
+3. Place the newly generated `URDF.m` file in the working directory of spatial_v2_extended.
+4. Run the script after ensuring spatial directories are sourced correctly.
+5. Suggested testing includes `RNEA (ID)`, `HandC`, `Hinverse`, and more.
 
 ## Instalation Instructions::
 The only external dependency is ```numpy``` which can be automatically installed by running:
