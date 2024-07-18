@@ -8,6 +8,50 @@ class RBDReference:
     def __init__(self, robotObj):
         self.robot = robotObj
 
+    def crm(v):
+        # for any vector v, computes the operator v x 
+        # vec x = [wx   0]
+        #         [vox wx]
+        #(crm in spatial_v2_extended)
+        if len(v) == 6:
+            vcross = np.array([0, -v[3], v[2], 0,0,0], 
+                              [v[3], 0, -v[1], 0,0,0], 
+                              [-v[2], v[1], 0, 0,0,0], 
+                              [0, -v[6], v[5], 0,-v[3],v[2]], 
+                              [v[6], 0, -v[4], v[3],0,-v[1]], 
+                              [-v[5], v[4], 0, -v[2],v[1],0])
+        else:
+            vcross = np.array([0, 0, 0], [v[3], 0, -v[1]], [-v[2], v[1], 0])
+        return vcross
+    
+    def crf(v):
+        """
+        crf spatial/planar cross-product operator (force).
+        crf(v)  calculates the 6x6 (or 3x3) matrix such that the expression.
+        crf(v)*f is the cross product of the motion vector v with the force vector f.
+        vector v is taken to be a spatial vector, and the return value is a 6x6 matrix.
+        Otherwise, v is taken to be a planar vector, and the return value is 3x3.
+        """
+        vcross = -self.crm(v).T
+        return vcross
+    
+    def icrf(self, v):
+        #helper function defined in spatial_v2_extended library, called by idsva() and rnea_derivatives()
+        res = [[0,  -v[2],  v[1],    0,  -v[5],  v[4]],
+            [v[2],    0,  -v[0],  v[5],    0,  -v[3]],
+            [-v[1],  v[0],    0,  -v[4],  v[3],    0],
+            [    0,  -v[5],  v[4],    0,    0,    0],
+            [ v[5],    0,  -v[3],    0,    0,    0],
+            [-v[4],  v[3],    0,    0,    0,    0]]
+        return -np.asmatrix(res)
+    
+    def factor_functions(self, I, v, number=3):
+        #helper function defined in spatial_v2_extended library, called by idsva() and rnea_derivatives()
+        if number == 1:
+            B = self.crf(v) * I
+
+        return B
+
     def mxS(self, S, vec):
         result = np.zeros((6))
         if not S[0] == 0:
@@ -208,7 +252,7 @@ class RBDReference:
 
         for ind in range(n):
             parent_ind = self.robot.get_parent_id(ind)
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+            Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind]) # TODO: Index properly using get_joint_index_q
             S = self.robot.get_S_by_id(ind)
             # dv_du = X * dv_du_parent + (if c == ind){mxS(Xvp)}
             if (
@@ -607,3 +651,104 @@ class RBDReference:
                     H[j, ind] = H[ind, j]
 
         return H
+    
+    def rnea_derivatives(self, q,qd,qdd,GRAVITY=-9.81):
+        """
+        Computes the derivatives of the RNEA algorithm with respect to q, qd, and qdd.
+        """
+        # Compute the RNEA
+                # allocate memory
+        NB = self.robot.get_num_bodies()
+        v = np.zeros((6, NB))
+        a = np.zeros((6, NB))
+        f = np.zeros((6, NB))
+        IC = {}
+        BC = {}
+        S_ = {}
+        Sd = {}
+        Sdd = {}
+        Sj = {}
+        gravity_vec = np.zeros((6))
+        gravity_vec[5] = -GRAVITY  # a_base is gravity vec
+
+        # # RNEA calculation
+
+        # RNEA Forward Pass 
+        for curr_id in range(NB):
+            parent_id = self.robot.get_parent_id(curr_id)
+            S = self.robot.get_S_by_id(curr_id)
+            inds_q = self.robot.get_joint_index_q(curr_id)
+            _q = q[inds_q]
+            Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+            # compute v and a
+            if parent_id == -1:  # parent is fixed base or world
+                # v_base is zero so v[:,ind] remains 0
+                a[:, curr_id] = np.matmul(Xmat, gravity_vec)
+            else:
+                v[:, curr_id] = np.matmul(Xmat, v[:, parent_id])
+                a[:, curr_id] = np.matmul(Xmat, a[:, parent_id])
+            inds_v = self.robot.get_joint_index_v(curr_id)
+            _qd = qd[inds_v]
+            vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
+            v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
+            a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
+            if qdd is not None:
+                _qdd = qdd[inds_v]
+                aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
+                a[:, curr_id] += np.squeeze(np.array(aJ))  # reduces shape to (6,) matching a[:,curr_id]
+            
+            # Matlab changes
+            Xdown = np.linalg.inv(Xmat)
+            S_[curr_id] = np.matmul(Xdown, S)
+            vJ = np.matmul(S_[curr_id], np.transpose(np.matrix(_qd)))
+            aJ = np.matmul(self.crm(v[:, curr_id]), vJ) + np.matmul(S_[curr_id], np.transpose(np.matrix(_qdd)))
+            Sd[curr_id] = np.matmul(self.crm(v[:, curr_id]), S_[curr_id])
+            Sdd[curr_id] = np.matmul(self.crm(a[:, curr_id]),S_[curr_id]) + np.matmul(self.crm(v[:, curr_id]),Sd[curr_id])
+            Sj[curr_id] = 2 * Sd[curr_id] + np.matmul(self.crm(vJ),S_[curr_id])
+
+            v[:, curr_id] += np.squeeze(np.array(vJ))
+            a[:, curr_id] += np.squeeze(np.array(aJ))
+
+            Imat = self.robot.get_Imat_by_id(curr_id)
+            IC[curr_id] = np.matmul(Xmat.T,np.matmul(Imat,Xmat))
+            BC[curr_id] = 2 * self.factor_functions(IC[curr_id], v[:,curr_id])
+            # compute f
+            f[:, curr_id] = np.matmul(Imat, a[:, curr_id]) + self.vxIv(v[:, curr_id], Imat)
+
+        n = len(qd)
+        dc_dq = np.zeros((n, n))
+        dc_dqd = np.zeros((n, n))
+        tmp1 = np.zeros((6,n))
+        tmp2 = np.zeros((6,n))
+        tmp3 = np.zeros((6,n))
+        tmp4 = np.zeros((6,n))
+
+        for curr_id in range(NB-1, -1, -1):
+            # NOTE add matrix inds for floating base
+            ii = curr_id + 5
+
+            tmp1[:,ii] = np.matmul(IC[curr_id], S_[curr_id])
+            tmp2[:,ii] = np.matmul(BC[curr_id], S_[curr_id]) + np.matmul(IC[curr_id], Sj[curr_id])
+            tmp3[:,ii] = np.matmul(BC[curr_id], Sd[curr_id]) + np.matmul(IC[curr_id], Sdd[curr_id]) + np.matmul(self.icrf(f[:,curr_id]), S_[curr_id])
+            tmp4[:,ii] = np.matmul(BC[curr_id].T, S_[curr_id])
+
+
+            # jj = model.subtree_vinds{i}
+            subtreeInds = self.robot.get_subtree_by_id(curr_id)
+            adj_subtreeInds = list(np.array(subtreeInds) + 5)
+            S = self.robot.get_S_by_id(curr_id)
+            dc_dq[ii,adj_subtreeInds] = np.matmul(S.T, tmp3[:,adj_subtreeInds])
+            dc_dq[adj_subtreeInds,ii] = (np.matmul(tmp1[:,adj_subtreeInds].T, Sd[curr_id]) 
+                                         + np.matmul(tmp4[:,adj_subtreeInds].T,S))
+            
+            dc_dqd[ii,adj_subtreeInds] = np.matmul(S.T, tmp2[:,adj_subtreeInds])
+            dc_dqd[adj_subtreeInds,ii] = (np.matmul(tmp1[:,adj_subtreeInds].T, Sj[curr_id]) 
+                                         + np.matmul(tmp4[:,adj_subtreeInds].T,S))
+            
+            parent_id = self.robot.get_parent_id(curr_id)
+            if parent_id != -1: # if parent is not floating base parent
+                IC[parent_id] += IC[curr_id]
+                BC[parent_id] += BC[curr_id]
+                f[:, parent_id] += f[:, curr_id]
+
+        return dc_dq, dc_dqd
