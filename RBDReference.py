@@ -8,23 +8,26 @@ class RBDReference:
     def __init__(self, robotObj):
         self.robot = robotObj
 
-    def crm(v):
+    def crm(self,v):
         # for any vector v, computes the operator v x 
         # vec x = [wx   0]
         #         [vox wx]
         #(crm in spatial_v2_extended)
         if len(v) == 6:
-            vcross = np.array([0, -v[3], v[2], 0,0,0], 
-                              [v[3], 0, -v[1], 0,0,0], 
-                              [-v[2], v[1], 0, 0,0,0], 
-                              [0, -v[6], v[5], 0,-v[3],v[2]], 
-                              [v[6], 0, -v[4], v[3],0,-v[1]], 
-                              [-v[5], v[4], 0, -v[2],v[1],0])
+            v = v.reshape((6,))
+            vcross = np.array([[0, -v[2], v[1], 0,0,0], 
+                              [v[2], 0, -v[0], 0,0,0], 
+                              [-v[1], v[0], 0, 0,0,0], 
+                              [0, -v[5], v[4], 0,-v[2],v[1]], 
+                              [v[5], 0, -v[3], v[2],0,-v[0]], 
+                              [-v[4], v[3], 0, -v[1],v[0],0]])
         else:
-            vcross = np.array([0, 0, 0], [v[3], 0, -v[1]], [-v[2], v[1], 0])
+            vcross = np.array( [ [0, 0, 0], 
+                                 [v[2], 0, -v[0]],
+                                 [-v[1], v[0], 0] ] )
         return vcross
     
-    def crf(v):
+    def crf(self, v):
         """
         crf spatial/planar cross-product operator (force).
         crf(v)  calculates the 6x6 (or 3x3) matrix such that the expression.
@@ -46,9 +49,14 @@ class RBDReference:
         return -np.asmatrix(res)
     
     def factor_functions(self, I, v, number=3):
-        #helper function defined in spatial_v2_extended library, called by idsva() and rnea_derivatives()
+        # helper function defined in spatial_v2_extended library, called by idsva() and rnea_derivatives()
         if number == 1:
             B = self.crf(v) * I
+        elif number == 2:
+            B = self.icrf(np.matmul(I,v)) - I * self.crm(v)
+        else:
+            B = 1/2 * (np.matmul(self.crf(v),I) + self.icrf(np.matmul(I,v)) - np.matmul(I, self.crm(v)))
+            #B = 1/2 * (self.crf(v) @ I + self.icrf(I @ v) - I @ self.crm(v)
 
         return B
 
@@ -668,6 +676,7 @@ class RBDReference:
         Sd = {}
         Sdd = {}
         Sj = {}
+        Xup0 = {}
         gravity_vec = np.zeros((6))
         gravity_vec[5] = -GRAVITY  # a_base is gravity vec
 
@@ -683,37 +692,42 @@ class RBDReference:
             # compute v and a
             if parent_id == -1:  # parent is fixed base or world
                 # v_base is zero so v[:,ind] remains 0
-                a[:, curr_id] = np.matmul(Xmat, gravity_vec)
+                a[:, curr_id] = gravity_vec
+                Xup0[curr_id] = Xmat
             else:
-                v[:, curr_id] = np.matmul(Xmat, v[:, parent_id])
-                a[:, curr_id] = np.matmul(Xmat, a[:, parent_id])
+                v[:, curr_id] = v[:, parent_id]
+                a[:, curr_id] = a[:, parent_id]
+                Xup0[curr_id] = np.matmul(Xmat, Xup0[parent_id])
+            print(f"v[:,{curr_id}]: {v[:,curr_id]}\na[:,{curr_id}]: {a[:,curr_id]}\n")
             inds_v = self.robot.get_joint_index_v(curr_id)
-            _qd = qd[inds_v]
-            vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
-            v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
-            a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
-            if qdd is not None:
-                _qdd = qdd[inds_v]
-                aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
-                a[:, curr_id] += np.squeeze(np.array(aJ))  # reduces shape to (6,) matching a[:,curr_id]
-            
-            # Matlab changes
-            Xdown = np.linalg.inv(Xmat)
+            _qd = np.matrix(qd[inds_v])
+            _qdd = np.matrix(qdd[inds_v])
+
+            Xdown = np.linalg.inv(Xup0[curr_id])
             S_[curr_id] = np.matmul(Xdown, S)
-            vJ = np.matmul(S_[curr_id], np.transpose(np.matrix(_qd)))
-            aJ = np.matmul(self.crm(v[:, curr_id]), vJ) + np.matmul(S_[curr_id], np.transpose(np.matrix(_qdd)))
+            print(f"S_[{curr_id}]: {S_[curr_id].shape}\n_qd: {_qd.shape}")
+            if parent_id == -1:
+                vJ = np.matmul(S_[curr_id], _qd.T)
+                aJ = np.matmul(self.crm(v[:, curr_id]), vJ) + np.matmul(S_[curr_id], _qdd.T)
+            else:
+                vJ = S_[curr_id] * _qd
+                aJ = np.matmul(self.crm(v[:, curr_id]), vJ) + S_[curr_id] * _qdd.T
+            
             Sd[curr_id] = np.matmul(self.crm(v[:, curr_id]), S_[curr_id])
             Sdd[curr_id] = np.matmul(self.crm(a[:, curr_id]),S_[curr_id]) + np.matmul(self.crm(v[:, curr_id]),Sd[curr_id])
-            Sj[curr_id] = 2 * Sd[curr_id] + np.matmul(self.crm(vJ),S_[curr_id])
+            Sj[curr_id] = 2 * Sd[curr_id] + np.matmul(self.crm(np.squeeze(np.array(vJ))),S_[curr_id])
 
             v[:, curr_id] += np.squeeze(np.array(vJ))
             a[:, curr_id] += np.squeeze(np.array(aJ))
 
+            # TODO Check these calculations...
             Imat = self.robot.get_Imat_by_id(curr_id)
-            IC[curr_id] = np.matmul(Xmat.T,np.matmul(Imat,Xmat))
+            IC[curr_id] = np.matmul(Xup0[curr_id].T,np.matmul(Imat,Xup0[curr_id]))
             BC[curr_id] = 2 * self.factor_functions(IC[curr_id], v[:,curr_id])
             # compute f
-            f[:, curr_id] = np.matmul(Imat, a[:, curr_id]) + self.vxIv(v[:, curr_id], Imat)
+            f[:, curr_id] = np.matmul(IC[curr_id], a[:, curr_id]) + self.vxIv(v[:, curr_id], IC[curr_id])
+            # f[:, curr_id] = np.matmul(IC[curr_id], a[:, curr_id]) + np.matmul(self.crf(v[:, curr_id]), np.matmul(IC[curr_id],v[:,curr_id]) ) #same as line above
+
 
         n = len(qd)
         dc_dq = np.zeros((n, n))
@@ -723,32 +737,71 @@ class RBDReference:
         tmp3 = np.zeros((6,n))
         tmp4 = np.zeros((6,n))
 
-        for curr_id in range(NB-1, -1, -1):
-            # NOTE add matrix inds for floating base
+        # TODO Fix below section
+        for curr_id in range(NB-1, 0, -1): # try 0 instead of -1
             ii = curr_id + 5
+            # print(f"IC[{curr_id}]: {IC[curr_id].shape}\nS_[{curr_id}]: {S_[curr_id].shape}\nBC[{curr_id}]: {BC[curr_id].shape}\nSj[{curr_id}]: {Sj[curr_id].shape}\nSd[{curr_id}]: {Sd[curr_id].shape}\nSdd[{curr_id}]: {Sdd[curr_id].shape}")
+            tmp1[:,ii] = np.squeeze(np.array(np.matmul(IC[curr_id], S_[curr_id])))
+            tmp2[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id], S_[curr_id]) + np.matmul(IC[curr_id], Sj[curr_id])))
+            tmp3[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id], Sd[curr_id]) + np.matmul(IC[curr_id], Sdd[curr_id]) + np.matmul(self.icrf(f[:,curr_id]), S_[curr_id])))
+            tmp4[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id].T, S_[curr_id])))
 
-            tmp1[:,ii] = np.matmul(IC[curr_id], S_[curr_id])
-            tmp2[:,ii] = np.matmul(BC[curr_id], S_[curr_id]) + np.matmul(IC[curr_id], Sj[curr_id])
-            tmp3[:,ii] = np.matmul(BC[curr_id], Sd[curr_id]) + np.matmul(IC[curr_id], Sdd[curr_id]) + np.matmul(self.icrf(f[:,curr_id]), S_[curr_id])
-            tmp4[:,ii] = np.matmul(BC[curr_id].T, S_[curr_id])
-
-
+            print(f"tmp1[:,{ii}]\n{tmp1[:,ii]}\ntmp2[:,{ii}]\n{tmp2[:,ii]}\ntmp3[:,{ii}]\n{tmp3[:,ii]}\ntmp4[:,{ii}]\n{tmp4[:,ii]}\n")
+            print(f"vinds: {self.robot.get_joint_index_v(curr_id)}\n")
             # jj = model.subtree_vinds{i}
             subtreeInds = self.robot.get_subtree_by_id(curr_id)
-            adj_subtreeInds = list(np.array(subtreeInds) + 5)
+            if curr_id == NB-1:
+                adj_subtreeInds = list(np.array(subtreeInds) + 5)
+            else: 
+                adj_subtreeInds = list(np.array(subtreeInds[1:]) + 5)
             S = self.robot.get_S_by_id(curr_id)
-            dc_dq[ii,adj_subtreeInds] = np.matmul(S.T, tmp3[:,adj_subtreeInds])
-            dc_dq[adj_subtreeInds,ii] = (np.matmul(tmp1[:,adj_subtreeInds].T, Sd[curr_id]) 
-                                         + np.matmul(tmp4[:,adj_subtreeInds].T,S))
+            dc_dq[ii,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp3[:,adj_subtreeInds])
+            dc_dq[adj_subtreeInds,ii] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sdd[curr_id]) 
+                                         + np.matmul(tmp4[:,adj_subtreeInds].T,Sd[curr_id]))))
             
-            dc_dqd[ii,adj_subtreeInds] = np.matmul(S.T, tmp2[:,adj_subtreeInds])
-            dc_dqd[adj_subtreeInds,ii] = (np.matmul(tmp1[:,adj_subtreeInds].T, Sj[curr_id]) 
-                                         + np.matmul(tmp4[:,adj_subtreeInds].T,S))
+            dc_dqd[ii,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp2[:,adj_subtreeInds])
+            dc_dqd[adj_subtreeInds,ii] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sj[curr_id]) 
+                                         + np.matmul(tmp4[:,adj_subtreeInds].T,S_[curr_id]))))
             
             parent_id = self.robot.get_parent_id(curr_id)
             if parent_id != -1: # if parent is not floating base parent
                 IC[parent_id] += IC[curr_id]
                 BC[parent_id] += BC[curr_id]
                 f[:, parent_id] += f[:, curr_id]
+            print(f"dc_dq[{ii},{adj_subtreeInds}]\n{dc_dq[ii,adj_subtreeInds]}\ndc_dqd[{ii},{adj_subtreeInds}\n{dc_dqd[ii,adj_subtreeInds]}\n")
+            print(f"dc_dq[{adj_subtreeInds},{ii}]\n{dc_dq[adj_subtreeInds,ii]}\ndc_dqd[{adj_subtreeInds},{ii}]\n{dc_dqd[adj_subtreeInds,ii]}\n")
+        # floating base adjustment 
+        ii = [0,1,2,3,4,5] 
+        curr_id = 0
+        tmp1[:,ii] = np.matmul(IC[curr_id], S_[curr_id])
+        tmp2[:,ii] = np.matmul(BC[curr_id], S_[curr_id]) + np.matmul(IC[curr_id], Sj[curr_id])
+        tmp3[:,ii] = np.matmul(BC[curr_id], Sd[curr_id]) + np.matmul(IC[curr_id], Sdd[curr_id]) + np.matmul(self.icrf(f[:,curr_id]), S_[curr_id])
+        tmp4[:,ii] = np.matmul(BC[curr_id].T, S_[curr_id])
+
+
+        jj = [6,7,8,9,10,11,12]
+        """
+        dtau_dq(ii,jj)  = J(:,ii).'*tmp3(:,jj);
+        dtau_dq(jj,ii)  = tmp1(:,jj).'*Jdd(:,ii)+tmp4(:,jj).'*Jd(:,ii);
+
+        dtau_dqd(ii,jj) = J(:,ii).'*tmp2(:,jj);
+        dtau_dqd(jj,ii) =  tmp1(:,jj).'*Jj(:,ii)+tmp4(:,jj).'*J(:,ii);
+        """
+        # dc_dq[ii,jj] = np.matmul(S_[curr_id].T, tmp3[:,jj])
+        # dc_dq[jj,ii] = (np.matmul(tmp1[:,jj].T, Sd[curr_id])  + np.matmul(tmp4[:,jj].T,S_[curr_id]))
+
+        dc_dq[ii,:] = np.matmul(S_[curr_id].T, tmp3[:,:])
+        dc_dq[:,ii] = (np.matmul(tmp1[:,:].T, Sdd[curr_id])  + np.matmul(tmp4[:,:].T,Sd[curr_id]))
+
+        # print(f"S_[{curr_id}]: {S_[curr_id].shape}\n{S_[curr_id]}")
+        # print(f"tmp3[:,{jj}]: {tmp3[:,:].shape}\n{tmp3[:,:]}")
+        
+        # new version
+        # dc_dqd[ii,jj] = np.matmul(S_[curr_id].T, tmp2[:,jj])
+        # dc_dqd[jj,ii] = (np.matmul(tmp1[:,jj].T, Sj[curr_id]) + np.matmul(tmp4[:,jj].T,S_[curr_id]))
+        # old version
+        dc_dqd[ii,:] = np.matmul(S_[curr_id].T, tmp2[:,:])
+        dc_dqd[:,ii] = (np.matmul(tmp1[:,:].T, Sj[curr_id]) + np.matmul(tmp4[:,:].T,S_[curr_id]))
+        
 
         return dc_dq, dc_dqd
