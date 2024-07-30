@@ -193,7 +193,7 @@ class RBDReference:
         TODO Check the correct way to index the forces!
         """
         f_out = f_in
-        if len(f_ext > 0):
+        if len(f_ext) > 0:
             for curr_id in range(len(f_ext)):
                 parent_id = self.robot.get_parent_id(curr_id)
                 inds_q = self.robot.get_joint_index_q(curr_id)
