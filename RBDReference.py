@@ -408,6 +408,7 @@ class RBDReference:
     
     def rnea_grad(self, q, qd, qdd=None, GRAVITY=-9.81):
         """
+        Implementation based on spatial v2: https://github.com/ROAM-Lab-ND/spatial_v2_extended/blob/main/v3/derivatives/ID_derivatives.m
         Computes the gradient of the RNEA algorithm with respect to q, qd, and qdd.
         Outputs the gradient of RNEA torque tau (c) with respect to q and qd.
         """
@@ -692,116 +693,6 @@ class RBDReference:
                     H[j, ind] = H[ind, j]
 
         return H
-    
-    def rnea_derivatives(self, q,qd,qdd,GRAVITY=-9.81):
-        """
-        Computes the derivatives of the RNEA algorithm with respect to q, qd, and qdd.
-        """
-        # Compute the RNEA
-                # allocate memory
-        NB = self.robot.get_num_bodies()
-        v = np.zeros((6, NB))
-        a = np.zeros((6, NB))
-        f = np.zeros((6, NB))
-        IC = {}
-        BC = {}
-        S_ = {}
-        Sd = {}
-        Sdd = {}
-        Sj = {}
-        Xup0 = {}
-        gravity_vec = np.zeros((6))
-        gravity_vec[5] = -GRAVITY  # a_base is gravity vec
-        print(type(q), type(qd), type(qdd))
-        # # RNEA calculation
-
-        # RNEA Forward Pass 
-        for curr_id in range(NB):
-            parent_id = self.robot.get_parent_id(curr_id)
-            S = self.robot.get_S_by_id(curr_id)
-            inds_q = self.robot.get_joint_index_q(curr_id)
-            _q = q[inds_q]
-            Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
-            # compute v and a
-            if parent_id == -1:  # parent is fixed base or world
-                # v_base is zero so v[:,ind] remains 0
-                a[:, curr_id] = gravity_vec
-                Xup0[curr_id] = Xmat
-            else:
-                v[:, curr_id] = v[:, parent_id]
-                a[:, curr_id] = a[:, parent_id]
-                Xup0[curr_id] = np.matmul(Xmat, Xup0[parent_id])
-
-            inds_v = self.robot.get_joint_index_v(curr_id)
-            _qd = np.matrix(qd[inds_v])
-            _qdd = np.matrix(qdd[inds_v])
-
-            Xdown = np.linalg.inv(Xup0[curr_id])
-            S_[curr_id] = np.matmul(Xdown, S)
-
-            if parent_id == -1:
-                vJ = np.matmul(S_[curr_id], _qd.T)
-                aJ = np.matmul(self.crm(v[:, curr_id]), vJ) + np.matmul(S_[curr_id], _qdd.T)
-            else:
-                vJ = S_[curr_id] * _qd
-                aJ = np.matmul(self.crm(v[:, curr_id]), vJ) + S_[curr_id] * _qdd.T
-            
-            Sd[curr_id] = np.matmul(self.crm(v[:, curr_id]), S_[curr_id])
-            Sdd[curr_id] = np.matmul(self.crm(a[:, curr_id]),S_[curr_id]) + np.matmul(self.crm(v[:, curr_id]),Sd[curr_id])
-            Sj[curr_id] = 2 * Sd[curr_id] + np.matmul(self.crm(np.squeeze(np.array(vJ))),S_[curr_id])
-
-            v[:, curr_id] += np.squeeze(np.array(vJ))
-            a[:, curr_id] += np.squeeze(np.array(aJ))
-
-            Imat = self.robot.get_Imat_by_id(curr_id)
-            IC[curr_id] = np.matmul(Xup0[curr_id].T,np.matmul(Imat,Xup0[curr_id]))
-            BC[curr_id] = 2 * self.factor_functions(IC[curr_id], v[:,curr_id])
-            f[:, curr_id] = np.matmul(IC[curr_id], a[:, curr_id]) + self.vxIv(v[:, curr_id], IC[curr_id])
-
-
-        n = len(qd)
-        dc_dq = np.zeros((n, n))
-        dc_dqd = np.zeros((n, n))
-        tmp1 = np.zeros((6,n))
-        tmp2 = np.zeros((6,n))
-        tmp3 = np.zeros((6,n))
-        tmp4 = np.zeros((6,n))
-
-        for curr_id in range(NB-1, -1, -1): # try 0 instead of -1
-            parent_id = self.robot.get_parent_id(curr_id)
-            if parent_id != -1:
-                ii = curr_id + 5 # special matrix indexing for floating base
-            else: 
-                ii = [0,1,2,3,4,5]
-            tmp1[:,ii] = np.squeeze(np.array(np.matmul(IC[curr_id], S_[curr_id])))
-            tmp2[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id], S_[curr_id]) + np.matmul(IC[curr_id], Sj[curr_id])))
-            tmp3[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id], Sd[curr_id]) + np.matmul(IC[curr_id], Sdd[curr_id]) + np.matmul(self.icrf(f[:,curr_id]), S_[curr_id])))
-            tmp4[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id].T, S_[curr_id])))
-
-            subtreeInds = self.robot.get_subtree_by_id(curr_id)
-            adj_subtreeInds = list(np.array(subtreeInds) + 5)
-
-            if self.robot.floating_base and parent_id == -1:
-                dc_dq[ii,:] = np.matmul(S_[curr_id].T, tmp3[:,:])
-                dc_dq[:,ii] = (np.matmul(tmp1[:,:].T, Sdd[curr_id])  + np.matmul(tmp4[:,:].T,Sd[curr_id]))
-
-                dc_dqd[ii,:] = np.matmul(S_[curr_id].T, tmp2[:,:])
-                dc_dqd[:,ii] = (np.matmul(tmp1[:,:].T, Sj[curr_id]) + np.matmul(tmp4[:,:].T,S_[curr_id]))
-            else:
-                dc_dq[ii,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp3[:,adj_subtreeInds])
-                dc_dq[adj_subtreeInds,ii] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sdd[curr_id]) 
-                                            + np.matmul(tmp4[:,adj_subtreeInds].T,Sd[curr_id]))))
-                
-                dc_dqd[ii,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp2[:,adj_subtreeInds])
-                dc_dqd[adj_subtreeInds,ii] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sj[curr_id]) 
-                                            + np.matmul(tmp4[:,adj_subtreeInds].T,S_[curr_id]))))
-                
-                IC[parent_id] += IC[curr_id]
-                BC[parent_id] += BC[curr_id]
-                f[:, parent_id] += f[:, curr_id]    
-
-        return dc_dq, dc_dqd
-    
     
     
 
