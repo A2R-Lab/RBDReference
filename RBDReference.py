@@ -178,6 +178,33 @@ class RBDReference:
         vecXIvec[4] =  vec[2]*temp[0+3] + -vec[0]*temp[2+3]
         vecXIvec[5] = -vec[1]*temp[0+3] +  vec[0]*temp[1+3]
         return vecXIvec
+    
+    def apply_external_forces(self, q, f_in, f_ext):
+        """ Implementation based on spatial v2: https://github.com/ROAM-Lab-ND/spatial_v2_extended/blob/main/dynamics/apply_external_forces.m
+        
+        Subtracts external forces from input f_in. 
+
+        Parameters:
+        - f_in (numpy.ndarray): Initial forces applied to links. 
+        - f_ext (numpy.ndarray): The external force.
+
+        Returns:
+        - f_out (numpy.ndarray): The updated force.
+        TODO Check the correct way to index the forces!
+        """
+        f_out = f_in
+        if len(f_ext > 0):
+            for curr_id in range(len(f_ext)):
+                parent_id = self.robot.get_parent_id(curr_id)
+                inds_q = self.robot.get_joint_index_q(curr_id)
+                _q = q[inds_q]
+                if parent_id == -1:
+                    Xa = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+                else:
+                    Xa = np.matmul(self.robot.get_Xmat_Func_by_id(curr_id)(curr_id),Xa) 
+                if len(f_ext[:, curr_id]) > 0:
+                    f_out[:, curr_id] -= np.matmul(np.linalg.inv(Xa.T), f_ext[:, curr_id])
+        return f_out
 
     def rnea_fpass(self, q, qd, qdd=None, GRAVITY=-9.81):
         # allocate memory
@@ -240,7 +267,7 @@ class RBDReference:
 
         return (c, f)
 
-    def rnea(self, q, qd, qdd=None, GRAVITY=-9.81):
+    def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, f_ext=None):
         # forward pass
         (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY)
         # backward pass
@@ -693,8 +720,6 @@ class RBDReference:
                     H[j, ind] = H[ind, j]
 
         return H
-    
-    
 
 
         
