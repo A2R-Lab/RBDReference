@@ -301,20 +301,20 @@ class RBDReference:
         - Sdd: numpy.ndarray
             The spatial jerk, or second derivative calculation of S_.
         - Sj: numpy.ndarray
-            Another derivative of the motion subspace matrix.
+            Another derivative of the motion subspace matrix S.
         """
         # allocate memory 
         NB = self.robot.get_num_bodies()
         v = np.zeros((6, NB))
         a = np.zeros((6, NB))
         f = np.zeros((6, NB))
-        IC = {}
-        BC = {}
+        IC = np.zeros((NB,6,6))
+        BC = np.zeros((NB,6,6))
         S_ = {}
         Sd = {}
         Sdd = {}
         Sj = {}
-        Xup0 = {}
+        # Xup0 = {}
         gravity_vec = np.zeros((6))
         gravity_vec[5] = -GRAVITY  # a_base is gravity vec
 
@@ -329,17 +329,17 @@ class RBDReference:
             if parent_id == -1:  # parent is fixed base or world
                 # v_base is zero so v[:,ind] remains 0
                 a[:, curr_id] = gravity_vec
-                Xup0[curr_id] = Xmat
+                Xup0 = Xmat
             else:
                 v[:, curr_id] = v[:, parent_id]
                 a[:, curr_id] = a[:, parent_id]
-                Xup0[curr_id] = np.matmul(Xmat, Xup0[parent_id])
+                Xup0 = np.matmul(Xmat, Xup0)
 
             inds_v = self.robot.get_joint_index_v(curr_id)
             _qd = np.matrix(qd[inds_v])
             _qdd = np.matrix(qdd[inds_v])
 
-            Xdown = np.linalg.inv(Xup0[curr_id])
+            Xdown = np.linalg.inv(Xup0)
             S_[curr_id] = np.matmul(Xdown, S)
 
             if parent_id == -1:
@@ -357,10 +357,19 @@ class RBDReference:
             a[:, curr_id] += np.squeeze(np.array(aJ))
 
             Imat = self.robot.get_Imat_by_id(curr_id)
-            IC[curr_id] = np.matmul(Xup0[curr_id].T,np.matmul(Imat,Xup0[curr_id]))
+            IC[curr_id] = np.matmul(Xup0.T,np.matmul(Imat,Xup0))
             BC[curr_id] = 2 * self.factor_functions(IC[curr_id], v[:,curr_id])
             f[:, curr_id] = np.matmul(IC[curr_id], a[:, curr_id]) + self.vxIv(v[:, curr_id], IC[curr_id])
-
+        
+        print(f"NB: {NB}")
+        print(f"IC[0]:\n {IC[0].shape}\nIC[1]:\n{IC[1].shape}\n")
+        print(f"BC[0]:\n {BC[0].shape}\nBC[1]:\n{BC[1].shape}\n")
+        print(f"S_[0]:\n {S_[0].shape}\nS_[1]:\n{S_[1].shape}\n")
+        print(f"Sd[0]:\n {Sd[0].shape}\nSd[1]:\n{Sd[1].shape}\n")
+        print(f"Sdd[0]:\n {Sdd[0].shape}\nSdd[1]:\n{Sdd[1].shape}\n")
+        print(f"Sj[0]:\n {Sj[0].shape}\nSj[1]:\n{Sj[1].shape}\n")
+        print(f"Xup")
+ 
         return (f, IC, BC, S_, Sd, Sdd, Sj)
 
     def rnea_grad_bpass(self, f, IC, BC, S_, Sd, Sdd, Sj):
