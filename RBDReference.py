@@ -412,20 +412,25 @@ class RBDReference:
             adj_subtreeInds = list(np.array(subtreeInds) + 5)
 
             if self.robot.floating_base and parent_id == -1:
+                # dc_dq calculation
                 dc_dq[ii,:] = np.matmul(S_[curr_id].T, tmp3[:,:])
                 dc_dq[:,ii] = (np.matmul(tmp1[:,:].T, Sdd[curr_id])  + np.matmul(tmp4[:,:].T,Sd[curr_id]))
-
+                
+                # dc_dqd calculation 
                 dc_dqd[ii,:] = np.matmul(S_[curr_id].T, tmp2[:,:])
                 dc_dqd[:,ii] = (np.matmul(tmp1[:,:].T, Sj[curr_id]) + np.matmul(tmp4[:,:].T,S_[curr_id]))
             else:
+                # dc_dq calculation 
                 dc_dq[ii,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp3[:,adj_subtreeInds])
                 dc_dq[adj_subtreeInds,ii] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sdd[curr_id]) 
                                             + np.matmul(tmp4[:,adj_subtreeInds].T,Sd[curr_id]))))
                 
+                # dc_dqd calculation 
                 dc_dqd[ii,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp2[:,adj_subtreeInds])
                 dc_dqd[adj_subtreeInds,ii] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sj[curr_id]) 
                                             + np.matmul(tmp4[:,adj_subtreeInds].T,S_[curr_id]))))
                 
+                # update forces 
                 IC[parent_id] += IC[curr_id]
                 BC[parent_id] += BC[curr_id]
                 f[:, parent_id] += f[:, curr_id]    
