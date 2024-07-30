@@ -310,11 +310,10 @@ class RBDReference:
         f = np.zeros((6, NB))
         IC = np.zeros((NB,6,6))
         BC = np.zeros((NB,6,6))
-        S_ = {}
+        S_ = {} 
         Sd = {}
         Sdd = {}
         Sj = {}
-        # Xup0 = {}
         gravity_vec = np.zeros((6))
         gravity_vec[5] = -GRAVITY  # a_base is gravity vec
 
@@ -360,16 +359,7 @@ class RBDReference:
             IC[curr_id] = np.matmul(Xup0.T,np.matmul(Imat,Xup0))
             BC[curr_id] = 2 * self.factor_functions(IC[curr_id], v[:,curr_id])
             f[:, curr_id] = np.matmul(IC[curr_id], a[:, curr_id]) + self.vxIv(v[:, curr_id], IC[curr_id])
-        
-        print(f"NB: {NB}")
-        print(f"IC[0]:\n {IC[0].shape}\nIC[1]:\n{IC[1].shape}\n")
-        print(f"BC[0]:\n {BC[0].shape}\nBC[1]:\n{BC[1].shape}\n")
-        print(f"S_[0]:\n {S_[0].shape}\nS_[1]:\n{S_[1].shape}\n")
-        print(f"Sd[0]:\n {Sd[0].shape}\nSd[1]:\n{Sd[1].shape}\n")
-        print(f"Sdd[0]:\n {Sdd[0].shape}\nSdd[1]:\n{Sdd[1].shape}\n")
-        print(f"Sj[0]:\n {Sj[0].shape}\nSj[1]:\n{Sj[1].shape}\n")
-        print(f"Xup")
- 
+    
         return (f, IC, BC, S_, Sd, Sdd, Sj)
 
     def rnea_grad_bpass(self, f, IC, BC, S_, Sd, Sdd, Sj):
