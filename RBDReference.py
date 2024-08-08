@@ -400,34 +400,36 @@ class RBDReference:
         for curr_id in range(NB-1, -1, -1): # try 0 instead of -1
             parent_id = self.robot.get_parent_id(curr_id)
             if parent_id != -1:
-                ii = curr_id + 5 # special matrix indexing for floating base
+                ind = curr_id + 5 # special matrix indexing for floating base
             else: 
-                ii = [0,1,2,3,4,5]
-            tmp1[:,ii] = np.squeeze(np.array(np.matmul(IC[curr_id], S_[curr_id])))
-            tmp2[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id], S_[curr_id]) + np.matmul(IC[curr_id], Sj[curr_id])))
-            tmp3[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id], Sd[curr_id]) + np.matmul(IC[curr_id], Sdd[curr_id]) + np.matmul(self.icrf(f[:,curr_id]), S_[curr_id])))
-            tmp4[:,ii] = np.squeeze(np.array(np.matmul(BC[curr_id].T, S_[curr_id])))
+                ind = [0,1,2,3,4,5] # first 6 indices for floating base
+            # chain rule temp vars for intermediate derivative calculations 
+            tmp1[:,ind] = np.squeeze(np.array(np.matmul(IC[curr_id], S_[curr_id])))
+            tmp2[:,ind] = np.squeeze(np.array(np.matmul(BC[curr_id], S_[curr_id]) + np.matmul(IC[curr_id], Sj[curr_id])))
+            tmp3[:,ind] = np.squeeze(np.array(np.matmul(BC[curr_id], Sd[curr_id]) + np.matmul(IC[curr_id], Sdd[curr_id]) + np.matmul(self.icrf(f[:,curr_id]), S_[curr_id])))
+            tmp4[:,ind] = np.squeeze(np.array(np.matmul(BC[curr_id].T, S_[curr_id])))
 
+            # adjust subtree inds for modified FB joint indexing
             subtreeInds = self.robot.get_subtree_by_id(curr_id)
             adj_subtreeInds = list(np.array(subtreeInds) + 5)
 
             if self.robot.floating_base and parent_id == -1:
                 # dc_dq calculation
-                dc_dq[ii,:] = np.matmul(S_[curr_id].T, tmp3[:,:])
-                dc_dq[:,ii] = (np.matmul(tmp1[:,:].T, Sdd[curr_id])  + np.matmul(tmp4[:,:].T,Sd[curr_id]))
+                dc_dq[ind,:] = np.matmul(S_[curr_id].T, tmp3[:,:])
+                dc_dq[:,ind] = (np.matmul(tmp1[:,:].T, Sdd[curr_id])  + np.matmul(tmp4[:,:].T,Sd[curr_id]))
                 
                 # dc_dqd calculation 
-                dc_dqd[ii,:] = np.matmul(S_[curr_id].T, tmp2[:,:])
-                dc_dqd[:,ii] = (np.matmul(tmp1[:,:].T, Sj[curr_id]) + np.matmul(tmp4[:,:].T,S_[curr_id]))
+                dc_dqd[ind,:] = np.matmul(S_[curr_id].T, tmp2[:,:])
+                dc_dqd[:,ind] = (np.matmul(tmp1[:,:].T, Sj[curr_id]) + np.matmul(tmp4[:,:].T,S_[curr_id]))
             else:
                 # dc_dq calculation 
-                dc_dq[ii,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp3[:,adj_subtreeInds])
-                dc_dq[adj_subtreeInds,ii] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sdd[curr_id]) 
+                dc_dq[ind,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp3[:,adj_subtreeInds])
+                dc_dq[adj_subtreeInds,ind] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sdd[curr_id]) 
                                             + np.matmul(tmp4[:,adj_subtreeInds].T,Sd[curr_id]))))
                 
                 # dc_dqd calculation 
-                dc_dqd[ii,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp2[:,adj_subtreeInds])
-                dc_dqd[adj_subtreeInds,ii] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sj[curr_id]) 
+                dc_dqd[ind,adj_subtreeInds] = np.matmul(S_[curr_id].T, tmp2[:,adj_subtreeInds])
+                dc_dqd[adj_subtreeInds,ind] = np.squeeze(np.array((np.matmul(tmp1[:,adj_subtreeInds].T, Sj[curr_id]) 
                                             + np.matmul(tmp4[:,adj_subtreeInds].T,S_[curr_id]))))
                 
                 # update forces 
