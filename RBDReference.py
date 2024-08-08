@@ -1,45 +1,31 @@
 import numpy as np
 import copy
-
 np.set_printoptions(precision=4, suppress=True, linewidth=100)
-
 
 class RBDReference:
     def __init__(self, robotObj):
         self.robot = robotObj
 
-    def crm(self,v):
+    def cross_operator(self, v):
         # for any vector v, computes the operator v x 
         # vec x = [wx   0]
         #         [vox wx]
         #(crm in spatial_v2_extended)
-        if len(v) == 6:
-            v = v.reshape((6,))
-            vcross = np.array([[0, -v[2], v[1], 0,0,0], 
-                              [v[2], 0, -v[0], 0,0,0], 
-                              [-v[1], v[0], 0, 0,0,0], 
-                              [0, -v[5], v[4], 0,-v[2],v[1]], 
-                              [v[5], 0, -v[3], v[2],0,-v[0]], 
-                              [-v[4], v[3], 0, -v[1],v[0],0]])
-        else:
-            vcross = np.array( [ [0, 0, 0], 
-                                 [v[2], 0, -v[0]],
-                                 [-v[1], v[0], 0] ] )
-        return vcross
+        v_cross = np.array([0, -v[2], v[1], 0, 0, 0,
+                            v[2], 0, -v[0], 0, 0, 0,
+                            -v[1], v[0], 0, 0, 0, 0,
+                            0, -v[5], v[4], 0, -v[2], v[1], 
+                            v[5], 0, -v[3], v[2], 0, -v[0],
+                            -v[4], v[3], 0, -v[1], v[0], 0]
+                          ).reshape(6,6)
+        return(v_cross)
     
-    def crf(self, v):
-        """
-        crf spatial/planar cross-product operator (force).
-        crf(v)  calculates the 6x6 (or 3x3) matrix such that the expression.
-        crf(v)*f is the cross product of the motion vector v with the force vector f.
-        vector v is taken to be a spatial vector, and the return value is a 6x6 matrix.
-        Otherwise, v is taken to be a planar vector, and the return value is 3x3.
-        """
-        vcross = -self.crm(v).T
-        return vcross
+    def dual_cross_operator(self, v):
+        #(crf in in spatial_v2_extended)
+        return(-1 * self.cross_operator(v).T)
     
     def icrf(self, v):
-        #helper function defined in spatial_v2_extended library, called by idsva() and rnea_derivatives()
+        #helper function defined in spatial_v2_extended library, called by idsva() and rnea_grad()
         res = [[0,  -v[2],  v[1],    0,  -v[5],  v[4]],
             [v[2],    0,  -v[0],  v[5],    0,  -v[3]],
             [-v[1],  v[0],    0,  -v[4],  v[3],    0],
@@ -49,14 +35,13 @@ class RBDReference:
         return -np.asmatrix(res)
     
     def factor_functions(self, I, v, number=3):
-        # helper function defined in spatial_v2_extended library, called by idsva() and rnea_derivatives()
+        # helper function defined in spatial_v2_extended library, called by idsva() and rnea_grad()
         if number == 1:
-            B = self.crf(v) * I
+            B = self.dual_cross_operator(v) * I
         elif number == 2:
-            B = self.icrf(np.matmul(I,v)) - I * self.crm(v)
+            B = self.icrf(np.matmul(I,v)) - I * self.cross_operator(v)
         else:
-            B = 1/2 * (np.matmul(self.crf(v),I) + self.icrf(np.matmul(I,v)) - np.matmul(I, self.crm(v)))
-            #B = 1/2 * (self.crf(v) @ I + self.icrf(I @ v) - I @ self.crm(v)
+            B = 1/2 * (np.matmul(self.dual_cross_operator(v),I) + self.icrf(np.matmul(I,v)) - np.matmul(I, self.cross_operator(v)))
 
         return B
 
@@ -343,14 +328,14 @@ class RBDReference:
 
             if parent_id == -1:
                 vJ = np.matmul(S_[curr_id], _qd.T)
-                aJ = np.matmul(self.crm(v[:, curr_id]), vJ) + np.matmul(S_[curr_id], _qdd.T)
+                aJ = np.matmul(self.cross_operator(v[:, curr_id]), vJ) + np.matmul(S_[curr_id], _qdd.T)
             else:
                 vJ = S_[curr_id] * _qd
-                aJ = np.matmul(self.crm(v[:, curr_id]), vJ) + S_[curr_id] * _qdd.T
+                aJ = np.matmul(self.cross_operator(v[:, curr_id]), vJ) + S_[curr_id] * _qdd.T
             
-            Sd[curr_id] = np.matmul(self.crm(v[:, curr_id]), S_[curr_id])
-            Sdd[curr_id] = np.matmul(self.crm(a[:, curr_id]),S_[curr_id]) + np.matmul(self.crm(v[:, curr_id]),Sd[curr_id])
-            Sj[curr_id] = 2 * Sd[curr_id] + np.matmul(self.crm(np.squeeze(np.array(vJ))),S_[curr_id])
+            Sd[curr_id] = np.matmul(self.cross_operator(v[:, curr_id]), S_[curr_id])
+            Sdd[curr_id] = np.matmul(self.cross_operator(a[:, curr_id]),S_[curr_id]) + np.matmul(self.cross_operator(v[:, curr_id]),Sd[curr_id])
+            Sj[curr_id] = 2 * Sd[curr_id] + np.matmul(self.cross_operator(np.squeeze(np.array(vJ))),S_[curr_id])
 
             v[:, curr_id] += np.squeeze(np.array(vJ))
             a[:, curr_id] += np.squeeze(np.array(aJ))
