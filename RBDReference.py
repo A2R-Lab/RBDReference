@@ -45,6 +45,11 @@ class RBDReference:
 
         return B
 
+    def _mxS(self, S, vec, alpha=1.0):
+        # returns the spatial cross product between vectors S and vec. vec=[v0, v1 ... vn] and S = [s0, s1, s2, s3, s4, s5]
+        # derivative of spatial motion vector = v x m
+        return np.squeeze(np.array((alpha * np.dot(self.cross_operator(vec), S)))) # added np.squeeze and np.array
+
     def mxS(self, S, vec):
         result = np.zeros((6))
         if not S[0] == 0:
@@ -151,7 +156,7 @@ class RBDReference:
         return result
 
     def fxS(self, S, vec, alpha=1.0):
-        return -self.mxS(S, vec, alpha)
+        return -self._mxS(S, vec, alpha) #changed to _mxS
 
     def vxIv(self, vec, Imat):
         temp = np.matmul(Imat, vec)
@@ -384,10 +389,13 @@ class RBDReference:
 
         for curr_id in range(NB-1, -1, -1): # try 0 instead of -1
             parent_id = self.robot.get_parent_id(curr_id)
-            if parent_id != -1:
-                ind = curr_id + 5 # special matrix indexing for floating base
-            else: 
-                ind = [0,1,2,3,4,5] # first 6 indices for floating base
+            if self.robot.floating_base:
+                if parent_id != -1:
+                    ind = curr_id + 5 # special matrix indexing for floating base
+                else: 
+                    ind = [0,1,2,3,4,5] # first 6 indices for floating base
+            else:
+                ind = curr_id
             # chain rule temp vars for intermediate derivative calculations 
             tmp1[:,ind] = np.squeeze(np.array(np.matmul(IC[curr_id], S_[curr_id])))
             tmp2[:,ind] = np.squeeze(np.array(np.matmul(BC[curr_id], S_[curr_id]) + np.matmul(IC[curr_id], Sj[curr_id])))
@@ -396,7 +404,10 @@ class RBDReference:
 
             # adjust subtree inds for modified FB joint indexing
             subtreeInds = self.robot.get_subtree_by_id(curr_id)
-            adj_subtreeInds = list(np.array(subtreeInds) + 5)
+            if self.robot.floating_base:
+                adj_subtreeInds = list(np.array(subtreeInds) + 5)
+            else:
+                adj_subtreeInds = subtreeInds
 
             if self.robot.floating_base and parent_id == -1:
                 # dc_dq calculation
@@ -615,6 +626,127 @@ class RBDReference:
                         Minv[row, col] = Minv[col, row]
 
         return Minv
+    
+    def aba(self, q, qd, tau, f_ext=None, GRAVITY = -9.81):
+        """
+        Compute the Articulated Body Algorithm (ABA) to calculate the joint accelerations.
+        """
+        # allocate memory TODO check NB vs. n
+        n = len(qd)
+        NB = self.robot.get_num_bodies()
+        v = np.zeros((6,NB))
+        c = np.zeros((6,NB))
+        a = np.zeros((6,NB))
+        IA = np.zeros((6,6,NB))
+        pA = np.zeros((6,NB))
+        # variables may require special indexing
+        f = np.zeros((6,n))
+        # d = np.zeros(n)
+        d = {}
+        U = np.zeros((6,n))
+        u = np.zeros(n)
+        qdd = np.zeros(n)
+
+        gravity_vec = np.zeros((6))
+        gravity_vec[5] = GRAVITY  # a_base is gravity vec
+
+        # Initial Forward Pass
+        for ind in range(NB): # curr_id = ind for this loop
+            parent_ind = self.robot.get_parent_id(ind)
+            _q = q[self.robot.get_joint_index_q(ind)]
+            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+            S = self.robot.get_S_by_id(ind)
+
+            if parent_ind == -1: # parent is base
+                v[:, ind] = np.matmul(S, qd[ind:ind+6])
+            else:
+                v[:, ind] = np.matmul(Xmat, v[:, parent_ind]) 
+                vJ = np.squeeze(np.array(S * qd[ind])) # reduces shape to (6,) matching v[:,curr_id]
+                v[:, ind] += vJ
+                c[:, ind] = np.matmul(self.cross_operator(v[:, ind]), vJ)
+            
+            Imat = self.robot.get_Imat_by_id(ind)
+
+            IA[:,:,ind] = Imat
+
+            vcross=np.array([[0, -v[:,ind][2], v[:,ind][1], 0, 0, 0],
+            [v[:,ind][2], 0, -v[:,ind][0], 0, 0, 0], 
+            [-v[:,ind][1], v[:,ind][0], 0, 0, 0, 0],
+            [0, -v[:,ind][5], v[:,ind][4], 0, -v[:,ind][2], v[:,ind][1]], 
+            [v[:,ind][5],0, -v[:,ind][3], v[:,ind][2], 0, -v[:,ind][0]],
+            [-v[:,ind][4], v[:,ind][3], 0, -v[:,ind][1], v[:,ind][0], 0]])
+
+            crf = -np.transpose(vcross) 
+            temp = np.matmul(crf, Imat)
+
+            pA[:, ind] = np.matmul(temp, v[:, ind])[0]
+
+        # Backward Pass
+        for curr_id in range(NB-1, -1, -1): # curr_id != ind for bpass
+            S = self.robot.get_S_by_id(curr_id)
+            parent_ind = self.robot.get_parent_id(curr_id)
+
+            if self.robot.floating_base:
+                if curr_id == 0:
+                    ind = [0,1,2,3,4,5]
+                else:
+                    ind = curr_id + 5
+
+            U[:, ind] = np.squeeze(np.matmul(IA[:,:,curr_id], S))
+            # print(S.shape)
+            # print(U[:, ind].shape)
+            d[curr_id] = np.matmul(np.transpose(S), U[:, ind])
+            u[ind] = tau[ind] - np.matmul(np.transpose(S), pA[:, curr_id])
+
+            if parent_ind != -1:
+
+                rightSide = np.reshape(U[:, ind], (6,1)) @ np.reshape(U[:, ind], (6,1)).T / d[curr_id]
+                Ia = IA[:,:, curr_id] - rightSide
+                
+                pa = pA[:, curr_id] + np.matmul(Ia, c[:, curr_id]) + U[:, ind] * u[ind] / d[curr_id]
+
+                _q = q[self.robot.get_joint_index_q(curr_id)]
+                Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+                temp = np.matmul(np.transpose(Xmat), Ia)
+
+                IA[:, :, parent_ind] = IA[:, :, parent_ind] + np.matmul(temp, Xmat)
+
+                # temp = np.matmul(np.transpose(Xmat), pa)
+                temp = np.matmul(Xmat, np.transpose(pa))
+                pA[:, parent_ind] = pA[:, parent_ind] + temp.flatten()
+        
+        # Final Forward Pass
+        for curr_id in range(NB): # curr_id != ind for bpass
+            parent_ind = self.robot.get_parent_id(curr_id)
+            _q = q[self.robot.get_joint_index_q(curr_id)]
+            Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+
+            if self.robot.floating_base:
+                if curr_id == 0:
+                    ind = [0,1,2,3,4,5]
+                else:
+                    ind = curr_id + 5
+
+            if parent_ind == -1: # parent is base
+                a[:, curr_id] = np.matmul(Xmat, gravity_vec) + c[:, curr_id]
+            else:
+                a[:, curr_id] = np.matmul(Xmat, a[:, parent_ind]) + c[:, curr_id]
+            
+            S = self.robot.get_S_by_id(curr_id)
+            temp = u[ind] - np.matmul(np.transpose(U[:, ind]), a[:, curr_id])
+
+            # TODO come back and check matlab indexing referencingt Xup and alter qdd *S to be S *qdd
+            if parent_ind == -1:
+                qdd[ind] = np.matmul(np.linalg.inv(d[curr_id]), temp) #TODO fix / check for singularities
+                a[:, curr_id] = a[:, curr_id] + np.matmul(qdd[ind],S)
+            else:
+                qdd[ind] = 1 / d[curr_id] * temp
+                a[:, curr_id] = a[:, curr_id] + np.matmul(qdd[ind],S)
+        
+        return qdd
+
+
+
 
     def crba(self, q, qd):
         """
@@ -712,5 +844,257 @@ class RBDReference:
 
         return H
 
+##### Testing original RNEA_grad to help with CUDA 
+    def rnea_grad_fpass_dq(self, q, qd, v, a, GRAVITY = -9.81):
+        
+        # allocate memory
+        NB = self.robot.get_num_bodies()
+        n = len(qd)
+        dv_dq = np.zeros((6,n,n))
+        da_dq = np.zeros((6,n,n))
+        df_dq = np.zeros((6,n,n))
+
+        gravity_vec = np.zeros((6))
+        gravity_vec[5] = -GRAVITY # a_base is gravity vec
+
+        for ind in range(NB):
+            parent_ind = self.robot.get_parent_id(ind)
+            if self.robot.floating_base:
+                # dc_dqd gets idx
+                if parent_ind != -1:
+                    idx = ind + 5
+                    parent_idx = parent_ind + 5
+                else:
+                    idx = [0,1,2,3,4,5]
+            else:
+                idx = ind
+                parent_idx = parent_ind
+            # Xmat access sequence
+            inds_q = self.robot.get_joint_index_q(ind)
+            _q = q[inds_q]
+            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+            S = self.robot.get_S_by_id(ind)
+            # dv_du = X * dv_du_parent + (if c == ind){mxS(Xvp)}
+            if parent_ind != -1: # note that v_base is zero so dv_du parent contribution is 0
+                dv_dq[:,:,idx] = np.matmul(Xmat,dv_dq[:,:,parent_idx])
+                dv_dq[:,idx,idx] += self._mxS(S,np.matmul(Xmat,v[:,parent_ind])) # replace with new mxS
+            # da_du = x*da_du_parent + mxS_onCols(dv_du)*qd + (if c == ind){mxS(Xap)}
+            if parent_ind != -1: # note that a_base is constant gravity so da_du parent contribution is 0
+                da_dq[:,:,idx] = np.matmul(Xmat,da_dq[:,:,parent_idx])
+            for c in range(n):
+                # TODO compress the if condition to handle 6x6 in one step
+                if parent_ind == -1 and self.robot.floating_base:
+                    for ii in range(len(idx)):
+                        da_dq[:,c,ii] += self._mxS(S[ii],dv_dq[:,c,ii],qd[ind])
+                else:
+                    da_dq[:,c,idx] += self._mxS(S,dv_dq[:,c,idx],qd[ind]) # replace with new mxS
+            if parent_ind != -1: # note that a_base is just gravity
+                da_dq[:,idx,idx] += self._mxS(S,np.matmul(Xmat,a[:,parent_ind])) # replace with new mxS
+            else:
+                da_dq[:,idx,idx] += self._mxS(S,np.matmul(Xmat,gravity_vec)) # replace with new mxS
+            # df_du = I*da_du + fx_onCols(dv_du)*Iv + fx(v)*I*dv_du
+            Imat = self.robot.get_Imat_by_id(ind)
+            #TODO compress if condition for loop 
+            if parent_ind == -1 and self.robot.floating_base:
+                for ii in range(len(idx)):
+                    df_dq[:,:,ii] = np.matmul(Imat, da_dq[:,:,ii])
+            else:
+                df_dq[:,:,idx] = np.matmul(Imat,da_dq[:,:,idx])
+            Iv = np.matmul(Imat,v[:,ind])
+            for c in range(n):
+                if parent_ind == -1 and self.robot.floating_base:
+                    for ii in range(len(idx)):
+                        df_dq[:,c,ii] += self.fxv(dv_dq[:,c,ii],Iv)
+                        df_dq[:,c,ii] += self.fxv(v[:,ind],np.matmul(Imat,dv_dq[:,c,ii]))
+                else:
+                    df_dq[:,c,idx] += self.fxv(dv_dq[:,c,idx],Iv)
+                    df_dq[:,c,idx] += self.fxv(v[:,ind],np.matmul(Imat,dv_dq[:,c,idx]))
+
+        return (dv_dq, da_dq, df_dq)
+
+    def rnea_grad_fpass_dqd(self, q, qd, v):
+        """
+        Performs the forward pass of the Recursive Newton-Euler Algorithm (RNEA) for gradient computation with respect to qd.
+
+        Args:
+            q (np.ndarray): The joint positions.
+            qd (np.ndarray): The joint velocities.
+            v (6,NB) (np.ndarray): The body spatial velocities.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray, np.ndarray]: A tuple containing the gradient of spatial acceleration (dv_dqd), 
+            gradient of spatial force (da_dqd), and gradient of spatial force derivative (df_dqd) with respect to qd.
+        """
+        # allocate memory
+        NB = self.robot.get_num_bodies()
+        n = len(qd)
+        dv_dqd = np.zeros((6,n,n))
+        da_dqd = np.zeros((6,n,n))
+        df_dqd = np.zeros((6,n,n))
+
+        # forward pass
+        for ind in range(NB):
+            parent_ind = self.robot.get_parent_id(ind)
+            if self.robot.floating_base:
+                # dc_dqd gets idx, special matrix indexing
+                if parent_ind != -1:
+                    idx = ind + 5
+                    parent_idx = parent_ind + 5
+                else:
+                    idx = [0,1,2,3,4,5]
+            else: 
+                idx = ind
+                parent_idx = parent_ind
+            # Xmat access sequence
+            inds_q = self.robot.get_joint_index_q(ind)
+            _q = q[inds_q]
+            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+            S = self.robot.get_S_by_id(ind)
+            # dv_du = X * dv_du_parent + (if c == ind){S}
+            if parent_ind != -1: # note that v_base is zero so dv_du parent contribution is 0
+                dv_dqd[:,:,idx] = np.matmul(Xmat,dv_dqd[:,:,parent_idx])
+            dv_dqd[:,idx,idx] += np.squeeze(np.array(S)) # added squeeze 
+            # da_du = x*da_du_parent + mxS_onCols(dv_du)*qd + (if c == ind){mxS(v)}
+            if parent_ind != -1: # note that a_base is constant gravity so da_du parent contribution is 0
+                da_dqd[:,:,idx] = np.matmul(Xmat,da_dqd[:,:,parent_idx])
+            for c in range(NB): # TODO check here and test
+                if parent_ind == -1 and self.robot.floating_base:
+                    for ii in range(len(idx)):
+                        da_dqd[:,c,ii] += self._mxS(S[ii],dv_dqd[:,c,ii],qd[ind])
+                else:
+                    da_dqd[:,c,idx] += self._mxS(S,dv_dqd[:,c,idx],qd[ind]) 
+
+            da_dqd[:,idx,idx] += self._mxS(S,v[:,ind]) 
+            # df_du = I*da_du + fx_onCols(dv_du)*Iv + fx(v)*I*dv_du
+            Imat = self.robot.get_Imat_by_id(ind)
+            if parent_ind == -1 and self.robot.floating_base:
+                for ii in range(len(idx)):
+                    df_dqd[:,:,ii] = np.matmul(Imat, da_dqd[:,:,ii])
+            else:
+                df_dqd[:,:,idx] = np.matmul(Imat,da_dqd[:,:,idx])
+            Iv = np.matmul(Imat,v[:,ind])
+            for c in range(n):
+                if parent_ind == -1 and self.robot.floating_base:
+                    for ii in range(len(idx)):
+                        df_dqd[:,c,ii] += self.fxv(dv_dqd[:,c,ii],Iv)
+                        df_dqd[:,c,ii] += self.fxv(v[:,ind],np.matmul(Imat,dv_dqd[:,c,ii]))
+                else:
+                    df_dqd[:,c,idx] += self.fxv(dv_dqd[:,c,idx],Iv)
+                    df_dqd[:,c,idx] += self.fxv(v[:,ind],np.matmul(Imat,dv_dqd[:,c,idx]))
+
+        return (dv_dqd, da_dqd, df_dqd)
+
+    def rnea_grad_bpass_dq(self, q, f, df_dq):
+        
+        # allocate memory
+        NB = self.robot.get_num_bodies()
+        n = self.robot.get_num_vel() # assuming len(q) = len(qd)
+        dc_dq = np.zeros((n,n))
+        
+        for ind in range(NB-1,-1,-1):
+            parent_ind = self.robot.get_parent_id(ind)
+
+            if self.robot.floating_base:
+                # dc_dqd gets idx
+                if parent_ind != -1:
+                    idx = ind + 5
+                    parent_idx = parent_ind + 5
+                else:
+                    idx = [0,1,2,3,4,5]
+            else:
+                idx = ind
+                parent_idx = parent_ind
+            
+            # dc_du is S^T*df_du
+            S = self.robot.get_S_by_id(ind)
+            # TODO Can this calculation be done in one line?
+            if parent_ind == -1 and self.robot.floating_base:
+                for ii in range(len(idx)):
+                    dc_dq[ii,:] = np.matmul(np.transpose(S[ii]),df_dq[:,:,ii])
+            else:
+                dc_dq[idx,:]  = np.matmul(np.transpose(S),df_dq[:,:,idx]) 
+            # df_du_parent += X^T*df_du + (if ind == c){X^T*fxS(f)}
+            if parent_ind != -1:
+                # Xmat access sequence
+                inds_q = self.robot.get_joint_index_q(ind)
+                _q = q[inds_q]
+                Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+                df_dq[:,:,parent_idx] += np.matmul(np.transpose(Xmat),df_dq[:,:,idx])
+                delta_dq = np.matmul(np.transpose(Xmat),self.fxS(S,f[:,ind]))
+                for entry in range(6):
+                    df_dq[entry,idx,parent_idx] += delta_dq[entry]
+
+        return dc_dq
+
+    def rnea_grad_bpass_dqd(self, q, df_dqd, USE_VELOCITY_DAMPING = False):
+        
+        # allocate memory
+        NB = self.robot.get_num_bodies()
+        n = self.robot.get_num_vel() # len(qd) always
+        dc_dqd = np.zeros((n,n))
+        
+        for ind in range(NB-1,-1,-1):
+            parent_ind = self.robot.get_parent_id(ind)
+
+            if self.robot.floating_base:
+                # dc_dqd gets idx, special matrix indexing
+                if parent_ind != -1:
+                    idx = ind + 5
+                    parent_idx = parent_ind + 5
+                else:
+                    idx = [0,1,2,3,4,5]
+            else: 
+                idx = ind
+                parent_idx = parent_ind
+            # dc_du is S^T*df_du
+            S = self.robot.get_S_by_id(ind)
+            if parent_ind == -1 and self.robot.floating_base:
+                for ii in range(len(idx)):
+                    dc_dqd[ii,:] = np.matmul(np.transpose(S[ii]),df_dqd[:,:,ii])
+            else:
+                dc_dqd[idx,:] = np.matmul(np.transpose(S),df_dqd[:,:,ind])
+            # df_du_parent += X^T*df_du
+            if parent_ind != -1:
+                inds_q = self.robot.get_joint_index_q(ind)
+                _q = q[inds_q]
+                Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+                df_dqd[:,:,parent_idx] += np.matmul(np.transpose(Xmat),df_dqd[:,:,idx]) 
+
+        # add in the damping and simplify this expression later
+        # suggestion: have a getter function that automatically indexes and allocates for floating base functions
+        if USE_VELOCITY_DAMPING:
+            for ind in range(NB):
+                if self.robot.floating_base and self.robot.get_parent_id(ind) == -1:
+                    dc_dqd[ind:ind+5, ind:ind+5] += self.robot.get_damping_by_id(ind)
+                else:
+                    dc_dqd[ind,ind] += self.robot.get_damping_by_id(ind)
+
+        return dc_dqd
+
+    def rnea_grad_original(self, q, qd, qdd = None, GRAVITY = -9.81, USE_VELOCITY_DAMPING = False):
+        # instead of passing in trajectory, what if we want our planning algorithm to solve for the optimal trajectory?
+        """
+        The gradients of inverse dynamics can be very extremely useful inputs into trajectory optimization algorithmss.
+        Input: trajectory, including position, velocity, and acceleration
+        Output: Computes the gradient of joint forces with respect to the positions and velocities. 
+        """ 
+        
+        (c, v, a, f) = self.rnea(q, qd, qdd, GRAVITY)
+
+        # forward pass, dq
+        (dv_dq, da_dq, df_dq) = self.rnea_grad_fpass_dq(q, qd, v, a, GRAVITY)
+        print(f"df/dq {df_dq.shape}")
+        print(df_dq)
+        # forward pass, dqd
+        (dv_dqd, da_dqd, df_dqd) = self.rnea_grad_fpass_dqd(q, qd, v)
+
+        # backward pass, dq
+        dc_dq = self.rnea_grad_bpass_dq(q, f, df_dq)
+
+        # backward pass, dqd
+        dc_dqd = self.rnea_grad_bpass_dqd(q, df_dqd, USE_VELOCITY_DAMPING)
+
+        dc_du = np.hstack((dc_dq,dc_dqd))
+        return dc_du
 
         
