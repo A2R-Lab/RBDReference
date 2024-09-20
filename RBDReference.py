@@ -766,10 +766,12 @@ class RBDReference:
             temp = u[inds_v] - np.matmul(np.transpose(U[:, inds_v]), a[:, ind])
 
             if parent_ind == -1:
-                qdd[inds_v] = np.matmul(np.linalg.inv(d[ind]), temp)
+                # qdd[inds_v] = np.matmul(np.linalg.inv(d[ind]), temp)
+                qdd[inds_v] = np.linalg.solve(d[ind], temp)
                 a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.matmul(S.T,qdd[inds_v]) + c[:, ind]
             else:
-                qdd[inds_v] = np.linalg.inv(d[ind]) * temp
+                # qdd[inds_v] = np.linalg.inv(d[ind]) * temp
+                qdd[inds_v] = temp / d[ind]
                 a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.dot(S.T,qdd[inds_v]) + c[:, ind]
         return qdd
 
@@ -870,6 +872,34 @@ class RBDReference:
                     H[j, ind] = H[ind, j]
 
         return H 
+    
+    def forward_dynamics_grad(self, q, qd, tau):
+        """
+        Compute the gradient of the forward dynamics with respect to the generalized coordinates, velocities, and torques.
+
+        Parameters:
+        q (numpy.ndarray): Generalized coordinates (joint positions).
+        qd (numpy.ndarray): Generalized velocities (joint velocities).
+        tau (numpy.ndarray): Generalized forces (joint torques).
+
+        Returns:
+        tuple: A tuple containing:
+            - dqdd_dq (numpy.ndarray): Gradient of the joint accelerations with respect to the joint positions.
+            - dqdd_dqd (numpy.ndarray): Gradient of the joint accelerations with respect to the joint velocities.
+            - dqdd_dc (numpy.ndarray): Gradient of the joint accelerations with respect to the joint torques.
+        """
+
+        qdd = self.aba(q, qd, tau)
+
+        dc_dq, dc_dqd = self.rnea_grad(q, qd, qdd = qdd)
+
+        Minv = self.minv(q)
+
+        dqdd_dc = Minv
+        dqdd_dq = np.matmul(-Minv, dc_dq)
+        dqdd_dqd = np.matmul(-Minv, dc_dqd)
+
+        return dqdd_dq, dqdd_dqd, dqdd_dc
     
 
         
