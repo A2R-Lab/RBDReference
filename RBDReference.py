@@ -169,6 +169,141 @@ class RBDReference:
         vecXIvec[5] = -vec[1]*temp[0+3] +  vec[0]*temp[1+3]
         return vecXIvec
     
+    """
+    End Effector Posiitons
+
+    offests is an array of np matricies of the form (offset_x, offset_y, offset_z, 1)
+    """
+    def end_effector_positions(self, q, offsets = [np.matrix([[0,0,0,1]])]):
+
+        # do for each branch in the chain
+        eePos_arr = []
+        for jid in self.robot.get_leaf_nodes():
+            
+            # chain up the transforms (version 1 for starting from the root)
+            # first get the joints in the chain
+            jidChain = sorted(self.robot.get_ancestors_by_id(jid))
+            jidChain.append(jid)
+            # then chain them up
+            Xmat_hom = np.eye(4)
+            for ind in jidChain:
+                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                Xmat_hom = np.matmul(Xmat_hom,currX)
+
+            # chain up the transforms (version 2 for starting from the leaf)
+            currId = jid
+            Xmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+            currId = self.robot.get_parent_id(currId)
+            while(currId != -1):
+                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                Xmat_hom = np.matmul(currX,Xmat_hom)
+                currId = self.robot.get_parent_id(currId)
+
+            # Then extract the end-effector position with the given offset(s)
+            # TODO update for multiple offsets
+
+            # xyz position is easy
+            eePos_xyz1 = Xmat_hom * offsets[0].transpose()
+
+            # roll pitch yaw is a bit more difficult
+            eePos_roll = np.arctan2(Xmat_hom[2,1],Xmat_hom[2,2])
+            pitch_temp = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
+            eePos_pitch = np.arctan2(-Xmat_hom[2,0],pitch_temp)
+            eePos_yaw = np.arctan2(Xmat_hom[1,0],Xmat_hom[0,0])
+            eePos_rpy = np.matrix([[eePos_roll,eePos_pitch,eePos_yaw]])
+
+            # then stack it up!
+            eePos = np.vstack((eePos_xyz1[:3,:],eePos_rpy.transpose()))
+            eePos_arr.append(eePos)
+        return eePos_arr
+
+    """
+    End Effectors Position Gradients
+    """
+    def equals_or_hstack(self, obj, col):
+        if obj is None:
+            obj = col
+        else:
+            obj = np.hstack((obj,col))
+        return obj
+    def end_effector_position_gradients(self, q, offsets = [np.matrix([[0,0,0,1]])]):
+        n = self.robot.get_num_joints()
+        
+        # For each branch chain up the transformations across all possible derivatives
+        # Note: if not in branch then 0
+        deePos_arr = []
+        for jid in self.robot.get_leaf_nodes():
+            
+            # first get the joints in the chain
+            jidChain = sorted(self.robot.get_ancestors_by_id(jid))
+            jidChain.append(jid)
+
+            # then compute the gradients
+            deePos = None
+            for dind in range(n):
+
+                # Note: if not in branch then 0
+                if dind not in jidChain:
+                    deePos_col = np.zeros((6,1))
+                    deePos = self.equals_or_hstack(deePos,deePos_col)
+                
+                else:
+                    # first chain up the transforms
+                    Xmat_hom = np.eye(4)
+                    dXmat_hom = np.eye(4)
+                    for ind in jidChain:
+                        dcurrX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                        currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                        if ind == dind: # use derivative
+                            dXmat_hom = np.matmul(dXmat_hom,dcurrX)
+                        else: # use normal transform
+                            dXmat_hom = np.matmul(dXmat_hom,currX)
+                        Xmat_hom = np.matmul(Xmat_hom,currX)
+
+                    # chain up the transforms (version 2 for starting from the leaf)
+                    currId = jid
+                    if currId == dind:
+                        dXmat_hom = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                    else:
+                        dXmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                    Xmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                    currId = self.robot.get_parent_id(currId)
+                    while(currId != -1):
+                        currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                        dcurrX = currX
+                        if currId == dind:
+                            dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                        dXmat_hom = np.matmul(dcurrX,dXmat_hom)
+                        Xmat_hom = np.matmul(currX,Xmat_hom)
+                        currId = self.robot.get_parent_id(currId)
+                    
+                    # Then extract the end-effector position with the given offset(s)
+                    # TODO handle different offsets for different branches
+
+                    # xyz position is easy
+                    deePos_xyz1 = dXmat_hom * offsets[0].transpose()
+
+                    # roll pitch yaw is a bit more difficult
+                    # note: d/dz of arctan2(y(z),x(z)) = [-x'(z)y(z)+x(z)y'(z)]/[(x(z)^2 + y(z)^2)]
+                    def darctan2(y,x,y_prime,x_prime):
+                        return (-x_prime*y + x*y_prime)/(x*x + y*y)
+                    # in other words for each atan2 we are plugging in Xmat_hom and dXmat_hom at 
+                    # those indicies into the spots as specified by that equation.
+                    # also note that d/dz of sqrt(f(z)) = f'(z)/2sqrt(f(z))
+                    deePos_roll = darctan2(Xmat_hom[2,1],Xmat_hom[2,2],dXmat_hom[2,1],dXmat_hom[2,2])
+                    pitch_sqrt_term = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
+                    dpitch_sqrt_term = (Xmat_hom[2,2]*dXmat_hom[2,2] + Xmat_hom[2,1]*dXmat_hom[2,1])/pitch_sqrt_term # note canceled out the 2 in the numer and denom
+                    deePos_pitch = darctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom[2,0],dpitch_sqrt_term)
+                    deePos_yaw = darctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom[1,0],dXmat_hom[0,0])
+                    deePos_rpy = np.matrix([[deePos_roll,deePos_pitch,deePos_yaw]])
+
+                    # then stack it up!
+                    deePos_col = np.vstack((deePos_xyz1[:3,:],deePos_rpy.transpose()))
+                    deePos = self.equals_or_hstack(deePos,deePos_col)
+
+            deePos_arr.append(deePos)
+        return deePos_arr
+
     def apply_external_forces(self, q, f_in, f_ext):
         """ Implementation based on spatial v2: https://github.com/ROAM-Lab-ND/spatial_v2_extended/blob/main/dynamics/apply_external_forces.m
         
