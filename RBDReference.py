@@ -662,124 +662,209 @@ class RBDReference:
         """
         Compute the Articulated Body Algorithm (ABA) to calculate the joint accelerations.
         """
-        # allocate memory TODO check NB vs. n
-        n = len(qd)
-        NB = self.robot.get_num_bodies()
-        v = np.zeros((6,NB))
-        c = np.zeros((6,NB))
-        a = np.zeros((6,NB))
-        IA = np.zeros((NB,6,6))
-        pA = np.zeros((6,NB))
-        # variables may require special indexing
-        f = np.zeros((6,n))
-        # d = np.zeros(n)
-        d = {}
-        U = np.zeros((6,n))
-        u = np.zeros(n)
-        qdd = np.zeros(n)
+        if self.robot.floating_base:
+            # allocate memory TODO check NB vs. n
+            n = len(qd)
+            NB = self.robot.get_num_bodies()
+            v = np.zeros((6,NB))
+            c = np.zeros((6,NB))
+            a = np.zeros((6,NB))
+            IA = np.zeros((NB,6,6))
+            pA = np.zeros((6,NB))
+            # variables may require special indexing
+            f = np.zeros((6,n))
+            # d = np.zeros(n)
+            d = {}
+            U = np.zeros((6,n))
+            u = np.zeros(n)
+            qdd = np.zeros(n)
 
-        gravity_vec = np.zeros((6))
-        gravity_vec[5] = GRAVITY  # a_base is gravity vec
+            gravity_vec = np.zeros((6))
+            gravity_vec[5] = GRAVITY  # a_base is gravity vec
 
-        # Initial Forward Pass
-        for ind in range(NB): # curr_id = ind for this loop
-            parent_ind = self.robot.get_parent_id(ind)
-            _q = q[self.robot.get_joint_index_q(ind)]
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
-            S = self.robot.get_S_by_id(ind)
-            inds_v = self.robot.get_joint_index_v(ind)
+            # Initial Forward Pass
+            for ind in range(NB): # curr_id = ind for this loop
+                parent_ind = self.robot.get_parent_id(ind)
+                _q = q[self.robot.get_joint_index_q(ind)]
+                Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+                S = self.robot.get_S_by_id(ind)
+                inds_v = self.robot.get_joint_index_v(ind)
 
-            if parent_ind == -1: # parent is base
-                if self.robot.floating_base:
-                    v[:, ind] = np.matmul(S, qd[ind:ind+6])
+                if parent_ind == -1: # parent is base
+                    if self.robot.floating_base:
+                        v[:, ind] = np.matmul(S, qd[ind:ind+6])
+                    else:
+                        v[:, ind] = np.squeeze(np.array(S*qd[ind]))
                 else:
-                    v[:, ind] = np.squeeze(np.array(S*qd[ind]))
-            else:
-                v[:, ind] = np.matmul(Xmat, v[:, parent_ind]) 
-                vJ = np.squeeze(np.array(S * qd[inds_v])) # reduces shape to (6,) matching v[:,curr_id]
-                v[:, ind] += vJ
-                c[:, ind] = np.matmul(self.cross_operator(v[:, ind]), vJ)
+                    v[:, ind] = np.matmul(Xmat, v[:, parent_ind]) 
+                    vJ = np.squeeze(np.array(S * qd[inds_v])) # reduces shape to (6,) matching v[:,curr_id]
+                    v[:, ind] += vJ
+                    c[:, ind] = np.matmul(self.cross_operator(v[:, ind]), vJ)
 
-            Imat = self.robot.get_Imat_by_id(ind)
-            # print(f'Imat:{Imat.shape}\n {Imat}')
-            # print(IA[:,:,ind].shape)
-            IA[ind] = Imat
+                Imat = self.robot.get_Imat_by_id(ind)
+                # print(f'Imat:{Imat.shape}\n {Imat}')
+                # print(IA[:,:,ind].shape)
+                IA[ind] = Imat
 
-            vcross=np.array([[0, -v[:,ind][2], v[:,ind][1], 0, 0, 0],
-            [v[:,ind][2], 0, -v[:,ind][0], 0, 0, 0], 
-            [-v[:,ind][1], v[:,ind][0], 0, 0, 0, 0],
-            [0, -v[:,ind][5], v[:,ind][4], 0, -v[:,ind][2], v[:,ind][1]], 
-            [v[:,ind][5],0, -v[:,ind][3], v[:,ind][2], 0, -v[:,ind][0]],
-            [-v[:,ind][4], v[:,ind][3], 0, -v[:,ind][1], v[:,ind][0], 0]])
+                vcross=np.array([[0, -v[:,ind][2], v[:,ind][1], 0, 0, 0],
+                [v[:,ind][2], 0, -v[:,ind][0], 0, 0, 0], 
+                [-v[:,ind][1], v[:,ind][0], 0, 0, 0, 0],
+                [0, -v[:,ind][5], v[:,ind][4], 0, -v[:,ind][2], v[:,ind][1]], 
+                [v[:,ind][5],0, -v[:,ind][3], v[:,ind][2], 0, -v[:,ind][0]],
+                [-v[:,ind][4], v[:,ind][3], 0, -v[:,ind][1], v[:,ind][0], 0]])
 
-            crf = -np.transpose(vcross) 
-            temp = np.matmul(crf, Imat)
+                crf = -np.transpose(vcross) 
+                temp = np.matmul(crf, Imat)
 
-            pA[:, ind] = np.matmul(temp, v[:, ind])
+                pA[:, ind] = np.matmul(temp, v[:, ind])
 
-        # apply external forces
-        pA = self.apply_external_forces(q, pA, f_ext)
+            # apply external forces
+            pA = self.apply_external_forces(q, pA, f_ext)
 
-        # Backward Pass
-        for ind in range(NB-1, -1, -1): # ind != ind for bpass
-            S = self.robot.get_S_by_id(ind)
-            parent_ind = self.robot.get_parent_id(ind)
-            inds_v = self.robot.get_joint_index_v(ind)
-            inds_q = self.robot.get_joint_index_q(ind)
-            _q = q[inds_q]
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
-
-            U[:, inds_v] = np.squeeze(np.matmul(IA[ind], S))
-            d[ind] = np.matmul(np.transpose(S), U[:, inds_v])
-            u[inds_v] = tau[inds_v] - (np.matmul(S.T, pA[:, ind])) - (np.matmul(U[:, inds_v].T, c[:, ind]))
-            U[:, inds_v] = np.matmul(Xmat.T, U[:, inds_v]) # spatial edit
-
-            if parent_ind != -1:
-
-                rightSide = np.reshape(U[:, inds_v], (6,1)) @ np.reshape(U[:, inds_v], (6,1)).T / d[ind]
-                Ia = np.matmul(Xmat.T, np.matmul(IA[ind], Xmat)) - rightSide # spatial edit
-
-                pa = np.matmul(Xmat.T, pA[:, ind] + np.matmul(IA[ind], c[:, ind]))
-                pa = pa + (np.reshape(U[:, inds_v], (6,1)) @ ((1/d[ind]) * u[inds_v])).T
-                
+            # Backward Pass
+            for ind in range(NB-1, -1, -1): # ind != ind for bpass
+                S = self.robot.get_S_by_id(ind)
+                parent_ind = self.robot.get_parent_id(ind)
+                inds_v = self.robot.get_joint_index_v(ind)
                 inds_q = self.robot.get_joint_index_q(ind)
                 _q = q[inds_q]
                 Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
-                temp = np.matmul(np.transpose(Xmat), Ia)
 
-                IA[parent_ind] = IA[parent_ind] + Ia # spatial edit
+                U[:, inds_v] = np.squeeze(np.matmul(IA[ind], S))
+                d[ind] = np.matmul(np.transpose(S), U[:, inds_v])
+                u[inds_v] = tau[inds_v] - (np.matmul(S.T, pA[:, ind])) - (np.matmul(U[:, inds_v].T, c[:, ind]))
+                U[:, inds_v] = np.matmul(Xmat.T, U[:, inds_v]) # spatial edit
 
-                pA[:, parent_ind] = pA[:, parent_ind] + pa # spatial edit
+                if parent_ind != -1:
+
+                    rightSide = np.reshape(U[:, inds_v], (6,1)) @ np.reshape(U[:, inds_v], (6,1)).T / d[ind]
+                    Ia = np.matmul(Xmat.T, np.matmul(IA[ind], Xmat)) - rightSide # spatial edit
+
+                    pa = np.matmul(Xmat.T, pA[:, ind] + np.matmul(IA[ind], c[:, ind]))
+                    pa = pa + (np.reshape(U[:, inds_v], (6,1)) @ ((1/d[ind]) * u[inds_v])).T
+                    
+                    inds_q = self.robot.get_joint_index_q(ind)
+                    _q = q[inds_q]
+                    Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+                    temp = np.matmul(np.transpose(Xmat), Ia)
+
+                    IA[parent_ind] = IA[parent_ind] + Ia # spatial edit
+
+                    pA[:, parent_ind] = pA[:, parent_ind] + pa # spatial edit
 
 
-        # Final Forward Pass
-        for ind in range(NB): # ind != ind for bpass
-            parent_ind = self.robot.get_parent_id(ind)
-            inds_q = self.robot.get_joint_index_q(ind)
-            inds_v = self.robot.get_joint_index_v(ind)
-            _q = q[inds_q]
-            Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
+            # Final Forward Pass
+            for ind in range(NB): # ind != ind for bpass
+                parent_ind = self.robot.get_parent_id(ind)
+                inds_q = self.robot.get_joint_index_q(ind)
+                inds_v = self.robot.get_joint_index_v(ind)
+                _q = q[inds_q]
+                Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
 
-            if parent_ind == -1: # parent is base
-                a[:, ind] = -gravity_vec
-            else:
-                a[:, ind] = a[:, parent_ind]
-            
-            S = self.robot.get_S_by_id(ind)
-            temp = u[inds_v] - np.matmul(np.transpose(U[:, inds_v]), a[:, ind])
-
-            if parent_ind == -1:
-                # qdd[inds_v] = np.matmul(np.linalg.inv(d[ind]), temp)
-                if self.robot.floating_base:
-                    qdd[inds_v] = np.linalg.solve(d[ind], temp)
-                    a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.matmul(S.T,qdd[inds_v]) + c[:, ind]
+                if parent_ind == -1: # parent is base
+                    a[:, ind] = -gravity_vec
                 else:
-                    qdd[ind] = temp / d[ind]
-                    a[:, ind] = np.matmul(Xmat, a[:, ind]) + qdd[ind]*S.T + c[:, ind]
-            else:
-                # qdd[inds_v] = np.linalg.inv(d[ind]) * temp
-                qdd[inds_v] = temp / d[ind]
-                a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.dot(S.T,qdd[inds_v]) + c[:, ind]
+                    a[:, ind] = a[:, parent_ind]
+                
+                S = self.robot.get_S_by_id(ind)
+                temp = u[inds_v] - np.matmul(np.transpose(U[:, inds_v]), a[:, ind])
+
+                if parent_ind == -1:
+                    # qdd[inds_v] = np.matmul(np.linalg.inv(d[ind]), temp)
+                    if self.robot.floating_base:
+                        qdd[inds_v] = np.linalg.solve(d[ind], temp)
+                        a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.matmul(S.T,qdd[inds_v]) + c[:, ind]
+                    else:
+                        qdd[ind] = temp / d[ind]
+                        a[:, ind] = np.matmul(Xmat, a[:, ind]) + qdd[ind]*S.T + c[:, ind]
+                else:
+                    # qdd[inds_v] = np.linalg.inv(d[ind]) * temp
+                    qdd[inds_v] = temp / d[ind]
+                    a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.dot(S.T,qdd[inds_v]) + c[:, ind]
+        else:
+            n = len(qd)
+            v = np.zeros((6,n))
+            c = np.zeros((6,n))
+            a = np.zeros((6,n))
+            f = np.zeros((6,n))
+            d = np.zeros(n)
+            U = np.zeros((6,n))
+            u = np.zeros(n)
+            IA = np.zeros((6,6,n))
+            pA = np.zeros((6,n))
+            qdd = np.zeros(n)
+            
+            
+            gravity_vec = np.zeros((6))
+            gravity_vec[5] = -GRAVITY # a_base is gravity vec
+                    
+            for ind in range(n):
+                parent_ind = self.robot.get_parent_id(ind)
+                Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+                S = self.robot.get_S_by_id(ind)
+
+                if parent_ind == -1: # parent is base
+                    v[:,ind] = np.squeeze(np.array(S*qd[ind]))
+                    
+                else:
+                    v[:,ind] = np.matmul(Xmat,v[:,parent_ind])
+                    v[:,ind] += np.squeeze(np.array(S*qd[ind]))
+                    c[:,ind] = self._mxS(S,v[:,ind],qd[ind])
+
+                Imat = self.robot.get_Imat_by_id(ind)
+
+                IA[:,:,ind] = Imat
+
+                vcross=np.array([[0, -v[:,ind][2], v[:,ind][1], 0, 0, 0],
+                [v[:,ind][2], 0, -v[:,ind][0], 0, 0, 0], 
+                [-v[:,ind][1], v[:,ind][0], 0, 0, 0, 0],
+                [0, -v[:,ind][5], v[:,ind][4], 0, -v[:,ind][2], v[:,ind][1]], 
+                [v[:,ind][5],0, -v[:,ind][3], v[:,ind][2], 0, -v[:,ind][0]],
+                [-v[:,ind][4], v[:,ind][3], 0, -v[:,ind][1], v[:,ind][0], 0]])
+
+                crf=-np.transpose(vcross)
+                temp=np.matmul(crf,Imat)
+
+                pA[:,ind]=np.matmul(temp,v[:,ind])[0]
+            
+            for ind in range(n-1,-1,-1):
+                S = self.robot.get_S_by_id(ind)
+                parent_ind = self.robot.get_parent_id(ind)
+
+                U[:,ind] = np.squeeze(np.array(np.matmul(IA[:,:,ind],S)))
+                d[ind] = np.matmul(np.transpose(S),U[:,ind])
+                u[ind] = tau[ind] - np.matmul(np.transpose(S),pA[:,ind])
+
+                if parent_ind != -1:
+
+                    rightSide=np.reshape(U[:,ind],(6,1))@np.reshape(U[:,ind],(6,1)).T/d[ind]
+                    Ia = IA[:,:,ind] - rightSide
+
+                    pa = pA[:,ind] + np.matmul(Ia, c[:,ind]) + U[:,ind]*u[ind]/d[ind]
+
+                    Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+                    temp = np.matmul(np.transpose(Xmat), Ia)
+
+                    IA[:,:,parent_ind] = IA[:,:,parent_ind] + np.matmul(temp,Xmat)
+
+                    temp = np.matmul(np.transpose(Xmat), pa)
+                    pA[:,parent_ind]=pA[:,parent_ind] + temp.flatten()
+                                                
+            for ind in range(n):
+
+                parent_ind = self.robot.get_parent_id(ind)
+                Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+
+                if parent_ind == -1: # parent is base
+                    a[:,ind] = np.matmul(Xmat,gravity_vec) + c[:,ind]
+                else:
+                    a[:,ind] = np.matmul(Xmat, a[:,parent_ind]) + c[:,ind]
+
+                S = self.robot.get_S_by_id(ind)
+                temp = u[ind] - np.matmul(np.transpose(U[:,ind]),a[:,ind])
+                qdd[ind] = temp / d[ind]
+                a[:,ind] = a[:,ind] + qdd[ind]*S.T
+        
         return qdd
 
 
