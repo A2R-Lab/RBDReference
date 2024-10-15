@@ -690,7 +690,10 @@ class RBDReference:
             inds_v = self.robot.get_joint_index_v(ind)
 
             if parent_ind == -1: # parent is base
-                v[:, ind] = np.matmul(S, qd[ind:ind+6])
+                if self.robot.floating_base:
+                    v[:, ind] = np.matmul(S, qd[ind:ind+6])
+                else:
+                    v[:, ind] = np.squeeze(np.array(S*qd[ind]))
             else:
                 v[:, ind] = np.matmul(Xmat, v[:, parent_ind]) 
                 vJ = np.squeeze(np.array(S * qd[inds_v])) # reduces shape to (6,) matching v[:,curr_id]
@@ -767,8 +770,12 @@ class RBDReference:
 
             if parent_ind == -1:
                 # qdd[inds_v] = np.matmul(np.linalg.inv(d[ind]), temp)
-                qdd[inds_v] = np.linalg.solve(d[ind], temp)
-                a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.matmul(S.T,qdd[inds_v]) + c[:, ind]
+                if self.robot.floating_base:
+                    qdd[inds_v] = np.linalg.solve(d[ind], temp)
+                    a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.matmul(S.T,qdd[inds_v]) + c[:, ind]
+                else:
+                    qdd[ind] = temp / d[ind]
+                    a[:, ind] = np.matmul(Xmat, a[:, ind]) + qdd[ind]*S.T + c[:, ind]
             else:
                 # qdd[inds_v] = np.linalg.inv(d[ind]) * temp
                 qdd[inds_v] = temp / d[ind]
