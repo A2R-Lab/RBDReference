@@ -4,7 +4,7 @@ np.set_printoptions(precision=4, suppress=True, linewidth=100)
 
 class RBDReference:
     def __init__(self, robotObj):
-        self.robot = robotObj
+        self.robot = robotObj # instance of Robot Object class created by URDFparser``
 
     def cross_operator(self, v):
         # for any vector v, computes the operator v x 
@@ -23,9 +23,10 @@ class RBDReference:
     def dual_cross_operator(self, v):
         #(crf in in spatial_v2_extended)
         return(-1 * self.cross_operator(v).T)
-    
+
     def icrf(self, v):
         #helper function defined in spatial_v2_extended library, called by idsva() and rnea_grad()
+
         res = [[0,  -v[2],  v[1],    0,  -v[5],  v[4]],
             [v[2],    0,  -v[0],  v[5],    0,  -v[3]],
             [-v[1],  v[0],    0,  -v[4],  v[3],    0],
@@ -160,10 +161,14 @@ class RBDReference:
         return result
 
     def fxS(self, S, vec, alpha=1.0):
-        return -self._mxS(S, vec, alpha) #changed to _mxS
-
+        # force spatial corss product with motion subspace
+        return -self._mxS(S, vec, alpha) #changed from mxS to _mxS
+      
     def vxIv(self, vec, Imat):
-        temp = np.matmul(Imat, vec)
+        # necessary component in differentiating Iv (product rule).
+        # We express I_dot x v as v x (Iv) (see Featherstone 2.14)
+        # our core equation of motion is f = d/dt (Iv) = Ia + vx* Iv
+        temp = np.matmul(Imat,vec)
         vecXIvec = np.zeros((6))
         vecXIvec[0] = -vec[2]*temp[1]   +  vec[1]*temp[2] + -vec[2+3]*temp[1+3] +  vec[1+3]*temp[2+3]
         vecXIvec[1] =  vec[2]*temp[0]   + -vec[0]*temp[2] +  vec[2+3]*temp[0+3] + -vec[0+3]*temp[2+3]
@@ -358,6 +363,7 @@ class RBDReference:
             inds_q = self.robot.get_joint_index_q(curr_id)
             _q = q[inds_q]
             Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+
             # compute v and a
             if parent_id == -1:  # parent is fixed base or world
                 # v_base is zero so v[:,ind] remains 0
@@ -370,6 +376,7 @@ class RBDReference:
             vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
             v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
             a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
+            
             if qdd is not None:
                 _qdd = qdd[inds_v]
                 aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
@@ -380,7 +387,7 @@ class RBDReference:
 
         return (v, a, f)
 
-    def rnea_bpass(self, q, f):
+def rnea_bpass(self, q, f, USE_VELOCITY_DAMPING = False):
         # allocate memory
         NB = self.robot.get_num_bodies()
         m = self.robot.get_num_vel()
@@ -401,13 +408,35 @@ class RBDReference:
                 temp = np.matmul(np.transpose(Xmat), f[:, curr_id])
                 f[:, parent_id] = f[:, parent_id] + temp.flatten()
 
+        if USE_VELOCITY_DAMPING:
+            for k in range(n):
+                c[k] += self.robot.get_damping_by_id(k) * qd[k]
         return (c, f)
 
-    def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, f_ext=None):
+def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, USE_VELOCITY_DAMPING = False, f_ext=None):
+        """
+        Recursive Newton-Euler Method is a recursive inverse dynamics algorithm to calculate the forces required for a specified trajectory
+
+        RNEA divided into 3 parts: 
+            1) calculate the velocity and acceleration of each body in the tree
+            2) Calculate the forces necessary to produce these accelertions
+            3) Calculate the forces transmitted across the joints from the forces acting on the bodies
+            
+        INPUT:
+        q, qd, qdd: position, velocity, acceleration. Nx1 arrays where N is the number of bodies
+        GRAVITY - gravitational field of the body; default is earth surface gravity, 9.81
+        USE_VELOCITY_DAMPING: flag for whether velocity is damped, representing ___
+        
+        OUTPUTS: 
+        c: Coriolis terms and other forces potentially be applied to the system. 
+        v: velocity of each joint in world base coordinates rather than motion subspace
+        a: acceleration of each joint in world base coordinates rather than motion subspace
+        f: forces that joints must apply to produce trajectory
+        """
         # forward pass
         (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY)
         # backward pass
-        (c, f) = self.rnea_bpass(q, f)
+        (c, f) = self.rnea_bpass(q, f, USE_VELOCITY_DAMPING)
 
         return (c, v, a, f)
 
@@ -511,7 +540,7 @@ class RBDReference:
             for c in range(n): # TODO check here and redo as vectorized
                 if parent_ind == -1 and self.robot.floating_base:
                     for ii in range(len(inds_v)):
-                        da_dqd[:,c,ind] += self._mxS(S[ii],dv_dqd[:,c,ind],qd[ii]) # NOTE maybe add special caseo f _mxS when S is 6x6 identity
+                        da_dqd[:,c,ind] += self._mxS(S[ii],dv_dqd[:,c,ind],qd[ii]) # TODO maybe add special case of _mxS when S is 6x6 identity
                 else:
                     da_dqd[:,c,ind] += self._mxS(S,dv_dqd[:,c,ind],qd[inds_v]) 
 
@@ -577,6 +606,7 @@ class RBDReference:
         Returns:
             numpy.ndarray: Array representing the gradient of the RNEA backward pass with respect to the joint velocities.
         """
+
         # allocate memory
         NB = self.robot.get_num_bodies()
         n = self.robot.get_num_vel()  # len(qd) always
@@ -1435,4 +1465,3 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
         return dqdd_dq, dqdd_dqd, dqdd_dc
     
 
-        
