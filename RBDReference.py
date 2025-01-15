@@ -1,5 +1,6 @@
 import numpy as np
 import copy
+
 np.set_printoptions(precision=4, suppress=True, linewidth=100)
 
 class RBDReference:
@@ -373,13 +374,15 @@ class RBDReference:
                 a[:, curr_id] = np.matmul(Xmat, a[:, parent_id])
             inds_v = self.robot.get_joint_index_v(curr_id)
             _qd = qd[inds_v]
-            vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
+            if self.robot.floating_base and curr_id == 0: vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
+            else: vJ = S * _qd
             v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
             a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
             
             if qdd is not None:
                 _qdd = qdd[inds_v]
-                aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
+                if self.robot.floating_base and curr_id == 0: aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
+                else: aJ = S * _qdd
                 a[:, curr_id] += np.squeeze(np.array(aJ))  # reduces shape to (6,) matching a[:,curr_id]
             # compute f
             Imat = self.robot.get_Imat_by_id(curr_id)
@@ -387,58 +390,56 @@ class RBDReference:
 
         return (v, a, f)
 
-def rnea_bpass(self, q, f, USE_VELOCITY_DAMPING = False):
-        # allocate memory
-        NB = self.robot.get_num_bodies()
-        m = self.robot.get_num_vel()
-        c = np.zeros(m)
+    def rnea_bpass(self, q, f, USE_VELOCITY_DAMPING = False):
+            # allocate memory
+            NB = self.robot.get_num_bodies()
+            m = self.robot.get_num_vel()
+            c = np.zeros(m)
 
-        # backward pass
-        for curr_id in range(NB - 1, -1, -1):
-            parent_id = self.robot.get_parent_id(curr_id)
-            S = self.robot.get_S_by_id(curr_id)
-            inds_f = self.robot.get_joint_index_f(curr_id)
-            # compute c
-            c[inds_f] = np.matmul(np.transpose(S), f[:, curr_id])
-            # update f if applicable
-            if parent_id != -1:
-                inds_q = self.robot.get_joint_index_q(curr_id)
-                _q = q[inds_q]
-                Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
-                temp = np.matmul(np.transpose(Xmat), f[:, curr_id])
-                f[:, parent_id] = f[:, parent_id] + temp.flatten()
+            # backward pass
+            for curr_id in range(NB - 1, -1, -1):
+                parent_id = self.robot.get_parent_id(curr_id)
+                S = self.robot.get_S_by_id(curr_id)
+                inds_f = self.robot.get_joint_index_f(curr_id)
+                # compute c
+                c[inds_f] = np.matmul(np.transpose(S), f[:, curr_id])
+                # update f if applicable
+                if parent_id != -1:
+                    inds_q = self.robot.get_joint_index_q(curr_id)
+                    _q = q[inds_q]
+                    Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
+                    temp = np.matmul(np.transpose(Xmat), f[:, curr_id])
+                    f[:, parent_id] = f[:, parent_id] + temp.flatten()
 
-        if USE_VELOCITY_DAMPING:
-            for k in range(n):
-                c[k] += self.robot.get_damping_by_id(k) * qd[k]
-        return (c, f)
-
-def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, USE_VELOCITY_DAMPING = False, f_ext=None):
-        """
-        Recursive Newton-Euler Method is a recursive inverse dynamics algorithm to calculate the forces required for a specified trajectory
-
-        RNEA divided into 3 parts: 
-            1) calculate the velocity and acceleration of each body in the tree
-            2) Calculate the forces necessary to produce these accelertions
-            3) Calculate the forces transmitted across the joints from the forces acting on the bodies
             
-        INPUT:
-        q, qd, qdd: position, velocity, acceleration. Nx1 arrays where N is the number of bodies
-        GRAVITY - gravitational field of the body; default is earth surface gravity, 9.81
-        USE_VELOCITY_DAMPING: flag for whether velocity is damped, representing ___
-        
-        OUTPUTS: 
-        c: Coriolis terms and other forces potentially be applied to the system. 
-        v: velocity of each joint in world base coordinates rather than motion subspace
-        a: acceleration of each joint in world base coordinates rather than motion subspace
-        f: forces that joints must apply to produce trajectory
-        """
-        # forward pass
-        (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY)
-        # backward pass
-        (c, f) = self.rnea_bpass(q, f, USE_VELOCITY_DAMPING)
+            return (c, f)
 
-        return (c, v, a, f)
+    def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, USE_VELOCITY_DAMPING = False, f_ext=None):
+            """
+            Recursive Newton-Euler Method is a recursive inverse dynamics algorithm to calculate the forces required for a specified trajectory
+
+            RNEA divided into 3 parts: 
+                1) calculate the velocity and acceleration of each body in the tree
+                2) Calculate the forces necessary to produce these accelertions
+                3) Calculate the forces transmitted across the joints from the forces acting on the bodies
+                
+            INPUT:
+            q, qd, qdd: position, velocity, acceleration. Nx1 arrays where N is the number of bodies
+            GRAVITY - gravitational field of the body; default is earth surface gravity, 9.81
+            USE_VELOCITY_DAMPING: flag for whether velocity is damped, representing ___
+            
+            OUTPUTS: 
+            c: Coriolis terms and other forces potentially be applied to the system. 
+            v: velocity of each joint in world base coordinates rather than motion subspace
+            a: acceleration of each joint in world base coordinates rather than motion subspace
+            f: forces that joints must apply to produce trajectory
+            """
+            # forward pass
+            (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY)
+            # backward pass
+            (c, f) = self.rnea_bpass(q, f, USE_VELOCITY_DAMPING)
+
+            return (c, v, a, f)
 
     def rnea_grad_fpass_dq(self, q, qd, v, a, GRAVITY = -9.81):
         """
@@ -647,7 +648,7 @@ def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, USE_VELOCITY_DAMPING = False, f_e
 
         # forward pass, dq
         (dv_dq, da_dq, df_dq) = self.rnea_grad_fpass_dq(q, qd, v, a, GRAVITY)
- 
+
         # forward pass, dqd
         (dv_dqd, da_dqd, df_dqd) = self.rnea_grad_fpass_dqd(q, qd, v)
 
@@ -662,7 +663,7 @@ def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, USE_VELOCITY_DAMPING = False, f_e
 
     def idsva(self, q, qd, qdd, GRAVITY = -9.81):
         """alternative to rnea_grad(), described in "Efficient Analytical Derivatives of Rigid-Body Dynamics using
-Spatial Vector Algebra" (Singh, Russel, and Wensing)
+    Spatial Vector Algebra" (Singh, Russel, and Wensing)
 
         :param q: initial joint positions
         :type q: array representing a 1 by n vector, where n is the number of joints
@@ -820,7 +821,7 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
         for i in range(modelNB):
             parent_i = self.robot.get_parent_id(i)
             Xmat = self.robot.get_Xmat_Func_by_id(i)(q[i])
-          # compute X, v and a
+            # compute X, v and a
             if parent_i == -1: # parent is base
                 Xup0[i] = Xmat
                 a[:,i] = Xmat @ gravity_vec # 
@@ -948,7 +949,7 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
                 BC[pi] = BC[pi] + BC[i]
                 f[:, pi] = f[:, pi] + f[:, pi + 1]
         return d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq
-    
+
     def minv_bpass(self, q):
         """
         Performs the backward pass of the Minv algorithm.
@@ -1119,7 +1120,7 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
                         Minv[row, col] = Minv[col, row]
 
         return Minv
-    
+
     # 
     def crm(self,v):
         if len(v) == 6:
@@ -1127,8 +1128,8 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
         else:
             vcross = np.array([0, 0, 0], [v[3], 0, -v[1]], [-v[2], v[1], 0])
         return vcross
-    
-    
+
+
     def aba(self, q, qd, tau, f_ext=[], GRAVITY = -9.81):
         """
         Compute the Articulated Body Algorithm (ABA) to calculate the joint accelerations.
@@ -1436,6 +1437,25 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
 
         return H 
     
+    def forward_dynamics(self, q, qd, u):
+        """
+        Compute the forward dynamics with respect to the generalized coordinates, velocities, and torques.
+
+        Parameters:
+        q (numpy.ndarray): Generalized coordinates (joint positions).
+        qd (numpy.ndarray): Generalized velocities (joint velocities).
+        tau (numpy.ndarray): Generalized forces (joint torques).
+
+        Returns:
+        tuple: A tuple containing:
+            - dqdd_dq (numpy.ndarray): Gradient of the joint accelerations with respect to the joint positions.
+            - dqdd_dqd (numpy.ndarray): Gradient of the joint accelerations with respect to the joint velocities.
+            - dqdd_dc (numpy.ndarray): Gradient of the joint accelerations with respect to the joint torques.
+        """
+        (c,v,a,f) = self.rnea(q, qd)
+        minv = self.minv(q)
+        return np.matmul(minv, -c)
+
     def forward_dynamics_grad(self, q, qd, tau):
         """
         Compute the gradient of the forward dynamics with respect to the generalized coordinates, velocities, and torques.
@@ -1452,16 +1472,15 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
             - dqdd_dc (numpy.ndarray): Gradient of the joint accelerations with respect to the joint torques.
         """
 
-        qdd = self.aba(q, qd, tau)
+        qdd = self.forward_dynamics(q, qd, tau)
 
         dc_dq, dc_dqd = self.rnea_grad(q, qd, qdd = qdd)
 
         Minv = self.minv(q)
 
-        dqdd_dc = Minv
         dqdd_dq = np.matmul(-Minv, dc_dq)
         dqdd_dqd = np.matmul(-Minv, dc_dqd)
 
-        return dqdd_dq, dqdd_dqd, dqdd_dc
-    
+        return dqdd_dq, dqdd_dqd
+
 
