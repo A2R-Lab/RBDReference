@@ -677,25 +677,27 @@ class RBDReference:
             #print("IC", IC[ind])
             #print("fh", fh[ind])
         #print("fh ====== ")
-        #print(fh)
+        # print(fh)
         for ind in range(n-1, -1, -1): # in parallel
             S = self.robot.get_S_by_id(ind)
             M[ind, ind] = S.T@fh[ind]
 
         #print("H", H)
+        # print(n_bfs_levels)
         for bfs_level in range(n_bfs_levels,0,-1):  # print out c++ in a python loop
             inds = self.robot.get_ids_by_bfs_level(bfs_level)
             #print("bfs_level)", bfs_level)
             #print("inds", inds)
             parent_inds = copy.deepcopy(inds) #parent_inds as temp array in c++
+            # print(parent_inds)
             
             for parent_level in range(bfs_level): # print out c++ in a python loop
-                #print("parent_level", parent_level)
+                # print("parent_level", parent_level)
                 for parallel_index in range(len(inds)): # parallel loop
                     current_joint = inds[parallel_index]
-                    #print("parallel_index", parallel_index)
-                    #print("current joint", inds[parallel_index])
-                    #print("current parent", parent_inds[parallel_index])
+                    # print("parallel_index", parallel_index)
+                    # print("current joint", inds[parallel_index])
+                    # print("current parent", parent_inds[parallel_index])
                     if parent_inds[parallel_index] != -1:
                 #for ind in range(n-1, 0, -1):
                 #for ind in inds:
@@ -703,19 +705,19 @@ class RBDReference:
                     #if j_ind[ind] != -1:
                         # get X
                         curr_parent = parent_inds[parallel_index]
-                        #print("curr_parent real", curr_parent)
+                        # print("curr_parent real", curr_parent)
                         Xmat = self.robot.get_Xmat_Func_by_id(curr_parent)(q[curr_parent])
 
                         #print("fh pre", fh[current_joint])
                         #print("XMAT.T ", Xmat.T)
                         fh[current_joint] = Xmat.T@fh[current_joint]
-                        #print("fh", fh[current_joint])
-                        #print("fh", fh)
+                        # print("fh[curr_joint]", fh[current_joint])
+                        # print("fh", fh)
 
                         # update parent
                         parent_inds[parallel_index] = self.robot.get_parent_id(curr_parent)
                         curr_parent = parent_inds[parallel_index]
-                        #print("new parent", curr_parent)
+                        # print("new parent", curr_parent)
 
                         #sync and new loop 
 
@@ -727,13 +729,16 @@ class RBDReference:
                         S_parent = self.robot.get_S_by_id(curr_parent)
                         # compute H[i,j]
                         M[current_joint, curr_parent] = np.matmul(S_parent.T, fh[current_joint])
+                        # print(M)
                         #print("H= S_parent.T, fh[current_joint]",H[current_joint, curr_parent])
                         M[curr_parent, current_joint] = M[current_joint, curr_parent] 
                         #print("H", H)
                     else:
                         print("HOW IN THE WORLD DID WE EVER GET HERE?")
         
-        #print("M", M) 
+        # print("fh", fh) 
+        # print("fh.size", fh.size) robot
+
 
         """while self.robot.get_parent_id(j) > -1:
                 Xmat = self.robot.get_Xmat_Func_by_id(j)(q[j])
@@ -818,6 +823,7 @@ class RBDReference:
                 S = self.robot.get_S_by_id(j)
                 M[ind, j] = np.matmul(S.T, fh)
                 M[j, ind] = M[ind, j]
+        print("fh \n", fh)
                             
         return M
     
@@ -1254,7 +1260,14 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
             q_minus[i] = q_minus[i] - h  
 
             iddq_p, iddqd_p = np.array(self.idsva(q_plus,qd, qdd))
-            iddq_m, iddqd_p = np.array(self.idsva(q_minus,qd, qdd))
+            iddq_m, iddqd_m = np.array(self.idsva(q_minus,qd, qdd))
+
+            # print("iddq_p", iddq_p)
+            # print("iddqd_p", iddqd_p)
+
+            # print("iddq_m", iddq_m)
+            # print("iddqd_m", iddqd_m)
+
 
             d2tau_dq[:,:,i] = np.squeeze((iddq_p - iddq_m) / (2*h))
             
@@ -1623,6 +1636,62 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
         df_dq, df_dqd, df_du = self.fdsva(q,qd,qdd,tau,minv,dtau_dq,dtau_dqd)
         d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq = self.second_order_idsva_series(q,qd,qdd)
 
+        dM_dq = [[[ 0,     -1.7669, -0.0375,  0.4489, -0.0122 , 0.0204, -0   ],
+                [ 0,    -0.0973  ,1.2634 , 0.0692  ,0.03   ,-0.0239 ,-0   ],
+                [ 0,     -1.279  ,-0.0169,  0.4199 ,-0.0117,  0.0279, -0    ],
+                [ 0,      0.1688 ,-0.1428, -0.0036 ,-0.0111 , 0.0036,  0    ],
+                [ 0,     -0.0154 , 0.0035, -0.0086 ,-0.0147, -0.0413, -0    ],
+                [ 0,      0.0067 , 0.006,  -0.0039 ,-0.0514, -0.0061, -0    ],
+                [ 0,      0.0049 , 0,     -0.0049  ,0.0006 , 0.0048 , 0    ]],
+
+                [[ 0,    -0.0973 , 1.2634 , 0.0692 , 0.03 ,  -0.0239 ,-0   ],
+                [ 0,      0,      0.2303 ,-2.0164 , 0.0797,  0.1434 , 0    ],
+                [ 0,      0,      1.1739 , 0.0768 , 0.0267 ,-0.022  ,-0    ],
+                [ 0,      0,     -0.1695 , 0.9887 ,-0.0397 ,-0.097  ,-0    ],
+                [ 0,      0,      0.0112 ,-0.0288 , 0.0394 ,-0.0052 ,-0    ],
+                [ 0,      0,     -0.005  ,-0.0493 ,-0.0061 , 0.0741 , 0    ],
+                [ 0,      0,     -0.0048 ,-0.0003 ,-0.0026 , 0.0012  ,0    ]],
+
+                [[ 0,    -1.279 , -0.0169 , 0.4199, -0.0117 , 0.0279, -0    ],
+                [ 0,      0,      1.1739,  0.0768,  0.0267, -0.022,  -0    ],
+                [ 0,      0,      0,      0.3501 ,-0.0101 , 0.0375 ,-0    ],
+                [ 0,      0,      0,      0.0192 ,-0.0086 , 0,      0    ],
+                [ 0,      0,      0,     -0.0136 ,-0.0193 ,-0.0474, -0    ],
+                [ 0,      0,      0,     -0.0033 ,-0.0595 ,-0.0055 ,-0    ],
+                [ 0,      0,      0,     -0.0047 , 0.0006 , 0.0046 , 0    ]],
+
+                [[ 0,      0.1688 ,-0.1428, -0.0036, -0.0111,  0.0036,  0    ],
+                [ 0,     0,     -0.1695  ,0.9887 ,-0.0397, -0.097 , -0    ],
+                [ 0,      0,     0,      0.0192 ,-0.0086 , 0,      0    ],
+                [ 0,      0,      0,      0,      0.0009 , 0.0525,  0    ],
+                [ 0,      0,      0,      0,     -0.0282 , 0.0103, 0    ],
+                [ 0,      0,      0,      0,      0.0137 ,-0.0254,-0   ],
+                [ 0,      0,      0,      0,      0.0026 ,-0.0009 , 0    ]],
+
+                [[ 0,     -0.0154 , 0.0035, -0.0086, -0.0147, -0.0413,-0    ],
+                [ 0,      0,      0.0112, -0.0288,  0.0394, -0.0052, -0    ],
+                [ 0,      0,      0,     -0.0136, -0.0193, -0.0474, -0    ],
+                [ 0,      0,      0,      0,    -0.0282,  0.0103,  0    ],
+                [ 0,      0,      0,      0,      0,     -0.0116 ,-0    ],
+                [ 0,      0,      0,      0,      0,     -0,     -0    ],
+                [ 0,      0,      0,      0,      0,      0.0027,  0    ]],
+
+                [[ 0,      0.0067,  0.006,  -0.0039, -0.0514, -0.0061 ,-0    ],
+                [ 0,      0,     -0.005,  -0.0493, -0.0061 , 0.0741,  0    ],
+                [ 0,      0,      0,     -0.0033 ,-0.0595 ,-0.0055 ,-0    ],
+                [ 0 ,     0,      0  ,    0,      0.0137 ,-0.0254, -0    ],
+                [ 0,      0,      0,     0,     0,     -0,     -0    ],
+                [ 0,      0,      0,      0,      0,      0,      0    ],
+                [ 0,      0,      0,      0,      0,      0,      0    ]],
+
+                [[ 0,      0.0049 , 0,     -0.0049 , 0.0006,  0.0048,  0    ],
+                [ 0,      0,    -0.0048 ,-0.0003, -0.0026,  0.0012 , 0    ],
+                [ 0,      0,      0,     -0.0047,  0.0006 , 0.0046,  0    ],
+                [ 0,      0,      0,      0,      0.0026 ,-0.0009,  0    ],
+                [ 0,      0,      0,      0,      0,      0.0027 , 0    ],
+                [ 0,      0,      0,      0,      0,      0,      0    ],
+                [ 0,      0,      0,      0,      0,     0,      0    ]]]
+
         d2tau_dq_dqd = self.finite_diff_d2tau_dq_dqd(q,qd,tau)
         # print("d2tau_dq_dqd", d2tau_dq_dqd)
 
@@ -1636,27 +1705,27 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
         # print(dM_dq[0]@df_dq)
         # print("fddq", df_dq)
         temp = (dM_dq@df_dq) 
-        # print("temp", temp)
+        # print("dM_dq@df_dq", temp)
         rot_temp = self.rotate(temp)
         # print("rot_temp", rot_temp)
         df2_dq = (d2tau_dq + temp + rot_temp)
         # df2_dq = (d2tau_dq + temp)
         # print("d2tau_dq", d2tau_dq)
-        # print("df2_dq", df2_dq)
+        # print("df2_dq", df2_dq)    
 
         temp = (dM_dq@df_dqd)
-        # print("temp", temp)
+        # print("dM_dq@df_dqd", temp)
         df2_dqd_dq = (d2tau_cross + temp)
         # print("df2_dqd_dq", df2_dqd_dq)
 
         df2_dqd = (d2tau_dqd)
         # print("df2_dqd", df2_dqd)
 
-        # print("dM_dq", dM_dq)
-        # print("minv", minv)
+        print("dM_dq", dM_dq)
+        print("minv", minv)
 
         df2_dt_dq = (dM_dq@minv)
-        # print("df2_dt_dq", df2_dt_dq)
+        print("df2_dt_dq", df2_dt_dq)
 
         df2_dq_dqd = self.rotate(dM_dq@df_dqd)
         df2_dq_dqd += d2tau_dq_dqd 
@@ -1676,7 +1745,7 @@ Spatial Vector Algebra" (Singh, Russel, and Wensing)
         # print("df2_dq", df2_dq)
         # print("df2_dqd_dq", df2_dqd_dq)
         # print("df2_dqd", df2_dqd)
-        # print("df2_dt_dq", df2_dt_dq)
+        print("df2_dt_dq", df2_dt_dq)
 
 
 
