@@ -187,7 +187,7 @@ class RBDReference:
     TODO: Add and test floating base support.
     """
 
-    def end_effector_positions(self, q, offsets = [np.matrix([[0,0,0,1]])]):
+    def end_effector_pose(self, q, offsets = [np.matrix([[0,0,0,1]])]):
 
         # do for each branch in the chain
         eePos_arr = []
@@ -240,7 +240,7 @@ class RBDReference:
         else:
             obj = np.hstack((obj,col))
         return obj
-    def end_effector_position_gradients(self, q, offsets = [np.matrix([[0,0,0,1]])]):
+    def end_effector_pose_gradient(self, q, offsets = [np.matrix([[0,0,0,1]])]):
         n = self.robot.get_num_joints()
         
         # For each branch chain up the transformations across all possible derivatives
@@ -317,6 +317,133 @@ class RBDReference:
 
             deePos_arr.append(deePos)
         return deePos_arr
+
+    """
+    End Effector Hessian
+    * TODO: Add and test Floating base support.
+    """
+    def end_effector_pose_hessian(self, q, offsets = [np.matrix([[0,0,0,1]])]):
+        n = self.robot.get_num_joints()
+        
+        # For each branch chain up the transformations across all possible derivatives
+        # Note: if not in branch then 0
+        d2eePos_arr = []
+        for jid in self.robot.get_leaf_nodes():
+            
+            # first get the joints in the chain
+            jidChain = sorted(self.robot.get_ancestors_by_id(jid))
+            jidChain.append(jid)
+
+            # then compute the hessians
+            d2eePos = np.zeros((6,n,n))
+            for dind_i in range(n):
+                for dind_j in range(n):
+
+                    # Note: if not in branch then 0
+                    if (dind_i not in jidChain) or (dind_j not in jidChain):
+                        d2eePos[:,dind_i,dind_j] = np.zeros((6,))
+                    
+                    else:
+                        # first chain up the transforms (add derivatives where needed)
+                        Xmat_hom = np.eye(4)
+                        dXmat_hom_i = np.eye(4)
+                        dXmat_hom_j = np.eye(4)
+                        d2Xmat_hom = np.eye(4)
+                        for ind in jidChain:
+                            currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                            dcurrX_i = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                            dcurrX_j = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                            d2currX = self.robot.get_d2Xmat_hom_Func_by_id(ind)(q[ind])
+                            # first do normal chain
+                            Xmat_hom = np.matmul(Xmat_hom,currX)
+                            # then compute hessian and gradient terms
+                            if (ind == dind_i) or (ind == dind_j):
+                                if dind_i == dind_j: # use second derivative
+                                    d2Xmat_hom = np.matmul(d2Xmat_hom,d2currX)
+                                    # and then also keep first derivative chains going
+                                    dXmat_hom_i = np.matmul(dXmat_hom_i,dcurrX_i)
+                                    dXmat_hom_j = np.matmul(dXmat_hom_j,dcurrX_j)
+                                elif ind == dind_i: # use first derivative values
+                                    d2Xmat_hom = np.matmul(d2Xmat_hom,dcurrX_i)
+                                    dXmat_hom_i = np.matmul(dXmat_hom_i,dcurrX_i)
+                                    # and then also keep normal transform on other first chain
+                                    dXmat_hom_j = np.matmul(dXmat_hom_j,currX)
+                                elif ind == dind_j: # use first derivative values
+                                    d2Xmat_hom = np.matmul(d2Xmat_hom,dcurrX_j)
+                                    dXmat_hom_j = np.matmul(dXmat_hom_j,dcurrX_j)
+                                    # and then also keep normal transform on other first chain
+                                    dXmat_hom_i = np.matmul(dXmat_hom_i,currX)
+                            else: # use normal transform for all
+                                d2Xmat_hom = np.matmul(d2Xmat_hom,currX)
+                                dXmat_hom_i = np.matmul(dXmat_hom_i,currX)
+                                dXmat_hom_j = np.matmul(dXmat_hom_j,currX)
+
+                        # # chain up the transforms (version 2 for starting from the leaf)
+                        # currId = jid
+                        # if currId == dind:
+                        #     dXmat_hom = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                        # else:
+                        #     dXmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                        # Xmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                        # currId = self.robot.get_parent_id(currId)
+                        # while(currId != -1):
+                        #     currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                        #     dcurrX = currX
+                        #     if currId == dind:
+                        #         dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                        #     dXmat_hom = np.matmul(dcurrX,dXmat_hom)
+                        #     Xmat_hom = np.matmul(currX,Xmat_hom)
+                        #     currId = self.robot.get_parent_id(currId)
+                        
+                        # Then extract the end-effector position with the given offset(s)
+                        # TODO handle different offsets for different branches
+
+                        # xyz position is easy
+                        d2eePos_xyz1 = d2Xmat_hom * offsets[0].transpose()
+
+                        # roll pitch yaw is a bit more difficult
+                        # note: d/dz of arctan2(y(z),x(z)) = [-x'(z)y(z)+x(z)y'(z)]/[(x(z)^2 + y(z)^2)]
+                        def darctan2(y,x,y_prime,x_prime):
+                            return (-x_prime*y + x*y_prime)/(x*x + y*y)
+                        # then another chain / quotient rule
+                        def quotient_rule(top,bottom,dtop,dbottom):
+                            return (bottom*dtop - top*dbottom) / (bottom*bottom)
+                        def d2arctan2(y,x,y_prime_i,x_prime_i,y_prime_j,x_prime_j,y_prime_prime,x_prime_prime,i,j):
+                            top = -x_prime_i*y + x*y_prime_i
+                            dtop = -x_prime_prime*y + x*y_prime_prime
+                            if (i != j):
+                                dtop = dtop + (-x_prime_i*y_prime_j + x_prime_j*y_prime_i)
+                            bottom = x*x + y*y
+                            dbottom = 2*x*x_prime_j + 2*y*y_prime_j
+                            return quotient_rule(top,bottom,dtop,dbottom)
+                        # in other words for each atan2 we are plugging in Xmat_hom and dXmat_hom at 
+                        # those indicies into the spots as specified by that equation.
+                        # also note that d/dz of sqrt(f(z)) = f'(z)/2sqrt(f(z))
+                        d2eePos_roll = d2arctan2(Xmat_hom[2,1],Xmat_hom[2,2],dXmat_hom_i[2,1],dXmat_hom_i[2,2], \
+                                        dXmat_hom_j[2,1],dXmat_hom_j[2,2],d2Xmat_hom[2,1],d2Xmat_hom[2,2],dind_i,dind_j)
+
+                        pitch_sqrt_term = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
+                        dpitch_sqrt_term_i_top = Xmat_hom[2,2]*dXmat_hom_i[2,2] + Xmat_hom[2,1]*dXmat_hom_i[2,1]
+                        dpitch_sqrt_term_i = dpitch_sqrt_term_i_top/pitch_sqrt_term # note canceled out the 2 in the numer and denom
+                        dpitch_sqrt_term_j_top = Xmat_hom[2,2]*dXmat_hom_j[2,2] + Xmat_hom[2,1]*dXmat_hom_j[2,1]
+                        dpitch_sqrt_term_j = dpitch_sqrt_term_j_top/pitch_sqrt_term # note canceled out the 2 in the numer and denom
+                        # d2pitch_sqrt_term is quotient rule of dpitch_sqrt_term_i
+                        # top = dpitch_sqrt_term_i, bottom = pitch_sqrt_term, dtop = dpitch_sqrt_term_i_top_dj, dbottom = dpitch_sqrt_term_j
+                        dpitch_sqrt_term_i_top_dj = dXmat_hom_j[2,2]*dXmat_hom_i[2,2] + Xmat_hom[2,2]*d2Xmat_hom[2,2] + \
+                                                    dXmat_hom_j[2,1]*dXmat_hom_i[2,1] + Xmat_hom[2,1]*d2Xmat_hom[2,1]
+                        d2pitch_sqrt_term = quotient_rule(dpitch_sqrt_term_i,pitch_sqrt_term,dpitch_sqrt_term_i_top_dj,dpitch_sqrt_term_j)
+                        d2eePos_pitch = d2arctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom_i[2,0],dpitch_sqrt_term_i, \
+                                         -dXmat_hom_j[2,0],dpitch_sqrt_term_j,-d2Xmat_hom[2,0],d2pitch_sqrt_term,dind_i,dind_j)
+                        d2eePos_yaw = d2arctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom_i[1,0],dXmat_hom_i[0,0], \
+                                        dXmat_hom_j[1,0],dXmat_hom_j[0,0],d2Xmat_hom[1,0],d2Xmat_hom[0,0],dind_i,dind_j)
+                        d2eePos_rpy = np.matrix([[d2eePos_roll,d2eePos_pitch,d2eePos_yaw]])
+
+                        # then stack it up!
+                        d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy.transpose()))
+                        d2eePos[:,dind_i,dind_j] = d2eePos_col.reshape((6,))
+
+            d2eePos_arr.append(d2eePos)
+        return d2eePos_arr
     
     def apply_external_forces(self, q, f_in, f_ext):
         """ Implementation based on spatial v2: https://github.com/ROAM-Lab-ND/spatial_v2_extended/blob/main/dynamics/apply_external_forces.m
