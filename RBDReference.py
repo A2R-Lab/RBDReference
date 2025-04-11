@@ -328,76 +328,90 @@ class RBDReference:
         # For each branch chain up the transformations across all possible derivatives
         # Note: if not in branch then 0
         d2eePos_arr = []
-        for jid in self.robot.get_leaf_nodes():
+        for jid in self.robot.get_leaf_nodes(): # can be done in parallel
             
             # first get the joints in the chain
             jidChain = sorted(self.robot.get_ancestors_by_id(jid))
             jidChain.append(jid)
 
-            # then compute the hessians
+            # first chain up the 1st derivative transforms
+            dXmat_hom_arr = np.zeros((4,4,n+1))
+            for dind in range(n+1): # can be done in parallel
+                # n+1 for standard as well (noting that n+1 will never trigger derivative)
+                dXmat_hom_arr[:,:,dind] = np.eye(4)
+                for ind in jidChain:
+                    if ind == dind: # use derivative
+                        dcurrX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                        dXmat_hom_arr[:,:,dind] = np.matmul(dXmat_hom_arr[:,:,dind],dcurrX)
+                    else: # use normal transform
+                        currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                        dXmat_hom_arr[:,:,dind] = np.matmul(dXmat_hom_arr[:,:,dind],currX)
+
+            # chain up the 1st derivative transforms (version 2 for starting from the leaf)
+            dXmat_hom_arr = np.zeros((4,4,n+1))
+            for dind in range(n+1): # can be done in parallel
+                currId = jid
+                dXmat_hom_arr[:,:,dind] = np.eye(4)
+                while(currId != -1):
+                    if currId == dind:
+                        dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                    else:
+                        dcurrX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                    dXmat_hom_arr[:,:,dind] = np.matmul(dcurrX,dXmat_hom_arr[:,:,dind])
+                    currId = self.robot.get_parent_id(currId)
+
+            # then chain up the 2nd derivative transforms
+            d2Xmat_hom_arr = np.zeros((4,4,n,n))
+            for dind_i in range(n): # can be done in parallel
+                for dind_j in range(n): # can be done in parallel
+                    d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.eye(4)
+                    for ind in jidChain:
+                        if (ind == dind_i) or (ind == dind_j):
+                            if dind_i == dind_j: # use second derivative
+                                d2currX = self.robot.get_d2Xmat_hom_Func_by_id(ind)(q[ind])
+                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],d2currX)
+                            else: # use first derivative values
+                                dcurrX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],dcurrX)
+                        else: # use normal transform
+                            currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                            d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],currX)
+
+            # then chain up the 2nd derivative transforms (version 2 - backward)
+            for dind_i in range(n): # can be done in parallel
+                for dind_j in range(n): # can be done in parallel
+                    currId = jid
+                    d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.eye(4)
+                    while(currId != -1):
+                        if (currId == dind_i) or (currId == dind_j):
+                            if dind_i == dind_j: # use second derivative
+                                d2currX = self.robot.get_d2Xmat_hom_Func_by_id(currId)(q[currId])
+                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
+                            else: # use first derivative values
+                                dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(dcurrX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
+                        else: # use normal transform
+                            currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                            d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
+                        currId = self.robot.get_parent_id(currId)
+
+            # Then extract the end-effector position with the given offset(s)
+            # TODO handle different offsets for different branches
             d2eePos = np.zeros((6,n,n))
-            for dind_i in range(n):
-                for dind_j in range(n):
+            for dind_i in range(n): # can be done in parallel
+                for dind_j in range(n): # can be done in parallel
+
+                    # point to the correct transforms
+                    Xmat_hom = dXmat_hom_arr[:,:,n]
+                    dXmat_hom_i = dXmat_hom_arr[:,:,dind_i]
+                    dXmat_hom_j = dXmat_hom_arr[:,:,dind_j]
+                    d2Xmat_hom = d2Xmat_hom_arr[:,:,dind_i,dind_j]
 
                     # Note: if not in branch then 0
                     if (dind_i not in jidChain) or (dind_j not in jidChain):
                         d2eePos[:,dind_i,dind_j] = np.zeros((6,))
                     
                     else:
-                        # first chain up the transforms (add derivatives where needed)
-                        Xmat_hom = np.eye(4)
-                        dXmat_hom_i = np.eye(4)
-                        dXmat_hom_j = np.eye(4)
-                        d2Xmat_hom = np.eye(4)
-                        for ind in jidChain:
-                            currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
-                            dcurrX_i = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
-                            dcurrX_j = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
-                            d2currX = self.robot.get_d2Xmat_hom_Func_by_id(ind)(q[ind])
-                            # first do normal chain
-                            Xmat_hom = np.matmul(Xmat_hom,currX)
-                            # then compute hessian and gradient terms
-                            if (ind == dind_i) or (ind == dind_j):
-                                if dind_i == dind_j: # use second derivative
-                                    d2Xmat_hom = np.matmul(d2Xmat_hom,d2currX)
-                                    # and then also keep first derivative chains going
-                                    dXmat_hom_i = np.matmul(dXmat_hom_i,dcurrX_i)
-                                    dXmat_hom_j = np.matmul(dXmat_hom_j,dcurrX_j)
-                                elif ind == dind_i: # use first derivative values
-                                    d2Xmat_hom = np.matmul(d2Xmat_hom,dcurrX_i)
-                                    dXmat_hom_i = np.matmul(dXmat_hom_i,dcurrX_i)
-                                    # and then also keep normal transform on other first chain
-                                    dXmat_hom_j = np.matmul(dXmat_hom_j,currX)
-                                elif ind == dind_j: # use first derivative values
-                                    d2Xmat_hom = np.matmul(d2Xmat_hom,dcurrX_j)
-                                    dXmat_hom_j = np.matmul(dXmat_hom_j,dcurrX_j)
-                                    # and then also keep normal transform on other first chain
-                                    dXmat_hom_i = np.matmul(dXmat_hom_i,currX)
-                            else: # use normal transform for all
-                                d2Xmat_hom = np.matmul(d2Xmat_hom,currX)
-                                dXmat_hom_i = np.matmul(dXmat_hom_i,currX)
-                                dXmat_hom_j = np.matmul(dXmat_hom_j,currX)
-
-                        # # chain up the transforms (version 2 for starting from the leaf)
-                        # currId = jid
-                        # if currId == dind:
-                        #     dXmat_hom = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
-                        # else:
-                        #     dXmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
-                        # Xmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
-                        # currId = self.robot.get_parent_id(currId)
-                        # while(currId != -1):
-                        #     currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
-                        #     dcurrX = currX
-                        #     if currId == dind:
-                        #         dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
-                        #     dXmat_hom = np.matmul(dcurrX,dXmat_hom)
-                        #     Xmat_hom = np.matmul(currX,Xmat_hom)
-                        #     currId = self.robot.get_parent_id(currId)
-                        
-                        # Then extract the end-effector position with the given offset(s)
-                        # TODO handle different offsets for different branches
-
                         # xyz position is easy
                         d2eePos_xyz1 = d2Xmat_hom * offsets[0].transpose()
 
