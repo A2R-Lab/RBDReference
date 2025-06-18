@@ -1161,7 +1161,7 @@ class RBDReference:
         dc_dqd = self.rnea_grad_bpass_dqd(q, df_dqd, USE_VELOCITY_DAMPING)
 
         dc_du = np.hstack((dc_dq,dc_dqd))
-        return (dc_dq, dc_dqd)
+        return dc_du
 
 
     def forward_dynamics(self, q, qd, u):
