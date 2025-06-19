@@ -1171,7 +1171,9 @@ class RBDReference:
     
     def forward_dynamics_grad(self, q, qd, u):
         qdd = self.forward_dynamics(q,qd,u)
-        (dc_dq, dc_dqd) = self.rnea_grad(q, qd, qdd)
+        dc_du = self.rnea_grad(q, qd, qdd)
+        dc_dq = dc_du[:, :len(q)]
+        dc_dqd = dc_du[:, len(q):]
         
         minv = self.minv(q)
         qdd_dq = np.matmul(-minv, dc_dq)
@@ -1219,7 +1221,6 @@ class RBDReference:
                 a[:,i] = a[:,parent_i]
 
             Xdown0[i] = np.linalg.inv(Xup0[i]) 
-            print(f'\nXdown[{i}]:\n{Xdown0[i]}\n')
             S[:,i] = self.robot.get_S_by_id(i)
             S[:,i] = Xdown0[i] @ S[:,i]
             vJ[:,i] = S[:,i] * qd[i]
