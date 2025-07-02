@@ -1483,7 +1483,7 @@ class RBDReference:
 
 
 
-    def crba(self, q, qd):
+    def crba(self, q):
         """
         Computes the Composite Rigid Body Algorithm (CRBA) to calculate the joint-space inertia matrix.
         # Based on Featherstone implementation of CRBA p.182 in rigid body dynamics algorithms book.
@@ -1495,15 +1495,13 @@ class RBDReference:
 
         Parameters:
         - q (numpy.ndarray): Joint positions.
-        - qd (numpy.ndarray): Joint velocities.
 
         Returns:
         - H (numpy.ndarray): Joint-space inertia matrix.
         """
         if self.robot.floating_base:
             NB = self.robot.get_num_bodies()
-            n = len(qd)
-            H = np.zeros((n, n))
+            H = np.zeros((NB, NB))
 
             IC = copy.deepcopy(
                 self.robot.get_Imats_dict_by_id()
@@ -1547,7 +1545,7 @@ class RBDReference:
                     H[ind:6, ind:6] = np.matmul(S.T, fh)
         else:
             # # Fixed base implmentation of CRBA
-            n = len(qd)
+            n = len(q)
             IC = copy.deepcopy(
                 self.robot.get_Imats_dict_by_id()
             )  # composite inertia calculation
