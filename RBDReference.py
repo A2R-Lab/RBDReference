@@ -1311,9 +1311,8 @@ class RBDReference:
     def forward_dynamics_grad(self, q, qd, u):
         qdd = self.forward_dynamics(q,qd,u)
         dc_du = self.rnea_grad(q, qd, qdd)
-        dc_dq = dc_du[:, :len(q)]
-        dc_dqd = dc_du[:, len(q):]
-        
+        dc_dq, dc_dqd = np.hsplit(dc_du, [len(qd)])
+
         minv = self.minv(q)
         qdd_dq = np.matmul(-minv, dc_dq)
         qdd_dqd = np.matmul(-minv, dc_dqd)
