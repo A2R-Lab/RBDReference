@@ -1058,7 +1058,7 @@ class RBDReference:
 
         return H
 
-##### Testing original RNEA_grad to help with CUDA 
+    ##### Testing original RNEA_grad to help with CUDA 
     def rnea_grad_fpass_dq(self, q, qd, v, a, GRAVITY = -9.81):
         
         # allocate memory
@@ -1374,18 +1374,13 @@ class RBDReference:
             BC[i] = (self.dual_cross_operator(v[:,i])@IC[i] + self.icrf( IC[i] @ v[:,i]) - IC[i] @ self.cross_operator(v[:,i]))
             f[:,i] = IC[i] @ a[:,i] + self.dual_cross_operator(v[:,i]) @ IC[i] @v[:,i] 
 
-#backward pass: Can be parallelized across all j,d
+        #backward pass: Can be parallelized across all j,d
         for i in range(modelNB-1,-1,-1):
             pi = self.robot.get_parent_id(i)
             if pi >= 0:
                     IC[pi] = IC[pi] + IC[i]
                     BC[pi] = BC[pi] + BC[i]
                     f[:, pi] = f[:, pi] + f[:, pi + 1]
-        
-
-        # f is wrong in the CUDA
-#######################################
-        # print(f'\nf:\n{f}\n')
         
         T1 = np.zeros((6,n))
         T2 = np.zeros((6,n))
@@ -1435,7 +1430,6 @@ class RBDReference:
         d2tau_dqd = np.zeros((modelNV,modelNV,modelNV))
         d2tau_dvdq = np.zeros((modelNV,modelNV,modelNV))
         
-############################################
         #backward pass: Can be parallelized over all j,d,k,c 
         for j in range(modelNB-1,-1,-1):
             jj = j
@@ -1458,8 +1452,6 @@ class RBDReference:
                         Sd_c = Sd[:, k]
                         psid_c = psid[:, k]
 
-                        
-
                         # Compute temporary vectors
                         t1 = np.outer(S_d, psid_c.transpose()).flatten(order='F')
                         t2 = np.outer(S_d, S_c.transpose()).flatten(order='F')
@@ -1473,12 +1465,10 @@ class RBDReference:
                         p2 = self.cross_operator(psidd[:, k]) @ S_d
                         
                         # Updating the tensors based on the computed vectors and cross products
-        
                         d2tau_dq[st_j, dd, cc] = -np.dot(t3, D3[:, st_j]) - np.dot(p1, T2[:, st_j]) + np.dot(p2, T1[:, st_j])
                         d2tau_dvdq[st_j, dd, cc] = -np.dot(t1, D3[:, st_j])
 
                         # st_j is list of all ancestors of j
-                        
                         if k < j:
                             t6 = np.outer(S_c, psid_d.transpose()).flatten(order='F')
                             t7 = np.outer(S_c, psidd_d.transpose()).flatten(order='F')
