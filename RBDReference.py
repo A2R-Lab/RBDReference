@@ -189,13 +189,9 @@ class RBDReference:
     TODO: Add and test floating base support.
     """
 
-    def end_effector_pose(self, q, offsets = [np.matrix([[0,0,0,1]])]):
-
-        # do for each branch in the chain
-        eePos_arr = []
-        for jid in self.robot.get_leaf_nodes():
-            
-            # chain up the transforms (version 1 for starting from the root)
+    def end_effector_pose(self, q, ee_joint_names = None, ee_offsets = [np.matrix([[0,0,0,1]])]):
+        # chain up the transforms (version 1 for starting from the root)
+        def forwardChain(self, jid, q):
             # first get the joints in the chain
             jidChain = sorted(self.robot.get_ancestors_by_id(jid))
             jidChain.append(jid)
@@ -204,21 +200,22 @@ class RBDReference:
             for ind in jidChain:
                 currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
                 Xmat_hom = np.matmul(Xmat_hom,currX)
+            return Xmat_hom
 
-            # chain up the transforms (version 2 for starting from the leaf)
+        # chain up the transforms (version 2 for starting from the leaf)
+        def backwardChain(self, jid, q, finalXmat_hom = np.eye(4)):
             currId = jid
-            Xmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
-            currId = self.robot.get_parent_id(currId)
+            Xmat_hom = finalXmat_hom
             while(currId != -1):
                 currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
                 Xmat_hom = np.matmul(currX,Xmat_hom)
                 currId = self.robot.get_parent_id(currId)
+            return Xmat_hom
 
-            # Then extract the end-effector position with the given offset(s)
-            # TODO update for multiple offsets
-
+        # Extract the end-effector position with the given offset(s)
+        def eePos_from_Xmat_hom(Xmat_hom, ee_offsets):
             # xyz position is easy
-            eePos_xyz1 = Xmat_hom * offsets[0].transpose()
+            eePos_xyz1 = Xmat_hom * ee_offsets[0].transpose()
 
             # roll pitch yaw is a bit more difficult
             eePos_roll = np.arctan2(Xmat_hom[2,1],Xmat_hom[2,2])
@@ -229,7 +226,39 @@ class RBDReference:
 
             # then stack it up!
             eePos = np.vstack((eePos_xyz1[:3,:],eePos_rpy.transpose()))
-            eePos_arr.append(eePos)
+            return eePos
+
+        eePos_arr = []
+        # if no joints specified then do all leaf joints
+        if ee_joint_names is None:
+            for jid in self.robot.get_leaf_nodes():            
+                Xmat_hom = backwardChain(self, jid, q)
+                eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
+                eePos_arr.append(eePos)
+        # else search for specific end-effector joints
+        else:
+            ee_jids = []
+            fixed_jids = []
+            for name in ee_joint_names:
+                joint = self.robot.get_joint_by_name(name)
+                if joint is not None:
+                    ee_jids.append(joint.get_id())
+                else:
+                    fjoint = self.robot.get_fixed_joint_by_name(name)
+                    if fjoint is None:
+                        raise ValueError("Could not find joint or fixed joint named: " + name)
+                    fixed_jids.append(fjoint.get_id())
+
+            for jid in ee_jids:                
+                Xmat_hom = backwardChain(self, jid, q)
+                eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
+                eePos_arr.append(eePos)
+            for fjid in fixed_jids:
+                fj = self.robot.get_fixed_joint_by_id(fjid)
+                parent = self.robot.get_joint_by_name(fj.parent_name)
+                Xmat_hom = backwardChain(self, parent.get_id(), q, fj.get_transformation_matrix_hom())
+                eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
+                eePos_arr.append(eePos)
         return eePos_arr
 
     """
