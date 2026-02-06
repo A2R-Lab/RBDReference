@@ -181,6 +181,34 @@ class RBDReference:
         vecXIvec[5] = -vec[1]*temp[0+3] +  vec[0]*temp[1+3]
         return vecXIvec
     
+
+    """
+    End Effector Joint Selector
+
+    Helper function to select specific end-effector joints for the end-effector position and gradient functions. If no joints specified then defaults to all leaf joints.
+    """
+    def select_end_effector_joints(self, ee_joint_names):
+        # deterimine the target joints for the kinematic calcs
+        ee_jids = []
+        fixed_jids = []
+        # if no joints specified then do all leaf joints
+        if ee_joint_names is None:
+            ee_jids = self.robot.get_leaf_nodes()
+        # else search for specific end-effector joints
+        else:
+            ee_jids = []
+            fixed_jids = []
+            for name in ee_joint_names:
+                joint = self.robot.get_joint_by_name(name)
+                if joint is not None:
+                    ee_jids.append(joint.get_id())
+                else:
+                    fjoint = self.robot.get_fixed_joint_by_name(name)
+                    if fjoint is None:
+                        raise ValueError("Could not find joint or fixed joint named: " + name)
+                    fixed_jids.append(fjoint.get_id())
+        return ee_jids, fixed_jids
+
     """
     End Effector Posiitons
 
@@ -213,6 +241,7 @@ class RBDReference:
             return Xmat_hom
 
         # Extract the end-effector position with the given offset(s)
+        # TODO handle different offsets for different branches
         def eePos_from_Xmat_hom(Xmat_hom, ee_offsets):
             # xyz position is easy
             eePos_xyz1 = Xmat_hom * ee_offsets[0].transpose()
@@ -228,37 +257,20 @@ class RBDReference:
             eePos = np.vstack((eePos_xyz1[:3,:],eePos_rpy.transpose()))
             return eePos
 
+        # do the actual computations
         eePos_arr = []
-        # if no joints specified then do all leaf joints
-        if ee_joint_names is None:
-            for jid in self.robot.get_leaf_nodes():            
-                Xmat_hom = backwardChain(self, jid, q)
-                eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
-                eePos_arr.append(eePos)
-        # else search for specific end-effector joints
-        else:
-            ee_jids = []
-            fixed_jids = []
-            for name in ee_joint_names:
-                joint = self.robot.get_joint_by_name(name)
-                if joint is not None:
-                    ee_jids.append(joint.get_id())
-                else:
-                    fjoint = self.robot.get_fixed_joint_by_name(name)
-                    if fjoint is None:
-                        raise ValueError("Could not find joint or fixed joint named: " + name)
-                    fixed_jids.append(fjoint.get_id())
-
-            for jid in ee_jids:                
-                Xmat_hom = backwardChain(self, jid, q)
-                eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
-                eePos_arr.append(eePos)
-            for fjid in fixed_jids:
-                fj = self.robot.get_fixed_joint_by_id(fjid)
-                parent = self.robot.get_joint_by_name(fj.parent_name)
-                Xmat_hom = backwardChain(self, parent.get_id(), q, fj.get_transformation_matrix_hom())
-                eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
-                eePos_arr.append(eePos)
+        ee_jids, fixed_jids = self.select_end_effector_joints(ee_joint_names)
+        for jid in ee_jids:
+            # Xmat_hom = forwardChain(self, jid, q)                
+            Xmat_hom = backwardChain(self, jid, q)
+            eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
+            eePos_arr.append(eePos)
+        for fjid in fixed_jids:
+            fj = self.robot.get_fixed_joint_by_id(fjid)
+            parent = self.robot.get_joint_by_name(fj.parent_name)
+            Xmat_hom = backwardChain(self, parent.get_id(), q, fj.get_transformation_matrix_hom())
+            eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
+            eePos_arr.append(eePos)
         return eePos_arr
 
     """
@@ -271,81 +283,105 @@ class RBDReference:
         else:
             obj = np.hstack((obj,col))
         return obj
-    def end_effector_pose_gradient(self, q, offsets = [np.matrix([[0,0,0,1]])]):
+    def end_effector_pose_gradient(self, q, ee_joint_names = None, ee_offsets = [np.matrix([[0,0,0,1]])]):
         n = self.robot.get_num_joints()
+
+        # chain up the transforms (version 1 for starting from the root)
+        def dforward_chain(self, jidChain, dind, q):
+            Xmat_hom = np.eye(4)
+            dXmat_hom = np.eye(4)
+            for ind in jidChain:
+                dcurrX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                if ind == dind: # use derivative
+                    dXmat_hom = np.matmul(dXmat_hom,dcurrX)
+                else: # use normal transform
+                    dXmat_hom = np.matmul(dXmat_hom,currX)
+                Xmat_hom = np.matmul(Xmat_hom,currX)
+            return Xmat_hom, dXmat_hom
+
+        # chain up the transforms (version 2 for starting from the leaf)
+        def dbackward_chain(self, jid, dind, q, finalXmat_hom = np.eye(4)):
+            currId = jid
+            Xmat_hom = finalXmat_hom
+            dXmat_hom = finalXmat_hom
+            while(currId != -1):
+                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                dcurrX = currX
+                if currId == dind:
+                    dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                dXmat_hom = np.matmul(dcurrX,dXmat_hom)
+                Xmat_hom = np.matmul(currX,Xmat_hom)
+                currId = self.robot.get_parent_id(currId)
+            return Xmat_hom, dXmat_hom
         
-        # For each branch chain up the transformations across all possible derivatives
-        # Note: if not in branch then 0
+        # Extract the end-effector position with the given offset(s)
+        def deePos_col_from_Xmat_hom(Xmat_hom, dXmat_hom, ee_offsets):
+            # Then extract the end-effector position with the given offset(s)
+            # TODO handle different offsets for different branches
+
+            # xyz position is easy
+            deePos_xyz1 = dXmat_hom * ee_offsets[0].transpose()
+
+            # roll pitch yaw is a bit more difficult
+            # note: d/dz of arctan2(y(z),x(z)) = [-x'(z)y(z)+x(z)y'(z)]/[(x(z)^2 + y(z)^2)]
+            def darctan2(y,x,y_prime,x_prime):
+                return (-x_prime*y + x*y_prime)/(x*x + y*y)
+            # in other words for each atan2 we are plugging in Xmat_hom and dXmat_hom at 
+            # those indicies into the spots as specified by that equation.
+            # also note that d/dz of sqrt(f(z)) = f'(z)/2sqrt(f(z))
+            deePos_roll = darctan2(Xmat_hom[2,1],Xmat_hom[2,2],dXmat_hom[2,1],dXmat_hom[2,2])
+            pitch_sqrt_term = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
+            dpitch_sqrt_term = (Xmat_hom[2,2]*dXmat_hom[2,2] + Xmat_hom[2,1]*dXmat_hom[2,1])/pitch_sqrt_term # note canceled out the 2 in the numer and denom
+            deePos_pitch = darctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom[2,0],dpitch_sqrt_term)
+            deePos_yaw = darctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom[1,0],dXmat_hom[0,0])
+            deePos_rpy = np.matrix([[deePos_roll,deePos_pitch,deePos_yaw]])
+
+            # then stack it up!
+            deePos_col = np.vstack((deePos_xyz1[:3,:],deePos_rpy.transpose()))
+            return deePos_col
+
+        # Then compute the gradients for each end-effector requested
+        # -> For each branch chain up the transformations across all possible derivatives
         deePos_arr = []
-        for jid in self.robot.get_leaf_nodes():
-            
+        ee_jids, fixed_jids = self.select_end_effector_joints(ee_joint_names)
+        # First for the standard joints
+        for jid in ee_jids:
             # first get the joints in the chain
             jidChain = sorted(self.robot.get_ancestors_by_id(jid))
             jidChain.append(jid)
-
             # then compute the gradients
             deePos = None
             for dind in range(n):
-
                 # Note: if not in branch then 0
                 if dind not in jidChain:
                     deePos_col = np.zeros((6,1))
                     deePos = self.equals_or_hstack(deePos,deePos_col)
-                
                 else:
-                    # first chain up the transforms
-                    Xmat_hom = np.eye(4)
-                    dXmat_hom = np.eye(4)
-                    for ind in jidChain:
-                        dcurrX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
-                        currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
-                        if ind == dind: # use derivative
-                            dXmat_hom = np.matmul(dXmat_hom,dcurrX)
-                        else: # use normal transform
-                            dXmat_hom = np.matmul(dXmat_hom,currX)
-                        Xmat_hom = np.matmul(Xmat_hom,currX)
-
-                    # chain up the transforms (version 2 for starting from the leaf)
-                    currId = jid
-                    if currId == dind:
-                        dXmat_hom = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
-                    else:
-                        dXmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
-                    Xmat_hom = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
-                    currId = self.robot.get_parent_id(currId)
-                    while(currId != -1):
-                        currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
-                        dcurrX = currX
-                        if currId == dind:
-                            dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
-                        dXmat_hom = np.matmul(dcurrX,dXmat_hom)
-                        Xmat_hom = np.matmul(currX,Xmat_hom)
-                        currId = self.robot.get_parent_id(currId)
-                    
-                    # Then extract the end-effector position with the given offset(s)
-                    # TODO handle different offsets for different branches
-
-                    # xyz position is easy
-                    deePos_xyz1 = dXmat_hom * offsets[0].transpose()
-
-                    # roll pitch yaw is a bit more difficult
-                    # note: d/dz of arctan2(y(z),x(z)) = [-x'(z)y(z)+x(z)y'(z)]/[(x(z)^2 + y(z)^2)]
-                    def darctan2(y,x,y_prime,x_prime):
-                        return (-x_prime*y + x*y_prime)/(x*x + y*y)
-                    # in other words for each atan2 we are plugging in Xmat_hom and dXmat_hom at 
-                    # those indicies into the spots as specified by that equation.
-                    # also note that d/dz of sqrt(f(z)) = f'(z)/2sqrt(f(z))
-                    deePos_roll = darctan2(Xmat_hom[2,1],Xmat_hom[2,2],dXmat_hom[2,1],dXmat_hom[2,2])
-                    pitch_sqrt_term = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
-                    dpitch_sqrt_term = (Xmat_hom[2,2]*dXmat_hom[2,2] + Xmat_hom[2,1]*dXmat_hom[2,1])/pitch_sqrt_term # note canceled out the 2 in the numer and denom
-                    deePos_pitch = darctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom[2,0],dpitch_sqrt_term)
-                    deePos_yaw = darctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom[1,0],dXmat_hom[0,0])
-                    deePos_rpy = np.matrix([[deePos_roll,deePos_pitch,deePos_yaw]])
-
-                    # then stack it up!
-                    deePos_col = np.vstack((deePos_xyz1[:3,:],deePos_rpy.transpose()))
+                    # chain up the transforms (2 options)
+                    # Xmat_hom, dXmat_hom = dforward_chain(self, jidChain, dind, q)
+                    Xmat_hom, dXmat_hom = dbackward_chain(self, jid, dind, q)
+                    deePos_col = deePos_col_from_Xmat_hom(Xmat_hom, dXmat_hom, ee_offsets)
                     deePos = self.equals_or_hstack(deePos,deePos_col)
-
+            deePos_arr.append(deePos)
+        # Then for the fixed joints
+        for fjid in fixed_jids:
+            fj = self.robot.get_fixed_joint_by_id(fjid)
+            parent = self.robot.get_joint_by_name(fj.parent_name)
+            # first get the joints in the chain
+            jidChain = sorted(self.robot.get_ancestors_by_id(parent.get_id()))
+            jidChain.append(parent.get_id())
+            # then compute the gradients
+            deePos = None
+            for dind in range(n):
+                # Note: if not in branch then 0
+                if dind not in jidChain:
+                    deePos_col = np.zeros((6,1))
+                    deePos = self.equals_or_hstack(deePos,deePos_col)
+                else:
+                    Xmat_hom, dXmat_hom = dbackward_chain(self, parent.get_id(), dind, q, fj.get_transformation_matrix_hom())
+                    deePos_col = deePos_col_from_Xmat_hom(Xmat_hom, dXmat_hom, ee_offsets)
+                    deePos = self.equals_or_hstack(deePos,deePos_col)
             deePos_arr.append(deePos)
         return deePos_arr
 
