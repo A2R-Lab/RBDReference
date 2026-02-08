@@ -196,6 +196,8 @@ class RBDReference:
             ee_jids = self.robot.get_leaf_nodes()
         # else search for specific end-effector joints
         else:
+            if isinstance(ee_joint_names, str):
+                ee_joint_names = [ee_joint_names]
             ee_jids = []
             fixed_jids = []
             for name in ee_joint_names:
