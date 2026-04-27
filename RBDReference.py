@@ -269,8 +269,11 @@ class RBDReference:
             eePos_arr.append(eePos)
         for fjid in fixed_jids:
             fj = self.robot.get_fixed_joint_by_id(fjid)
-            parent = self.robot.get_joint_by_name(fj.parent_name)
-            Xmat_hom = backwardChain(self, parent.get_id(), q, fj.get_transformation_matrix_hom())
+            if fj.parent_name == -1:
+                Xmat_hom = fj.get_transformation_matrix_hom()
+            else:
+                parent = self.robot.get_joint_by_name(fj.parent_name)
+                Xmat_hom = backwardChain(self, parent.get_id(), q, fj.get_transformation_matrix_hom())
             eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
             eePos_arr.append(eePos)
         return eePos_arr
@@ -369,21 +372,28 @@ class RBDReference:
         # Then for the fixed joints
         for fjid in fixed_jids:
             fj = self.robot.get_fixed_joint_by_id(fjid)
-            parent = self.robot.get_joint_by_name(fj.parent_name)
-            # first get the joints in the chain
-            jidChain = sorted(self.robot.get_ancestors_by_id(parent.get_id()))
-            jidChain.append(parent.get_id())
-            # then compute the gradients
-            deePos = None
-            for dind in range(n):
-                # Note: if not in branch then 0
-                if dind not in jidChain:
-                    deePos_col = np.zeros((6,1))
-                    deePos = self.equals_or_hstack(deePos,deePos_col)
-                else:
-                    Xmat_hom, dXmat_hom = dbackward_chain(self, parent.get_id(), dind, q, fj.get_transformation_matrix_hom())
-                    deePos_col = deePos_col_from_Xmat_hom(Xmat_hom, dXmat_hom, ee_offsets)
-                    deePos = self.equals_or_hstack(deePos,deePos_col)
+            if fj.parent_name == -1:
+                deePos = None
+                Xmat_hom = fj.get_transformation_matrix_hom()
+                for _dind in range(n):
+                    deePos_col = deePos_col_from_Xmat_hom(Xmat_hom, np.zeros((4,4)), ee_offsets)
+                    deePos = self.equals_or_hstack(deePos, deePos_col)
+            else:
+                parent = self.robot.get_joint_by_name(fj.parent_name)
+                # first get the joints in the chain
+                jidChain = sorted(self.robot.get_ancestors_by_id(parent.get_id()))
+                jidChain.append(parent.get_id())
+                # then compute the gradients
+                deePos = None
+                for dind in range(n):
+                    # Note: if not in branch then 0
+                    if dind not in jidChain:
+                        deePos_col = np.zeros((6,1))
+                        deePos = self.equals_or_hstack(deePos,deePos_col)
+                    else:
+                        Xmat_hom, dXmat_hom = dbackward_chain(self, parent.get_id(), dind, q, fj.get_transformation_matrix_hom())
+                        deePos_col = deePos_col_from_Xmat_hom(Xmat_hom, dXmat_hom, ee_offsets)
+                        deePos = self.equals_or_hstack(deePos,deePos_col)
             deePos_arr.append(deePos)
         return deePos_arr
 
