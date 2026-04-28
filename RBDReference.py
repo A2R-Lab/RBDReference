@@ -993,7 +993,7 @@ class RBDReference:
                 crf=-np.transpose(vcross)
                 temp=np.matmul(crf,Imat)
 
-                pA[:,ind]=np.matmul(temp,v[:,ind])[0]
+                pA[:,ind] = np.matmul(temp, v[:,ind])
             
             for ind in range(n-1,-1,-1):
                 S = self.robot.get_S_by_id(ind)
