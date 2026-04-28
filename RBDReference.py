@@ -230,7 +230,8 @@ class RBDReference:
             # then chain them up
             Xmat_hom = np.eye(4)
             for ind in jidChain:
-                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                inds_q = self.robot.get_joint_index_q(ind)
+                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[inds_q])
                 Xmat_hom = np.matmul(Xmat_hom,currX)
             return Xmat_hom
 
@@ -239,7 +240,8 @@ class RBDReference:
             currId = jid
             Xmat_hom = finalXmat_hom
             while(currId != -1):
-                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                inds_q = self.robot.get_joint_index_q(currId)
+                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[inds_q])
                 Xmat_hom = np.matmul(currX,Xmat_hom)
                 currId = self.robot.get_parent_id(currId)
             return Xmat_hom
@@ -589,20 +591,25 @@ class RBDReference:
             # compute v and a
             if parent_id == -1:  # parent is fixed base or world
                 # v_base is zero so v[:,ind] remains 0
-                a[:, curr_id] = np.matmul(Xmat, gravity_vec)
+                if self.robot.floating_base:
+                    a[:, curr_id] = np.matmul(np.linalg.inv(Xmat), gravity_vec)
+                else:
+                    a[:, curr_id] = np.matmul(Xmat, gravity_vec)
             else:
                 v[:, curr_id] = np.matmul(Xmat, v[:, parent_id])
                 a[:, curr_id] = np.matmul(Xmat, a[:, parent_id])
             inds_v = self.robot.get_joint_index_v(curr_id)
             _qd = qd[inds_v]
             
-            if self.robot.floating_base and curr_id == 0: vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
+            if self.robot.floating_base and curr_id == 0:
+                vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
             else: vJ = S * _qd
             v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
             a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
             if qdd is not None:
                 _qdd = qdd[inds_v]
-                if self.robot.floating_base and curr_id == 0: aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
+                if self.robot.floating_base and curr_id == 0:
+                    aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
                 else: aJ = S * _qdd
                 a[:, curr_id] += np.squeeze(np.array(aJ))  # reduces shape to (6,) matching a[:,curr_id]
             # compute f
@@ -911,7 +918,7 @@ class RBDReference:
                     Ia = np.matmul(Xmat.T, np.matmul(IA[ind], Xmat)) - rightSide # spatial edit
 
                     pa = np.matmul(Xmat.T, pA[:, ind] + np.matmul(IA[ind], c[:, ind]))
-                    pa = pa + (np.reshape(U[:, inds_v], (6,1)) @ ((1/d[ind]) * u[inds_v])).T
+                    pa = pa + np.reshape(U[:, inds_v], (6, 1)).flatten() * ((1 / d[ind]) * u[inds_v])
                     
                     inds_q = self.robot.get_joint_index_q(ind)
                     _q = q[inds_q]
@@ -943,7 +950,7 @@ class RBDReference:
                     # qdd[inds_v] = np.matmul(np.linalg.inv(d[ind]), temp)
                     if self.robot.floating_base:
                         qdd[inds_v] = np.linalg.solve(d[ind], temp)
-                        a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.matmul(S.T,qdd[inds_v]) + c[:, ind]
+                        a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.matmul(S, qdd[inds_v]) + c[:, ind]
                     else:
                         qdd[ind] = temp / d[ind]
                         a[:, ind] = np.matmul(Xmat, a[:, ind]) + qdd[ind]*S.T + c[:, ind]
@@ -1058,7 +1065,8 @@ class RBDReference:
         """
         if self.robot.floating_base:
             NB = self.robot.get_num_bodies()
-            H = np.zeros((NB, NB))
+            n = self.robot.get_num_vel()
+            H = np.zeros((n, n))
 
             IC = copy.deepcopy(
                 self.robot.get_Imats_dict_by_id()
@@ -1100,7 +1108,7 @@ class RBDReference:
                     S = self.robot.get_S_by_id(ind)
                     parent_ind = self.robot.get_parent_id(ind)
                     fh = np.matmul(IC[ind], S)
-                    H[ind:6, ind:6] = np.matmul(S.T, fh)
+                    H[:6, :6] = np.matmul(S.T, fh)
         else:
             # # Fixed base implmentation of CRBA
             n = len(q)
@@ -1186,7 +1194,11 @@ class RBDReference:
             if parent_ind != -1: # note that a_base is just gravity
                 da_dq[:,idx,ind] += self._mxS(S,np.matmul(Xmat,a[:,parent_ind])) # replace with new mxS
             else:
-                da_dq[:,idx,ind] += self._mxS(S,np.matmul(Xmat,gravity_vec)) # replace with new mxS 
+                if self.robot.floating_base:
+                    root_gravity = np.matmul(np.linalg.inv(Xmat), gravity_vec)
+                else:
+                    root_gravity = np.matmul(Xmat, gravity_vec)
+                da_dq[:,idx,ind] += self._mxS(S,root_gravity) # replace with new mxS 
             # df_du = I*da_du + fx_onCols(dv_du)*Iv + fx(v)*I*dv_du
             Imat = self.robot.get_Imat_by_id(ind)
             
@@ -1285,7 +1297,6 @@ class RBDReference:
                     parent_idx = parent_ind + 5
                 else:
                     idx = [0,1,2,3,4,5]
-                    idx = self.robot.get_joint_index_q(ind)
             else:
                 idx = ind
                 parent_idx = parent_ind
@@ -1293,7 +1304,7 @@ class RBDReference:
             # dc_du is S^T*df_du
             S = self.robot.get_S_by_id(ind)
             if parent_ind == -1 and self.robot.floating_base:
-                dc_dq[:6] = df_dq[:,:,0] #
+                dc_dq[idx,:] = np.matmul(np.transpose(S),df_dq[:,:,ind])
             else:
                 dc_dq[idx,:]  = np.matmul(np.transpose(S),df_dq[:,:,ind]) 
             # df_du_parent += X^T*df_du + (if ind == c){X^T*fxS(f)}
