@@ -165,7 +165,9 @@ class RBDReference:
 
     def fxS(self, S, vec, alpha=1.0):
         # force spatial cross product with motion subspace
-        return -self._mxS(S, vec, alpha) #changed to _mxS
+        return np.squeeze(
+            np.array(alpha * np.matmul(self.dual_cross_operator(S), vec))
+        )
 
     def vxIv(self, vec, Imat):
         # necessary component in differentiating Iv (product rule).
