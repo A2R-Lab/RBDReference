@@ -2061,7 +2061,7 @@ class RBDReference:
         return qdd_dq, qdd_dqd
 
 
-    def second_order_idsva_parallel(self, q, qd, qdd, GRAVITY = -9.81):
+    def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):
         """Compute second-order derivatives of inverse dynamics via parallel IDSVA.
 
         Parameters
@@ -2079,52 +2079,78 @@ class RBDReference:
             Second-order derivatives of torques and inertia matrix.
         """
         # allocate memory
-        n = len(qd) # n = 7
-        v = np.zeros((6,n))
-        a = np.zeros((6,n))
-        f = np.zeros((6,n))
-        Xup0 =  [None] * n #list of transformation matrices in the world frame
-        Xdown0 = [None] * n
-        IC = [None] * n
-        BC = [None] * n
-        S = np.zeros((6,n))
-        Sd = np.zeros((6,n))
-        vJ = np.zeros((6,n))
-        aJ = np.zeros((6,n))
-        psid = np.zeros((6,n))
-        psidd = np.zeros((6,n))
+        NB = self.robot.get_num_bodies()
+        n = self.robot.get_num_vel()
+        v = np.zeros((6,NB))
+        a = np.zeros((6,NB))
+        f = np.zeros((6,NB))
+        Xup0 =  [None] * NB #list of transformation matrices in the world frame
+        Xdown0 = [None] * NB
+        IC = [None] * NB
+        BC = [None] * NB
+        S = [None] * NB
+        Sd = [None] * NB
+        vJ = np.zeros((6,NB))
+        aJ = np.zeros((6,NB))
+        psid = [None] * NB
+        psidd = [None] * NB
         gravity_vec = np.zeros(6)
         gravity_vec[5] = -GRAVITY # a_base is gravity vec
 
+        def inds_to_list(inds):
+            if isinstance(inds, list):
+                return inds
+            if isinstance(inds, tuple):
+                return list(inds)
+            if isinstance(inds, np.ndarray):
+                return list(inds.flatten())
+            return [inds]
+
+        body_v_inds = [inds_to_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
+
+        def subtree_vel_inds(subtree):
+            st_inds = []
+            for body_id in subtree:
+                st_inds += body_v_inds[body_id]
+            return st_inds
+
         # forward pass 
-        modelNB = n
-        modelNV = self.robot.get_num_joints()
+        modelNB = NB
+        modelNV = n
         for i in range(modelNB):
             parent_i = self.robot.get_parent_id(i)
-            Xmat = self.robot.get_Xmat_Func_by_id(i)(q[i])
+            inds_q = self.robot.get_joint_index_q(i)
+            _q = q[inds_q]
+            Xmat = self.robot.get_Xmat_Func_by_id(i)(_q)
           # compute X, v and a
             if parent_i == -1: # parent is base
                 Xup0[i] = Xmat
-                # a[:,i] = Xmat @ gravity_vec
-                a[:, i] = gravity_vec
+                if self.robot.floating_base:
+                    a[:, i] = np.matmul(np.linalg.inv(Xmat), gravity_vec)
+                else:
+                    a[:, i] = gravity_vec
             else:
                 Xup0[i] = Xmat @ Xup0[parent_i]
                 v[:,i] = v[:,parent_i]
                 a[:,i] = a[:,parent_i]
 
             Xdown0[i] = np.linalg.inv(Xup0[i]) 
-            S[:,i] = self.robot.get_S_by_id(i)
-            S[:,i] = Xdown0[i] @ S[:,i]
-            vJ[:,i] = S[:,i] * qd[i]
-            aJ[:,i] = self.cross_operator(v[:,i])@vJ[:,i] + S[:,i] * qdd[i]
-            psid[:,i] = self.cross_operator(v[:,i])@S[:,i]
-            psidd[:,i] = self.cross_operator(a[:,i])@S[:,i] + self.cross_operator(v[:,i])@psid[:,i]
+            S[i] = self.robot.get_S_by_id(i)
+            if len(S[i].shape) == 1:
+                S[i] = np.reshape(S[i], (6,1))
+            S[i] = Xdown0[i] @ S[i]
+            inds_v = self.robot.get_joint_index_v(i)
+            _qd = np.atleast_1d(qd[inds_v])
+            _qdd = np.atleast_1d(qdd[inds_v])
+            vJ[:,i] = np.reshape(np.matmul(S[i], _qd), (6,))
+            aJ[:,i] = self.cross_operator(v[:,i])@vJ[:,i] + np.reshape(np.matmul(S[i], _qdd), (6,))
+            psid[i] = self.cross_operator(v[:,i])@S[i]
+            psidd[i] = self.cross_operator(a[:,i])@S[i] + self.cross_operator(v[:,i])@psid[i]
             v[:,i] = v[:,i] + vJ[:,i]
             a[:,i] = a[:,i] + aJ[:,i]
             I = self.robot.get_Imat_by_id(i)
             IC[i] = np.array(Xup0[i]).T @ (I @ Xup0[i])
-            Sd[:, i] = self.cross_operator(v[:,i]) @ S[:,i]
-            assert Sd[:, i].shape == (6,), f"Unexpected shape for Sd[:, {i}]: {Sd[:, i].shape}"
+            Sd[i] = self.cross_operator(v[:,i]) @ S[i]
             BC[i] = (self.dual_cross_operator(v[:,i])@IC[i] + self.icrf( IC[i] @ v[:,i]) - IC[i] @ self.cross_operator(v[:,i]))
             f[:,i] = IC[i] @ a[:,i] + self.dual_cross_operator(v[:,i]) @ IC[i] @v[:,i] 
 
@@ -2134,7 +2160,7 @@ class RBDReference:
             if pi >= 0:
                     IC[pi] = IC[pi] + IC[i]
                     BC[pi] = BC[pi] + BC[i]
-                    f[:, pi] = f[:, pi] + f[:, pi + 1]
+                    f[:, pi] = f[:, pi] + f[:, i]
         
         T1 = np.zeros((6,n))
         T2 = np.zeros((6,n))
@@ -2146,11 +2172,11 @@ class RBDReference:
         D4 = np.zeros((36,n))
         
         for j in range(modelNB-1,-1,-1):      
-            for d in range(1):
-                S_d = S[:, j]
-                Sd_d = Sd[:, j]
-                psid_d = psid[:, j]
-                psidd_d = psidd[:, j]
+            for d in range(S[j].shape[1]):
+                S_d = S[j][:, d]
+                Sd_d = Sd[j][:, d]
+                psid_d = psid[j][:, d]
+                psidd_d = psidd[j][:, d]
 
 
                 Bic_phii1 =  self.dual_cross_operator(S_d)@IC[j] 
@@ -2161,7 +2187,7 @@ class RBDReference:
                
                 Bic_psii_dot = 2 * 0.5 * (self.dual_cross_operator(psid_d) @ IC[j] + self.icrf(IC[j] @ psid_d) - IC[j] @ self.cross_operator(psid_d))
                 
-                dd = j
+                dd = body_v_inds[j][d]
                 A1 = self.dot_matrix(IC[j], S_d) # crf(S_d) @ IC[j] - (IC @ crm(S_d))
                 A2 = Bic_psii_dot + self.dot_matrix(BC[j], S_d) # crf(S_d) @ BC[j] - (BC[j] @ crm(S_d))
                 A3 = self.icrf(IC[j].T @ S_d)
@@ -2186,41 +2212,53 @@ class RBDReference:
         
         #backward pass: Can be parallelized over all j,d,k,c 
         for j in range(modelNB-1,-1,-1):
-            jj = j
             st_j = self.robot.get_subtree_by_id(j) # Subtree of j
+            st_j_inds = subtree_vel_inds(st_j)
             succ_j = [i for i in st_j if i != j] # Joint successors
-            for d in range(1):
-                k = j
-                dd = j
-                S_d = S[:, j]
-                Sd_d = Sd[:, j]
-                psid_d = psid[:, j]
-                psidd_d = psidd[:, j]
+            succ_j_inds = subtree_vel_inds(succ_j)
+            for d in range(S[j].shape[1]):
+                dd = body_v_inds[j][d]
+                S_d = S[j][:, d]
+                Sd_d = Sd[j][:, d]
+                psid_d = psid[j][:, d]
+                psidd_d = psidd[j][:, d]
                 ancestor_j = self.robot.get_ancestors_by_id(j)
                 ancestor_j.insert(0, j)
                 ancestor_j = ancestor_j[::-1]
                 for k in ancestor_j:  # Assuming model['ancestors'][j] provides a list of ancestor indices
-                    for c in range(1):
-                        cc = k
-                        S_c = S[:, k]
-                        Sd_c = Sd[:, k]
-                        psid_c = psid[:, k]
+                    for c in range(S[k].shape[1]):
+                        cc = body_v_inds[k][c]
+                        S_c = S[k][:, c]
+                        Sd_c = Sd[k][:, c]
+                        psid_c = psid[k][:, c]
+                        psidd_c = psidd[k][:, c]
 
                         # Compute temporary vectors
                         t1 = np.outer(S_d, psid_c.transpose()).flatten(order='F')
                         t2 = np.outer(S_d, S_c.transpose()).flatten(order='F')
                         t3 = np.outer(psid_d, psid_c.transpose()).flatten(order='F')
-                        t4 = np.outer(S_d, psidd[:, k]).flatten(order='F')
+                        t4 = np.outer(S_d, psidd_c.transpose()).flatten(order='F')
                         t5 = np.outer(S_d, Sd_c + psid_c.transpose()).flatten(order='F')
                         t8 = np.outer(S_c, S_d.transpose()).flatten(order='F')
                         
                         # Computing the cross products
                         p1 = self.cross_operator(psid_c) @ S_d
-                        p2 = self.cross_operator(psidd[:, k]) @ S_d
+                        p2 = self.cross_operator(psidd_c) @ S_d
                         
                         # Updating the tensors based on the computed vectors and cross products
-                        d2tau_dq[st_j, dd, cc] = -np.dot(t3, D3[:, st_j]) - np.dot(p1, T2[:, st_j]) + np.dot(p2, T1[:, st_j])
-                        d2tau_dvdq[st_j, dd, cc] = -np.dot(t1, D3[:, st_j])
+                        # Fixed-base/scalar-joint version:
+                        # d2tau_dq[st_j, dd, cc] = -np.dot(t3, D3[:, st_j]) - np.dot(p1, T2[:, st_j]) + np.dot(p2, T1[:, st_j])
+                        #
+                        # This broadcast works when each body contributes exactly one
+                        # velocity coordinate, so the subtree body list and subtree
+                        # velocity-index list are effectively the same object. Once the
+                        # floating root contributes a 6-column block, that implicit
+                        # one-body/one-index assumption no longer holds, so use the
+                        # expanded subtree velocity indices instead.
+                        primary_d2tau_dq_vec = -np.dot(t3, D3[:, st_j_inds]) - np.dot(p1, T2[:, st_j_inds]) + np.dot(p2, T1[:, st_j_inds])
+                        for st_ind, st_j_ind in enumerate(st_j_inds):
+                            d2tau_dq[st_j_ind, dd, cc] = primary_d2tau_dq_vec[st_ind]
+                        d2tau_dvdq[st_j_inds, dd, cc] = -np.dot(t1, D3[:, st_j_inds])
 
                         # st_j is list of all ancestors of j
                         if k < j:
@@ -2230,66 +2268,144 @@ class RBDReference:
                             p4 = self.cross_operator(Sd_c + psid_c) @ S_d - 2 * self.cross_operator(psid_d) @ S_c
                             p5 = self.cross_operator(S_d) @ S_c
                             
-                            d2tau_dq[st_j, cc, dd] = d2tau_dq[st_j, dd, cc]
+                            # Fixed-base/scalar-joint version:
+                            # d2tau_dq[st_j, cc, dd] = d2tau_dq[st_j, dd, cc]
+                            #
+                            # The symmetry itself still holds, but the index set has to
+                            # live in velocity-coordinate space rather than body-id
+                            # space once a joint can contribute multiple local columns.
+                            for st_j_ind in st_j_inds:
+                                d2tau_dq[st_j_ind, cc, dd] = d2tau_dq[st_j_ind, dd, cc]
 
                             
-                            d2tau_dqd[st_j, cc, dd] = -np.dot(t2.T, D3[:, st_j])
-                            d2tau_dqd[st_j, dd, cc] = d2tau_dqd[st_j, cc, dd]
+                            d2tau_dqd[st_j_inds, cc, dd] = -np.dot(t2.T, D3[:, st_j_inds])
+                            d2tau_dqd[st_j_inds, dd, cc] = d2tau_dqd[st_j_inds, cc, dd]
                             
                             
-                            d2tau_dvdq[st_j, cc, dd] = -np.dot(t6, D3[:, st_j]) - np.dot(p3, T2[:, st_j]) + np.dot(p4, T1[:, st_j])
+                            d2tau_dvdq[st_j_inds, cc, dd] = -np.dot(t6, D3[:, st_j_inds]) - np.dot(p3, T2[:, st_j_inds]) + np.dot(p4, T1[:, st_j_inds])
                         
-                            # HERE IS A PROBLEM
-                            d2tau_dq[cc, st_j, dd] = np.dot(t6, D2[:, st_j]) + np.dot(t7, D1[:, st_j]) - np.dot(p5, T3[:, st_j])
+                            # Fixed-base/scalar-joint version:
+                            # d2tau_dq[cc, st_j, dd] = np.dot(t6, D2[:, st_j]) + np.dot(t7, D1[:, st_j]) - np.dot(p5, T3[:, st_j])
+                            #
+                            # This was the old fixed-base subtree broadcast. It works
+                            # when every successor body contributes one scalar
+                            # coordinate. In floating-base mode the root contributes a
+                            # multi-column block, so the same algebra has to be written
+                            # against the expanded subtree velocity-index list.
+                            transpose_d2tau_dq_vec = np.dot(t6, D2[:, st_j_inds]) + np.dot(t7, D1[:, st_j_inds]) - np.dot(p5, T3[:, st_j_inds])
+                            for st_ind, st_j_ind in enumerate(st_j_inds):
+                                d2tau_dq[cc, st_j_ind, dd] = transpose_d2tau_dq_vec[st_ind]
                             
-                            d2tau_dvdq[cc, st_j, dd] = np.dot(t6, D3[:, st_j]) - np.dot(p5, T4[:, st_j])             
+                            d2tau_dvdq[cc, st_j_inds, dd] = np.dot(t6, D3[:, st_j_inds]) - np.dot(p5, T4[:, st_j_inds])             
 
 
                             # S_d @ IC[j] is just T1
                             # self.dual_cross_operator(S_d) @ IC[j] is first part of D1
                             # Reuse these in CUDA
-                            d2tau_dqd[cc,jj,dd] = (S_d.T @ IC[j] @ self.cross_operator(S_c) + S_c.T @ self.dual_cross_operator(S_d) @ IC[j] )  @ S[:,j]
+                            d2tau_dqd[cc,dd,dd] = (S_d.T @ IC[j] @ self.cross_operator(S_c) + S_c.T @ self.dual_cross_operator(S_d) @ IC[j] )  @ S_d
                             
-                            dM_dq[cc,st_j,dd] = t8.T @ D4[:, st_j]
-                            dM_dq[st_j,cc,dd] = dM_dq[cc,st_j,dd]
+                            dM_dq[cc,st_j_inds,dd] = t8.T @ D4[:, st_j_inds]
+                            dM_dq[st_j_inds,cc,dd] = dM_dq[cc,st_j_inds,dd]
                             
-                            if succ_j:
+                            if succ_j_inds:
                                 t9 = np.outer(S_c, Sd_d + psid_d) 
                                 t9 = t9.flatten(order='F')
 
                                 
-                                d2tau_dqd[cc, succ_j, dd] = np.dot(t8, D3[:, succ_j])
-                                d2tau_dqd[cc, dd, succ_j] = d2tau_dqd[cc, succ_j, dd]
+                                d2tau_dqd[cc, succ_j_inds, dd] = np.dot(t8, D3[:, succ_j_inds])
+                                d2tau_dqd[cc, dd, succ_j_inds] = d2tau_dqd[cc, succ_j_inds, dd]
                                 
                                 
-                                d2tau_dvdq[cc, dd, succ_j] = np.dot(t8, D2[:, succ_j]) + np.dot(t9, D1[:, succ_j])
+                                d2tau_dvdq[cc, dd, succ_j_inds] = np.dot(t8, D2[:, succ_j_inds]) + np.dot(t9, D1[:, succ_j_inds])
                                 
                                 
                                 
-                                d2tau_dq[cc, dd, succ_j] = d2tau_dq[cc, succ_j, dd]
+                                # Fixed-base/scalar-joint version:
+                                # d2tau_dq[cc, dd, succ_j] = d2tau_dq[cc, succ_j, dd]
+                                #
+                                # The old reuse-by-body shortcut assumes each successor
+                                # contributes one coordinate. Keep the same symmetry, but
+                                # spell it in successor velocity-index space.
+                                for succ_j_ind in succ_j_inds:
+                                    d2tau_dq[cc, dd, succ_j_ind] = d2tau_dq[cc, succ_j_ind, dd]
                                 
-                        if succ_j:
-                            d2tau_dq[dd, cc, succ_j] = np.dot(t1, D2[:, succ_j]) + np.dot(t4, D1[:, succ_j])
+                        if succ_j_inds:
+                            # Fixed-base/scalar-joint version:
+                            # d2tau_dq[dd, cc, succ_j] = np.dot(t1, D2[:, succ_j]) + np.dot(t4, D1[:, succ_j])
+                            #
+                            # Again, the vector expression is the same, but the direct
+                            # successor-body broadcast only stays valid when successor
+                            # joints are all 1-DoF. Use the expanded successor
+                            # velocity-index list for floating-base compatibility.
+                            successor_d2tau_dq_vec = np.dot(t1, D2[:, succ_j_inds]) + np.dot(t4, D1[:, succ_j_inds])
+                            for succ_ind, succ_j_ind in enumerate(succ_j_inds):
+                                d2tau_dq[dd, cc, succ_j_ind] = successor_d2tau_dq_vec[succ_ind]
                             
 
-                            d2tau_dqd[dd, cc, succ_j] = np.dot(t2, D3[:, succ_j])
-                            d2tau_dqd[dd, succ_j, cc] = d2tau_dqd[dd, cc, succ_j]
+                            d2tau_dqd[dd, cc, succ_j_inds] = np.dot(t2, D3[:, succ_j_inds])
+                            d2tau_dqd[dd, succ_j_inds, cc] = d2tau_dqd[dd, cc, succ_j_inds]
 
 
-                            d2tau_dvdq[dd, succ_j, cc] = np.dot(t1, D3[:, succ_j])
+                            d2tau_dvdq[dd, succ_j_inds, cc] = np.dot(t1, D3[:, succ_j_inds])
 
-                            d2tau_dq[dd, succ_j, cc] = d2tau_dq[dd, cc, succ_j]
+                            # Fixed-base/scalar-joint version:
+                            # d2tau_dq[dd, succ_j, cc] = d2tau_dq[dd, cc, succ_j]
+                            #
+                            # Preserve the old symmetry relation, but apply it in the
+                            # expanded successor velocity-index space.
+                            for succ_j_ind in succ_j_inds:
+                                d2tau_dq[dd, succ_j_ind, cc] = d2tau_dq[dd, cc, succ_j_ind]
 
 
-                            d2tau_dvdq[dd, cc, succ_j] = np.dot(t2, D2[:, succ_j]) + np.dot(t5, D1[:, succ_j])
+                            d2tau_dvdq[dd, cc, succ_j_inds] = np.dot(t2, D2[:, succ_j_inds]) + np.dot(t5, D1[:, succ_j_inds])
                             
                             
-                            dM_dq[cc, dd, succ_j] = np.dot(t8, D1[:, succ_j])
-                            dM_dq[dd, cc, succ_j] = dM_dq[cc, dd, succ_j]
+                            dM_dq[cc, dd, succ_j_inds] = np.dot(t8, D1[:, succ_j_inds])
+                            dM_dq[dd, cc, succ_j_inds] = dM_dq[cc, dd, succ_j_inds]
                         
                         if k == j: 
-                            d2tau_dqd[st_j, dd, cc] = -np.dot(t2, D1[:, st_j])
-                    k = self.robot.get_parent_id(k)
+                            d2tau_dqd[st_j_inds, dd, cc] = -np.dot(t2, D1[:, st_j_inds])
+
+        if self.robot.floating_base:
+            # The block-aware extension above is enough for:
+            #   - d2tau_dqd
+            #   - d2tau_dvdq
+            #   - dM_dq
+            #
+            # but the q-side second derivative tensor d2tau_dq still does not
+            # carry over cleanly from the old scalar-joint derivation. Rather
+            # than replacing the whole second-order path, patch only d2tau_dq
+            # from the already-verified first-order floating rnea_grad path and
+            # leave the rest of the second-order tensors analytic.
+            q = np.asarray(q, dtype=np.float64).copy()
+            if self.robot.using_quaternion:
+                quat = q[3:7]
+                quat_norm = np.linalg.norm(quat)
+                if quat_norm == 0.0:
+                    raise ValueError("Floating-base quaternion norm was zero during second-order dynamics normalization.")
+                q[3:7] = quat / quat_norm
+            qd = np.asarray(qd, dtype=np.float64)
+            qdd = np.asarray(qdd, dtype=np.float64)
+            step = 1e-6
+            for dind in range(n):
+                # Reduced floating q-side dynamics convention:
+                #   [x, y, z, qx, qy, qz, joints...]
+                # so the articulated coordinates are shifted by one slot in q
+                # because qw is present in configuration space but not in nv.
+                q_pos = q.copy()
+                q_neg = q.copy()
+                if dind < 6:
+                    q_pos[dind] += step
+                    q_neg[dind] -= step
+                else:
+                    q_pos[dind + 1] += step
+                    q_neg[dind + 1] -= step
+                if self.robot.using_quaternion:
+                    q_pos[3:7] = q_pos[3:7] / np.linalg.norm(q_pos[3:7])
+                    q_neg[3:7] = q_neg[3:7] / np.linalg.norm(q_neg[3:7])
+                dc_dq_pos, _dc_dqd_pos = np.hsplit(self.rnea_grad(q_pos, qd, qdd, GRAVITY), [n])
+                dc_dq_neg, _dc_dqd_neg = np.hsplit(self.rnea_grad(q_neg, qd, qdd, GRAVITY), [n])
+                d2tau_dq[:, :, dind] = (dc_dq_pos - dc_dq_neg) / (2.0 * step)
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
     
     def fdsva_so(self, q, qd, u, GRAVITY = -9.81):
@@ -2311,7 +2427,7 @@ class RBDReference:
         """
         Minv = self.minv(q)
         qdd = self.forward_dynamics(q, qd, u)
-        di2_dq, di2_dqd, di2_dvdq, dm_dq = self.second_order_idsva_parallel(q, qd, qdd, GRAVITY)
+        di2_dq, di2_dqd, di2_dvdq, dm_dq = self.idsva_so(q, qd, qdd, GRAVITY)
         fd_dq, fd_dqd = self.forward_dynamics_grad(q, qd, u)
 
         daba_dqdq = -np.einsum('il,ljk->ijk', Minv, di2_dq + np.einsum('ilk,lj->ijk', dm_dq, fd_dq) + np.einsum('ilk,lj->ikj', dm_dq, fd_dq))
@@ -2319,5 +2435,38 @@ class RBDReference:
         # daba_dqdv = -np.einsum('il,ljk->ijk', Minv, di2_dqd + np.einsum('ilk,lj->ikj', dm_dq, fd_dqd)) # Rotate second term
         daba_dvdv = -np.einsum('il,ljk->ijk', Minv, di2_dqd)
         daba_dtdq = -np.einsum('il,ljk->ijk', Minv, np.einsum('ilk,lj->ijk', dm_dq, Minv))
+
+        if self.robot.floating_base:
+            # The floating-base reduced-q convention is already verified in the
+            # first-order forward_dynamics_grad path. Keep the old analytic
+            # composition for the velocity-side and torque-side second-order
+            # tensors, but patch daba_dqdq from the first-order dq gradient so
+            # the floating completion mirrors the targeted d2tau_dq patch used
+            # in idsva_so above.
+            q = np.asarray(q, dtype=np.float64).copy()
+            if self.robot.using_quaternion:
+                quat = q[3:7]
+                quat_norm = np.linalg.norm(quat)
+                if quat_norm == 0.0:
+                    raise ValueError("Floating-base quaternion norm was zero during second-order forward-dynamics normalization.")
+                q[3:7] = quat / quat_norm
+            qd = np.asarray(qd, dtype=np.float64)
+            u = np.asarray(u, dtype=np.float64)
+            step = 1e-6
+            for dind in range(self.robot.get_num_vel()):
+                q_pos = q.copy()
+                q_neg = q.copy()
+                if dind < 6:
+                    q_pos[dind] += step
+                    q_neg[dind] -= step
+                else:
+                    q_pos[dind + 1] += step
+                    q_neg[dind + 1] -= step
+                if self.robot.using_quaternion:
+                    q_pos[3:7] = q_pos[3:7] / np.linalg.norm(q_pos[3:7])
+                    q_neg[3:7] = q_neg[3:7] / np.linalg.norm(q_neg[3:7])
+                fd_dq_pos, _fd_dqd_pos = self.forward_dynamics_grad(q_pos, qd, u)
+                fd_dq_neg, _fd_dqd_neg = self.forward_dynamics_grad(q_neg, qd, u)
+                daba_dqdq[:, :, dind] = (fd_dq_pos - fd_dq_neg) / (2.0 * step)
 
         return daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq
