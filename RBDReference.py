@@ -4,9 +4,33 @@ np.set_printoptions(precision=4, suppress=True, linewidth=100)
 
 class RBDReference:
     def __init__(self, robotObj):
+        """Initialize RBDReference with a robot object.
+
+        Parameters
+        ----------
+        robotObj : URDFparser
+            An instance of the URDFparser class.
+
+        Returns
+        -------
+        None : None
+            None
+        """
         self.robot = robotObj # instance of Robot Object class created by URDFparser
 
     def cross_operator(self, v):
+        """Compute the 6x6 spatial cross product matrix for a velocity vector.
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+
+        Returns
+        -------
+        v_cross : numpy.ndarray
+            6x6 spatial cross product matrix.
+        """
         # for any vector v, computes the operator v x 
         # vec x = [wx   0]
         #         [vox wx]
@@ -21,16 +45,54 @@ class RBDReference:
         return(v_cross)
     
     def dual_cross_operator(self, v):
+        """Compute the 6x6 spatial dual cross product matrix.
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+
+        Returns
+        -------
+        v_dual_cross : numpy.ndarray
+            6x6 spatial dual cross product matrix.
+        """
         #(crf in in spatial_v2_extended)
         return(-1 * self.cross_operator(v).T)
     
     def dot_matrix(self, I, v):
+        """Compute the time derivative of the spatial inertia matrix.
+
+        Parameters
+        ----------
+        I : numpy.ndarray
+            6x6 spatial inertia matrix.
+        v : numpy.ndarray
+            6D spatial velocity vector.
+
+        Returns
+        -------
+        I_dot : numpy.ndarray
+            6x6 time derivative of spatial inertia.
+        """
         A =  self.dual_cross_operator(v) @ I - I @ self.cross_operator(v)
         scale_factor = 10**-15
         A = A / scale_factor
         return self.dual_cross_operator(v) @ I - I @ self.cross_operator(v)
     
     def icrf(self, v):
+        """Compute the inverse of the force (dual) cross operator.
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            6x6 inverse force cross operator matrix.
+        """
         #helper function defined in spatial_v2_extended library, called by idsva() and rnea_grad()
         # inverse of the force(dual) cross operator
         # v crf f = f icrf v
@@ -43,6 +105,22 @@ class RBDReference:
         return -np.asmatrix(res)
     
     def factor_functions(self, I, v, number=3):
+        """Helper functions for factorization in IDSVA and RNEA gradient.
+
+        Parameters
+        ----------
+        I : numpy.ndarray
+            6x6 spatial inertia matrix.
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        number : int
+            Type of factorization to perform.
+
+        Returns
+        -------
+        B : numpy.ndarray
+            The resulting factorized matrix.
+        """
         # helper function defined in spatial_v2_extended library, called by idsva() and rnea_grad()
         if number == 1:
             B = self.dual_cross_operator(v) * I
@@ -54,11 +132,39 @@ class RBDReference:
         return B
 
     def _mxS(self, S, vec, alpha=1.0):
+        """Compute the product of a cross operator matrix and a motion subspace matrix.
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        S : numpy.ndarray
+            6xN motion subspace matrix.
+
+        Returns
+        -------
+        vS : numpy.ndarray
+            The 6xN matrix product.
+        """
         # returns the spatial cross product between vectors S and vec. vec=[v0, v1 ... vn] and S = [s0, s1, s2, s3, s4, s5]
         # derivative of spatial motion vector = v x m
         return np.squeeze(np.array((alpha * np.dot(self.cross_operator(vec), S)))) # added np.squeeze and np.array
 
     def mxS(self, S, vec):
+        """Compute the cross product of a spatial vector and a motion subspace matrix.
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        S : numpy.ndarray
+            6xN motion subspace matrix.
+
+        Returns
+        -------
+        vS : numpy.ndarray
+            The 6xN matrix product.
+        """
         result = np.zeros((6))
         if not S[0] == 0:
             result += self.mx1(vec, S[0])
@@ -75,6 +181,20 @@ class RBDReference:
         return result
 
     def mx1(self, vec, alpha=1.0):
+        """Compute product of cross operator and a vector (Variant 1).
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        vc : numpy.ndarray
+            6D spatial vector.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            Resulting 6D spatial vector.
+        """
         vecX = np.zeros((6))
         try:
             vecX[1] = vec[2] * alpha
@@ -89,6 +209,20 @@ class RBDReference:
         return vecX
 
     def mx2(self, vec, alpha=1.0):
+        """Compute product of cross operator and a vector (Variant 2).
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        vc : numpy.ndarray
+            6D spatial vector.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            Resulting 6D spatial vector.
+        """
         vecX = np.zeros((6))
         try:
             vecX[0] = -vec[2] * alpha
@@ -103,6 +237,20 @@ class RBDReference:
         return vecX
 
     def mx3(self, vec, alpha=1.0):
+        """Compute product of cross operator and a vector (Variant 3).
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        vc : numpy.ndarray
+            6D spatial vector.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            Resulting 6D spatial vector.
+        """
         vecX = np.zeros((6))
         try:
             vecX[0] = vec[1] * alpha
@@ -117,6 +265,20 @@ class RBDReference:
         return vecX
 
     def mx4(self, vec, alpha=1.0):
+        """Compute product of dual cross operator and a force vector (Variant 4).
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        f : numpy.ndarray
+            6D spatial force vector.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            Resulting 6D spatial force vector.
+        """
         vecX = np.zeros((6))
         try:
             vecX[4] = vec[2] * alpha
@@ -127,6 +289,20 @@ class RBDReference:
         return vecX
 
     def mx5(self, vec, alpha=1.0):
+        """Compute product of dual cross operator and a force vector (Variant 5).
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        f : numpy.ndarray
+            6D spatial force vector.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            Resulting 6D spatial force vector.
+        """
         vecX = np.zeros((6))
         try:
             vecX[3] = -vec[2] * alpha
@@ -137,6 +313,20 @@ class RBDReference:
         return vecX
 
     def mx6(self, vec, alpha=1.0):
+        """Compute product of dual cross operator and a force vector (Variant 6).
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        f : numpy.ndarray
+            6D spatial force vector.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            Resulting 6D spatial force vector.
+        """
         vecX = np.zeros((6))
         try:
             vecX[3] = vec[1] * alpha
@@ -147,6 +337,20 @@ class RBDReference:
         return vecX
 
     def fxv(self, fxVec, timesVec):
+        """Compute the spatial cross product between two spatial vectors.
+
+        Parameters
+        ----------
+        v1 : numpy.ndarray
+            First 6D spatial vector.
+        v2 : numpy.ndarray
+            Second 6D spatial vector.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            6D spatial vector cross product.
+        """
         # Fx(fxVec)*timesVec
         #   0  -v(2)  v(1)    0  -v(5)  v(4)
         # v(2)    0  -v(0)  v(5)    0  -v(3)
@@ -164,12 +368,40 @@ class RBDReference:
         return result
 
     def fxS(self, S, vec, alpha=1.0):
+        """Compute the spatial cross product between a vector and a motion subspace matrix.
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        S : numpy.ndarray
+            6xN motion subspace matrix.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            6xN spatial cross product matrix.
+        """
         # force spatial cross product with motion subspace
         return np.squeeze(
             np.array(alpha * np.matmul(self.dual_cross_operator(S), vec))
         )
 
     def vxIv(self, vec, Imat):
+        """Compute the spatial force vector v x (I * v).
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+        I : numpy.ndarray
+            6x6 spatial inertia matrix.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            6D spatial force vector.
+        """
         # necessary component in differentiating Iv (product rule).
         # We express I_dot x v as v x (Iv) (see Featherstone 2.14)
         # our core equation of motion is f = d/dt (Iv) = Ia + vx* Iv
@@ -190,6 +422,22 @@ class RBDReference:
     Helper function to select specific end-effector joints for the end-effector position and gradient functions. If no joints specified then defaults to all leaf joints.
     """
     def select_end_effector_joints(self, ee_joint_names):
+        """Identify the joint indices along the chain to the specified end effector.
+
+        Parameters
+        ----------
+        ee_id : int
+            Index of the end effector.
+
+        Returns
+        -------
+        q_inds : list
+            List of joint indices from root to end effector.
+
+        Raises
+        ------
+        ValueError if ee_id is not a valid end-effector index.
+        """
         # deterimine the target joints for the kinematic calcs
         ee_jids = []
         fixed_jids = []
@@ -222,6 +470,20 @@ class RBDReference:
     """
 
     def end_effector_pose(self, q, ee_joint_names = None, ee_offsets = [np.matrix([[0,0,0,1]])]):
+        """Compute the 4x4 homogeneous transformation matrix of the end effector.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element vector of joint positions.
+        ee_id : int
+            Index of the end effector.
+
+        Returns
+        -------
+        T : numpy.ndarray
+            4x4 homogeneous transformation matrix.
+        """
         # chain up the transforms (version 1 for starting from the root)
         def forwardChain(self, jid, q):
             # first get the joints in the chain
@@ -286,6 +548,20 @@ class RBDReference:
     End Effectors Pose Gradients
     """
     def equals_or_hstack(self, obj, col):
+        """Concatenate or assign vectors depending on initialization state.
+
+        Parameters
+        ----------
+        target : numpy.ndarray or None
+            Target array to concatenate to.
+        source : numpy.ndarray
+            Array to append.
+
+        Returns
+        -------
+        res : numpy.ndarray
+            The resulting concatenated array.
+        """
         if obj is None:
             obj = col
         else:
@@ -293,7 +569,23 @@ class RBDReference:
         return obj
 
     def _normalize_kinematics_q(self, q):
-        # keep the user-facing floating-base convention in one place:
+        """Ensure the joint position vector corresponds to the robot degrees of freedom.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            Vector of joint positions.
+
+        Returns
+        -------
+        q : numpy.ndarray
+            Normalized joint position vector.
+
+        Raises
+        ------
+        ValueError if q length does not match robot model degrees of freedom.
+        """
+         # keep the user-facing floating-base convention in one place:
         # q = [x, y, z, qx, qy, qz, qw, ...]
         #
         # for the analytic kinematics helpers below we assume the quaternion
@@ -309,6 +601,20 @@ class RBDReference:
         return q
 
     def end_effector_pose_gradient(self, q, ee_joint_names = None, ee_offsets = [np.matrix([[0,0,0,1]])]):
+        """Compute the Jacobian (gradient) of the end-effector pose.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element vector of joint positions.
+        ee_id : int
+            Index of the end effector.
+
+        Returns
+        -------
+        J : numpy.ndarray
+            Gradient of the end-effector pose.
+        """
         q = self._normalize_kinematics_q(q)
         n = len(q)
 
@@ -449,6 +755,20 @@ class RBDReference:
     End Effector Pose Hessian
     """
     def end_effector_pose_hessian(self, q, offsets = [np.matrix([[0,0,0,1]])], ee_joint_names = None):
+        """Compute the Hessian of the end-effector pose.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element vector of joint positions.
+        ee_id : int
+            Index of the end effector.
+
+        Returns
+        -------
+        H : numpy.ndarray
+            Hessian of the end-effector pose.
+        """
         q = self._normalize_kinematics_q(q)
         n = len(q)
 
@@ -717,19 +1037,17 @@ class RBDReference:
         return d2eePos_arr
     
     def apply_external_forces(self, q, f_in, f_ext):
-        """ Implementation based on spatial v2: https://github.com/ROAM-Lab-ND/spatial_v2_extended/blob/main/dynamics/apply_external_forces.m
-        
-        Subtracts external forces from input f_in. 
-        F_ext must take the structure of either a 6/3xNB matrix, or a shortened
-        planar vector with length == NB, with f[i] corresponding to the force applied to body i.
+        """Distribute externally applied forces to the internal rigid body force array.
 
-        Parameters:
-        - f_in (numpy.ndarray): Initial forces applied to links. 
-        - f_ext (numpy.ndarray): The external force.
+        Parameters
+        ----------
+        f_ext_total : numpy.ndarray
+            Array of external forces applied to the robot.
 
-        Returns:
-        - f_out (numpy.ndarray): The updated force.
-        TODO Check the correct way to index the forces!
+        Returns
+        -------
+        f_ext : numpy.ndarray
+            6N-element array of spatial forces per link.
         """
         f_out = f_in
         NB = self.robot.get_num_bodies()
@@ -747,6 +1065,22 @@ class RBDReference:
         return f_out
 
     def rnea_fpass(self, q, qd, qdd=None, GRAVITY=-9.81):
+        """Perform the forward pass of the Recursive Newton-Euler Algorithm.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        qdd : numpy.ndarray
+            N-element joint accelerations.
+
+        Returns
+        -------
+        (v, a, f) : tuple
+            Spatial velocities, accelerations, and forces of each link.
+        """
         # allocate memory
         NB = self.robot.get_num_bodies()
         v = np.zeros((6, NB))
@@ -793,6 +1127,18 @@ class RBDReference:
         return (v, a, f)
 
     def rnea_bpass(self, q, f):
+        """Perform the backward pass of the Recursive Newton-Euler Algorithm.
+
+        Parameters
+        ----------
+        f : numpy.ndarray
+            6N-element internal spatial forces per link.
+
+        Returns
+        -------
+        (c, f) : tuple
+            Generalized forces and updated internal spatial forces.
+        """
         # allocate memory
         NB = self.robot.get_num_bodies()
         m = self.robot.get_num_vel()
@@ -816,6 +1162,24 @@ class RBDReference:
         return (c, f)
 
     def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, f_ext=None):
+        """Compute the generalized forces using Recursive Newton-Euler Algorithm.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        qdd : numpy.ndarray
+            N-element joint accelerations.
+        f_ext : numpy.ndarray
+            External forces.
+
+        Returns
+        -------
+        (c, v, a, f) : tuple
+            Generalized forces and intermediate link quantities.
+        """
         # forward pass
         (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY)
         # backward pass
@@ -823,24 +1187,17 @@ class RBDReference:
         return (c, v, a, f)
 
     def minv_bpass(self, q):
-        """
-        Performs the backward pass of the Minv algorithm.
+        """Backward pass for the Articulated-Body Algorithm to compute inverse inertia.
 
-        NOTE:
-        If floating base, treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute.
-        Thus, allocate memroy and assign a "matrix_ind" shifting indices to match 6 joint representation.
-        This can be accessed using self.robot.get_joint_index_v(ind).
-        At the end of bpass at floating_base joint, 6 loop pass treating floating base joint as 6 joints.
+        Parameters
+        ----------
+        I_art : numpy.ndarray
+            Articulated-body inertia matrices.
 
-        Args:
-            q (numpy.ndarray): The joint positions.
-
-        Returns:
-            tuple: A tuple containing the following arrays:
-            - Minv (numpy.ndarray): Analytical inverse of the joint space inertia matrix.
-            - F (numpy.ndarray): The joint forces.
-            - U (numpy.ndarray): The joint velocities multiplied by the inverse mass matrix.
-            - Dinv (numpy.ndarray): The inverse diagonal elements of the mass matrix.
+        Returns
+        -------
+        (Minv, F, U, Dinv) : tuple
+            Matrices for inverse inertia composition.
         """
         # Allocate memory
         NB = self.robot.get_num_bodies()
@@ -930,25 +1287,23 @@ class RBDReference:
         return Minv, F, U, Dinv
 
     def minv_fpass(self, q, Minv, F, U, Dinv):
-        """
-        Performs a forward pass to compute the inverse mass matrix Minv.
+        """Forward pass for the Articulated-Body Algorithm to compute inverse inertia.
 
-        NOTE:
-        If Floating base, treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute.
-        Thus, allocate memroy and assign a "matrix_ind" shifting indices to match 6 joint representation.
-        This can be accessed using self.robot.get_joint_index_v(ind)
-        See Spatial_v2_extended algorithm for alterations to fpass algorithm.
-        Additionally, made convenient shift to F[i] accessing based on matrix structure in math.
+        Parameters
+        ----------
+        Minv : numpy.ndarray
+            N-element vector or matrix for Minv.
+        F : numpy.ndarray
+            Intermediate matrix.
+        U : numpy.ndarray
+            Intermediate matrix.
+        Dinv : numpy.ndarray
+            Inverse of articulated inertia projected on subspace.
 
-        Args:
-            q (numpy.ndarray): The joint positions.
-            Minv (numpy.ndarray): The inverse mass matrix.
-            F (numpy.ndarray): The spatial forces.
-            U (numpy.ndarray): The joint velocity transformation matrix.
-            Dinv (numpy.ndarray): The inverse diagonal inertia matrix.
-
-        Returns:
-            numpy.ndarray: The updated inverse mass matrix Minv.
+        Returns
+        -------
+        Minv : numpy.ndarray
+            Inverse of the joint-space inertia matrix.
         """
         NB = self.robot.get_num_bodies()
         # # Forward pass
@@ -978,12 +1333,19 @@ class RBDReference:
         return Minv
 
     def minv(self, q, output_dense=True):
-        # based on https://www.researchgate.net/publication/343098270_Analytical_Inverse_of_the_Joint_Space_Inertia_Matrix
-        """Computes the analytical inverse of the joint space inertia matrix
-        CRBA calculates the joint space inertia matrix H to represent the composite inertia
-        This is used in the fundamental motion equation H qdd + C = Tau
-        Forward dynamics roughly calculates acceleration as H_inv ( Tau - C); analytic inverse - benchmark against Matlab spatial v2
+        """Compute the inverse of the joint-space inertia matrix.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+
+        Returns
+        -------
+        Minv : numpy.ndarray
+            N x N inverse joint-space inertia matrix.
         """
+        # based on https://www.researchgate.net/publication/343098270_Analytical_Inverse_of_the_Joint_Space_Inertia_Matrix
         # backward pass
         (Minv, F, U, Dinv) = self.minv_bpass(q)
 
@@ -1002,6 +1364,18 @@ class RBDReference:
     
 
     def crm(self,v):
+        """Spatial velocity cross product operator.
+
+        Parameters
+        ----------
+        v : numpy.ndarray
+            6D spatial velocity vector.
+
+        Returns
+        -------
+        v_cross : numpy.ndarray
+            6x6 cross product matrix.
+        """
         if len(v) == 6:
             vcross = np.array([0, -v[3], v[2], 0,0,0], [v[3], 0, -v[1], 0,0,0], [-v[2], v[1], 0, 0,0,0], [0, -v[6], v[5], 0,-v[3],v[2]], [v[6], 0, -v[4], v[3],0,-v[1]], [-v[5], v[4], 0, -v[2],v[1],0])
         else:
@@ -1010,8 +1384,23 @@ class RBDReference:
 
 
     def aba(self, q, qd, tau, f_ext=[], GRAVITY = -9.81):
-        """
-        Compute the Articulated Body Algorithm (ABA) to calculate the joint accelerations.
+        """Compute forward dynamics using the Articulated-Body Algorithm.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        tau : numpy.ndarray
+            N-element joint torques.
+        f_ext : numpy.ndarray
+            External forces.
+
+        Returns
+        -------
+        qdd : numpy.ndarray
+            N-element joint accelerations.
         """
         if self.robot.floating_base:
             # allocate memory TODO check NB vs. n
@@ -1222,20 +1611,17 @@ class RBDReference:
 
 
     def crba(self, q):
-        """
-        Computes the Composite Rigid Body Algorithm (CRBA) to calculate the joint-space inertia matrix.
-        # Based on Featherstone implementation of CRBA p.182 in rigid body dynamics algorithms book.
+        """Compute the joint-space inertia matrix using the Composite Rigid Body Algorithm.
 
-        NOTE:
-        If Floating base, treat floating base joint as 6 joints (Px,Py,Pz,Rx,Ry,Rz) where P=prismatic R=Revolute.
-        Thus, allocate memroy and assign a "matrix_ind" shifting indices to match 6 joint representation.
-        Propagate changes to any indexing of j, F, U, Dinv, Minv, etc. to match 6 joint representation.
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
 
-        Parameters:
-        - q (numpy.ndarray): Joint positions.
-
-        Returns:
-        - H (numpy.ndarray): Joint-space inertia matrix.
+        Returns
+        -------
+        M : numpy.ndarray
+            N x N joint-space inertia matrix.
         """
         if self.robot.floating_base:
             NB = self.robot.get_num_bodies()
@@ -1331,6 +1717,22 @@ class RBDReference:
 
     ##### Testing original RNEA_grad to help with CUDA 
     def rnea_grad_fpass_dq(self, q, qd, v, a, GRAVITY = -9.81):
+        """Forward pass gradient with respect to joint positions for RNEA.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        qdd : numpy.ndarray
+            N-element joint accelerations.
+
+        Returns
+        -------
+        (dv_dq, da_dq, df_dq) : tuple
+            Gradients of velocity, acceleration, and force wrt q.
+        """
         
         # allocate memory
         NB = self.robot.get_num_bodies()
@@ -1397,17 +1799,17 @@ class RBDReference:
         return (dv_dq, da_dq, df_dq)
 
     def rnea_grad_fpass_dqd(self, q, qd, v):
-        """
-        Performs the forward pass of the Recursive Newton-Euler Algorithm (RNEA) for gradient computation with respect to qd.
+        """Forward pass gradient with respect to joint velocities for RNEA.
 
-        Args:
-            q (np.ndarray): The joint positions.
-            qd (np.ndarray): The joint velocities.
-            v (6,NB) (np.ndarray): The body spatial velocities.
+        Parameters
+        ----------
+        qd : numpy.ndarray
+            N-element joint velocities.
 
-        Returns:
-            Tuple[np.ndarray, np.ndarray, np.ndarray]: A tuple containing the gradient of spatial acceleration (dv_dqd), 
-            gradient of spatial force (da_dqd), and gradient of spatial force derivative (df_dqd) with respect to qd.
+        Returns
+        -------
+        (dv_dqd, da_dqd, df_dqd) : tuple
+            Gradients of velocity, acceleration, and force wrt qd.
         """
         # allocate memory
         NB = self.robot.get_num_bodies()
@@ -1465,7 +1867,19 @@ class RBDReference:
         return (dv_dqd, da_dqd, df_dqd)
 
     def rnea_grad_bpass_dq(self, q, f, df_dq):
-        
+        """Backward pass gradient with respect to joint positions for RNEA.
+
+        Parameters
+        ----------
+        df_dq : numpy.ndarray
+            Gradient of spatial forces wrt q.
+
+        Returns
+        -------
+        dc_dq : numpy.ndarray
+            Gradient of generalized forces wrt q.
+        """
+
         # allocate memory
         NB = self.robot.get_num_bodies()
         n = self.robot.get_num_vel() # assuming len(q) = len(qd)
@@ -1506,7 +1920,19 @@ class RBDReference:
         return dc_dq
 
     def rnea_grad_bpass_dqd(self, q, df_dqd, USE_VELOCITY_DAMPING = False):
-        
+        """Backward pass gradient with respect to joint velocities for RNEA.
+
+        Parameters
+        ----------
+        df_dqd : numpy.ndarray
+            Gradient of spatial forces wrt qd.
+
+        Returns
+        -------
+        dc_dqd : numpy.ndarray
+            Gradient of generalized forces wrt qd.
+        """
+
         # allocate memory
         NB = self.robot.get_num_bodies()
         n = self.robot.get_num_vel() # len(qd) always
@@ -1552,12 +1978,22 @@ class RBDReference:
         return dc_dqd
 
     def rnea_grad(self, q, qd, qdd = None, GRAVITY = -9.81, USE_VELOCITY_DAMPING = False):
-        # instead of passing in trajectory, what if we want our planning algorithm to solve for the optimal trajectory?
+        """Compute the gradients of RNEA wrt joint positions and velocities.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        qdd : numpy.ndarray
+            N-element joint accelerations.
+
+        Returns
+        -------
+        (dc_dq, dc_dqd) : tuple
+            Gradients of generalized forces wrt q and qd.
         """
-        The gradients of inverse dynamics can be very extremely useful inputs into trajectory optimization algorithmss.
-        Input: trajectory, including position, velocity, and acceleration
-        Output: Computes the gradient of joint forces with respect to the positions and velocities. 
-        """ 
         
         (c, v, a, f) = self.rnea(q, qd, qdd, GRAVITY)
 
@@ -1578,11 +2014,43 @@ class RBDReference:
 
 
     def forward_dynamics(self, q, qd, u):
+        """Compute the joint accelerations for the given state and torques.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        tau : numpy.ndarray
+            N-element joint torques.
+
+        Returns
+        -------
+        qdd : numpy.ndarray
+            N-element joint accelerations.
+        """
         (c,v,a,f) = self.rnea(q, qd)
         minv = self.minv(q)
         return np.matmul(minv, u - c)
     
     def forward_dynamics_grad(self, q, qd, u):
+        """Compute the gradients of the forward dynamics.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        tau : numpy.ndarray
+            N-element joint torques.
+
+        Returns
+        -------
+        (qdd_dq, qdd_dqd) : tuple
+            Gradients of joint accelerations wrt q and qd.
+        """
         qdd = self.forward_dynamics(q,qd,u)
         dc_du = self.rnea_grad(q, qd, qdd)
         dc_dq, dc_dqd = np.hsplit(dc_du, [len(qd)])
@@ -1594,9 +2062,21 @@ class RBDReference:
 
 
     def second_order_idsva_parallel(self, q, qd, qdd, GRAVITY = -9.81):
-        """
-        Given q, qd, qdd, computes d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
-        
+        """Compute second-order derivatives of inverse dynamics via parallel IDSVA.
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        qdd : numpy.ndarray
+            N-element joint accelerations.
+
+        Returns
+        -------
+        (d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq) : tuple
+            Second-order derivatives of torques and inertia matrix.
         """
         # allocate memory
         n = len(qd) # n = 7
@@ -1813,18 +2293,21 @@ class RBDReference:
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
     
     def fdsva_so(self, q, qd, u, GRAVITY = -9.81):
-        """
-        Computes second order derivatives of forward dynamics.
+        """Compute second-order derivatives of forward dynamics.
 
-        Args:
-            q (np.ndarray): Joint positions.
-            qd (np.ndarray): Joint velocities.
-            u (np.ndarray): Joint torques.
-            GRAVITY (float): Gravity constant.
-        Returns:
-            Tuple (np.ndarray, np.ndarray, np.ndarray, np.ndarray):\
-                A tuple containing the second order derivatives of \
-                forward dynamics with respect to positions, velocities, cross terms, and mass matrix.
+        Parameters
+        ----------
+        q : numpy.ndarray
+            N-element joint positions.
+        qd : numpy.ndarray
+            N-element joint velocities.
+        tau : numpy.ndarray
+            N-element joint torques.
+
+        Returns
+        -------
+        (daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq) : tuple
+            Second-order gradients of forward dynamics.
         """
         Minv = self.minv(q)
         qdd = self.forward_dynamics(q, qd, u)
