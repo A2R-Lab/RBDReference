@@ -283,8 +283,7 @@ class RBDReference:
         return eePos_arr
 
     """
-    End Effectors Position Gradients
-    * TODO: Add and test Floating base support.
+    End Effectors Pose Gradients
     """
     def equals_or_hstack(self, obj, col):
         if obj is None:
@@ -292,17 +291,55 @@ class RBDReference:
         else:
             obj = np.hstack((obj,col))
         return obj
+
+    def _normalize_kinematics_q(self, q):
+        # keep the user-facing floating-base convention in one place:
+        # q = [x, y, z, qx, qy, qz, qw, ...]
+        #
+        # for the analytic kinematics helpers below we assume the quaternion
+        # block is already normalized, so make that explicit here rather than
+        # scattering the normalization logic through each helper.
+        q = np.asarray(q, dtype=np.float64).copy()
+        if self.robot.floating_base and self.robot.using_quaternion:
+            quat = q[3:7]
+            quat_norm = np.linalg.norm(quat)
+            if quat_norm == 0.0:
+                raise ValueError("Floating-base quaternion norm was zero during kinematics normalization.")
+            q[3:7] = quat / quat_norm
+        return q
+
     def end_effector_pose_gradient(self, q, ee_joint_names = None, ee_offsets = [np.matrix([[0,0,0,1]])]):
-        n = self.robot.get_num_joints()
+        q = self._normalize_kinematics_q(q)
+        n = len(q)
+
+        # local helper for handling scalar joints and the floating-base root
+        def qinds_to_list(inds):
+            if isinstance(inds, (list, tuple, np.ndarray)):
+                return list(inds)
+            return [inds]
+
+        def qeval_arg(jid, q):
+            inds = qinds_to_list(self.robot.get_joint_index_q(jid))
+            q_block = np.asarray(q[inds], dtype=np.float64)
+            if q_block.size == 1:
+                return float(q_block[0])
+            return q_block
+
+        def get_dlocal_info(jid, dind):
+            inds = qinds_to_list(self.robot.get_joint_index_q(jid))
+            if dind not in inds:
+                return None
+            return inds.index(dind)
 
         # chain up the transforms (version 1 for starting from the root)
         def dforward_chain(self, jidChain, dind, q):
             Xmat_hom = np.eye(4)
             dXmat_hom = np.eye(4)
             for ind in jidChain:
-                dcurrX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
-                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
-                if ind == dind: # use derivative
+                dlocal_ind = get_dlocal_info(ind, dind)
+                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(qeval_arg(ind, q))
+                if dlocal_ind is not None: # use derivative
+                    dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(ind, dlocal_ind)(qeval_arg(ind, q))
                     dXmat_hom = np.matmul(dXmat_hom,dcurrX)
                 else: # use normal transform
                     dXmat_hom = np.matmul(dXmat_hom,currX)
@@ -315,10 +352,11 @@ class RBDReference:
             Xmat_hom = finalXmat_hom
             dXmat_hom = finalXmat_hom
             while(currId != -1):
-                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
                 dcurrX = currX
-                if currId == dind:
-                    dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                dlocal_ind = get_dlocal_info(currId, dind)
+                if dlocal_ind is not None:
+                    dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
                 dXmat_hom = np.matmul(dcurrX,dXmat_hom)
                 Xmat_hom = np.matmul(currX,Xmat_hom)
                 currId = self.robot.get_parent_id(currId)
@@ -359,11 +397,14 @@ class RBDReference:
             # first get the joints in the chain
             jidChain = sorted(self.robot.get_ancestors_by_id(jid))
             jidChain.append(jid)
+            jidChainQInds = []
+            for ind in jidChain:
+                jidChainQInds += qinds_to_list(self.robot.get_joint_index_q(ind))
             # then compute the gradients
             deePos = None
             for dind in range(n):
                 # Note: if not in branch then 0
-                if dind not in jidChain:
+                if dind not in jidChainQInds:
                     deePos_col = np.zeros((6,1))
                     deePos = self.equals_or_hstack(deePos,deePos_col)
                 else:
@@ -387,11 +428,14 @@ class RBDReference:
                 # first get the joints in the chain
                 jidChain = sorted(self.robot.get_ancestors_by_id(parent.get_id()))
                 jidChain.append(parent.get_id())
+                jidChainQInds = []
+                for ind in jidChain:
+                    jidChainQInds += qinds_to_list(self.robot.get_joint_index_q(ind))
                 # then compute the gradients
                 deePos = None
                 for dind in range(n):
                     # Note: if not in branch then 0
-                    if dind not in jidChain:
+                    if dind not in jidChainQInds:
                         deePos_col = np.zeros((6,1))
                         deePos = self.equals_or_hstack(deePos,deePos_col)
                     else:
@@ -402,20 +446,48 @@ class RBDReference:
         return deePos_arr
 
     """
-    End Effector Hessian
-    * TODO: Add and test Floating base support.
+    End Effector Pose Hessian
     """
-    def end_effector_pose_hessian(self, q, offsets = [np.matrix([[0,0,0,1]])]):
-        n = self.robot.get_num_joints()
-        
+    def end_effector_pose_hessian(self, q, offsets = [np.matrix([[0,0,0,1]])], ee_joint_names = None):
+        q = self._normalize_kinematics_q(q)
+        n = len(q)
+
+        # local helper for handling scalar joints and the floating-base root
+        def qinds_to_list(inds):
+            if isinstance(inds, (list, tuple, np.ndarray)):
+                return list(inds)
+            return [inds]
+
+        def qeval_arg(jid, q):
+            inds = qinds_to_list(self.robot.get_joint_index_q(jid))
+            q_block = np.asarray(q[inds], dtype=np.float64)
+            if q_block.size == 1:
+                return float(q_block[0])
+            return q_block
+
+        def get_dlocal_info(jid, dind):
+            inds = qinds_to_list(self.robot.get_joint_index_q(jid))
+            if dind not in inds:
+                return None
+            return inds.index(dind)
+
+        # Determine which targets to compute
+        ee_jids, fixed_jids = self.select_end_effector_joints(ee_joint_names)
+        if ee_joint_names is None:
+            ee_jids = self.robot.get_leaf_nodes()
+            fixed_jids = []
+
         # For each branch chain up the transformations across all possible derivatives
         # Note: if not in branch then 0
         d2eePos_arr = []
-        for jid in self.robot.get_leaf_nodes(): # can be done in parallel
+        for jid in ee_jids: # can be done in parallel
             
             # first get the joints in the chain
             jidChain = sorted(self.robot.get_ancestors_by_id(jid))
             jidChain.append(jid)
+            jidChainQInds = []
+            for ind in jidChain:
+                jidChainQInds += qinds_to_list(self.robot.get_joint_index_q(ind))
 
             # first chain up the 1st derivative transforms
             dXmat_hom_arr = np.zeros((4,4,n+1))
@@ -423,11 +495,12 @@ class RBDReference:
                 # n+1 for standard as well (noting that n+1 will never trigger derivative)
                 dXmat_hom_arr[:,:,dind] = np.eye(4)
                 for ind in jidChain:
-                    if ind == dind: # use derivative
-                        dcurrX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                    currX = self.robot.get_Xmat_hom_Func_by_id(ind)(qeval_arg(ind, q))
+                    dlocal_ind = get_dlocal_info(ind, dind)
+                    if dlocal_ind is not None: # use derivative
+                        dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(ind, dlocal_ind)(qeval_arg(ind, q))
                         dXmat_hom_arr[:,:,dind] = np.matmul(dXmat_hom_arr[:,:,dind],dcurrX)
                     else: # use normal transform
-                        currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
                         dXmat_hom_arr[:,:,dind] = np.matmul(dXmat_hom_arr[:,:,dind],currX)
 
             # chain up the 1st derivative transforms (version 2 for starting from the leaf)
@@ -436,10 +509,11 @@ class RBDReference:
                 currId = jid
                 dXmat_hom_arr[:,:,dind] = np.eye(4)
                 while(currId != -1):
-                    if currId == dind:
-                        dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                    dlocal_ind = get_dlocal_info(currId, dind)
+                    if dlocal_ind is not None:
+                        dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
                     else:
-                        dcurrX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                        dcurrX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
                     dXmat_hom_arr[:,:,dind] = np.matmul(dcurrX,dXmat_hom_arr[:,:,dind])
                     currId = self.robot.get_parent_id(currId)
 
@@ -449,15 +523,18 @@ class RBDReference:
                 for dind_j in range(n): # can be done in parallel
                     d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.eye(4)
                     for ind in jidChain:
-                        if (ind == dind_i) or (ind == dind_j):
-                            if dind_i == dind_j: # use second derivative
-                                d2currX = self.robot.get_d2Xmat_hom_Func_by_id(ind)(q[ind])
+                        dlocal_ind_i = get_dlocal_info(ind, dind_i)
+                        dlocal_ind_j = get_dlocal_info(ind, dind_j)
+                        if (dlocal_ind_i is not None) or (dlocal_ind_j is not None):
+                            if (dlocal_ind_i is not None) and (dlocal_ind_j is not None): # use second derivative
+                                d2currX = self.robot.get_d2Xmat_hom_local_Func_by_id(ind, dlocal_ind_i, dlocal_ind_j)(qeval_arg(ind, q))
                                 d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],d2currX)
                             else: # use first derivative values
-                                dcurrX = self.robot.get_dXmat_hom_Func_by_id(ind)(q[ind])
+                                dlocal_ind = dlocal_ind_i if dlocal_ind_i is not None else dlocal_ind_j
+                                dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(ind, dlocal_ind)(qeval_arg(ind, q))
                                 d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],dcurrX)
                         else: # use normal transform
-                            currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[ind])
+                            currX = self.robot.get_Xmat_hom_Func_by_id(ind)(qeval_arg(ind, q))
                             d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],currX)
 
             # then chain up the 2nd derivative transforms (version 2 - backward)
@@ -466,15 +543,18 @@ class RBDReference:
                     currId = jid
                     d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.eye(4)
                     while(currId != -1):
-                        if (currId == dind_i) or (currId == dind_j):
-                            if dind_i == dind_j: # use second derivative
-                                d2currX = self.robot.get_d2Xmat_hom_Func_by_id(currId)(q[currId])
+                        dlocal_ind_i = get_dlocal_info(currId, dind_i)
+                        dlocal_ind_j = get_dlocal_info(currId, dind_j)
+                        if (dlocal_ind_i is not None) or (dlocal_ind_j is not None):
+                            if (dlocal_ind_i is not None) and (dlocal_ind_j is not None): # use second derivative
+                                d2currX = self.robot.get_d2Xmat_hom_local_Func_by_id(currId, dlocal_ind_i, dlocal_ind_j)(qeval_arg(currId, q))
                                 d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
                             else: # use first derivative values
-                                dcurrX = self.robot.get_dXmat_hom_Func_by_id(currId)(q[currId])
+                                dlocal_ind = dlocal_ind_i if dlocal_ind_i is not None else dlocal_ind_j
+                                dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
                                 d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(dcurrX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
                         else: # use normal transform
-                            currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[currId])
+                            currX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
                             d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
                         currId = self.robot.get_parent_id(currId)
 
@@ -491,7 +571,7 @@ class RBDReference:
                     d2Xmat_hom = d2Xmat_hom_arr[:,:,dind_i,dind_j]
 
                     # Note: if not in branch then 0
-                    if (dind_i not in jidChain) or (dind_j not in jidChain):
+                    if (dind_i not in jidChainQInds) or (dind_j not in jidChainQInds):
                         d2eePos[:,dind_i,dind_j] = np.zeros((6,))
                     
                     else:
@@ -538,6 +618,100 @@ class RBDReference:
                         # then stack it up!
                         d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy.transpose()))
                         d2eePos[:,dind_i,dind_j] = d2eePos_col.reshape((6,))
+
+            d2eePos_arr.append(d2eePos)
+
+        # Then for the fixed joints
+        for fjid in fixed_jids:
+            fj = self.robot.get_fixed_joint_by_id(fjid)
+            d2eePos = np.zeros((6,n,n))
+            if fj.parent_name != -1:
+                parent = self.robot.get_joint_by_name(fj.parent_name)
+                # first get the joints in the chain
+                jidChain = sorted(self.robot.get_ancestors_by_id(parent.get_id()))
+                jidChain.append(parent.get_id())
+                jidChainQInds = []
+                for ind in jidChain:
+                    jidChainQInds += qinds_to_list(self.robot.get_joint_index_q(ind))
+
+                # first chain up the 1st derivative transforms
+                dXmat_hom_arr = np.zeros((4,4,n+1))
+                for dind in range(n+1):
+                    dXmat_hom_arr[:,:,dind] = fj.get_transformation_matrix_hom() if dind == n else fj.get_transformation_matrix_hom()
+                    currId = parent.get_id()
+                    while(currId != -1):
+                        dlocal_ind = get_dlocal_info(currId, dind)
+                        if dlocal_ind is not None:
+                            dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
+                        else:
+                            dcurrX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
+                        dXmat_hom_arr[:,:,dind] = np.matmul(dcurrX,dXmat_hom_arr[:,:,dind])
+                        currId = self.robot.get_parent_id(currId)
+
+                # then chain up the 2nd derivative transforms (version 2 - backward)
+                d2Xmat_hom_arr = np.zeros((4,4,n,n))
+                for dind_i in range(n):
+                    for dind_j in range(n):
+                        d2Xmat_hom_arr[:,:,dind_i,dind_j] = fj.get_transformation_matrix_hom()
+                        currId = parent.get_id()
+                        while(currId != -1):
+                            dlocal_ind_i = get_dlocal_info(currId, dind_i)
+                            dlocal_ind_j = get_dlocal_info(currId, dind_j)
+                            if (dlocal_ind_i is not None) or (dlocal_ind_j is not None):
+                                if (dlocal_ind_i is not None) and (dlocal_ind_j is not None):
+                                    d2currX = self.robot.get_d2Xmat_hom_local_Func_by_id(currId, dlocal_ind_i, dlocal_ind_j)(qeval_arg(currId, q))
+                                    d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
+                                else:
+                                    dlocal_ind = dlocal_ind_i if dlocal_ind_i is not None else dlocal_ind_j
+                                    dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
+                                    d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(dcurrX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
+                            else:
+                                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
+                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
+                            currId = self.robot.get_parent_id(currId)
+
+                for dind_i in range(n):
+                    for dind_j in range(n):
+                        Xmat_hom = dXmat_hom_arr[:,:,n]
+                        dXmat_hom_i = dXmat_hom_arr[:,:,dind_i]
+                        dXmat_hom_j = dXmat_hom_arr[:,:,dind_j]
+                        d2Xmat_hom = d2Xmat_hom_arr[:,:,dind_i,dind_j]
+
+                        if (dind_i not in jidChainQInds) or (dind_j not in jidChainQInds):
+                            d2eePos[:,dind_i,dind_j] = np.zeros((6,))
+                        else:
+                            d2eePos_xyz1 = d2Xmat_hom * offsets[0].transpose()
+
+                            def quotient_rule(top,bottom,dtop,dbottom):
+                                return (bottom*dtop - top*dbottom) / (bottom*bottom)
+                            def d2arctan2(y,x,y_prime_i,x_prime_i,y_prime_j,x_prime_j,y_prime_prime,x_prime_prime,i,j):
+                                top = -x_prime_i*y + x*y_prime_i
+                                dtop = -x_prime_prime*y + x*y_prime_prime
+                                if (i != j):
+                                    dtop = dtop + (-x_prime_i*y_prime_j + x_prime_j*y_prime_i)
+                                bottom = x*x + y*y
+                                dbottom = 2*x*x_prime_j + 2*y*y_prime_j
+                                return quotient_rule(top,bottom,dtop,dbottom)
+
+                            d2eePos_roll = d2arctan2(Xmat_hom[2,1],Xmat_hom[2,2],dXmat_hom_i[2,1],dXmat_hom_i[2,2], \
+                                            dXmat_hom_j[2,1],dXmat_hom_j[2,2],d2Xmat_hom[2,1],d2Xmat_hom[2,2],dind_i,dind_j)
+
+                            pitch_sqrt_term = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
+                            dpitch_sqrt_term_i_top = Xmat_hom[2,2]*dXmat_hom_i[2,2] + Xmat_hom[2,1]*dXmat_hom_i[2,1]
+                            dpitch_sqrt_term_i = dpitch_sqrt_term_i_top/pitch_sqrt_term
+                            dpitch_sqrt_term_j_top = Xmat_hom[2,2]*dXmat_hom_j[2,2] + Xmat_hom[2,1]*dXmat_hom_j[2,1]
+                            dpitch_sqrt_term_j = dpitch_sqrt_term_j_top/pitch_sqrt_term
+                            dpitch_sqrt_term_i_top_dj = dXmat_hom_j[2,2]*dXmat_hom_i[2,2] + Xmat_hom[2,2]*d2Xmat_hom[2,2] + \
+                                                        dXmat_hom_j[2,1]*dXmat_hom_i[2,1] + Xmat_hom[2,1]*d2Xmat_hom[2,1]
+                            d2pitch_sqrt_term = quotient_rule(dpitch_sqrt_term_i,pitch_sqrt_term,dpitch_sqrt_term_i_top_dj,dpitch_sqrt_term_j)
+                            d2eePos_pitch = d2arctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom_i[2,0],dpitch_sqrt_term_i, \
+                                             -dXmat_hom_j[2,0],dpitch_sqrt_term_j,-d2Xmat_hom[2,0],d2pitch_sqrt_term,dind_i,dind_j)
+                            d2eePos_yaw = d2arctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom_i[1,0],dXmat_hom_i[0,0], \
+                                            dXmat_hom_j[1,0],dXmat_hom_j[0,0],d2Xmat_hom[1,0],d2Xmat_hom[0,0],dind_i,dind_j)
+                            d2eePos_rpy = np.matrix([[d2eePos_roll,d2eePos_pitch,d2eePos_yaw]])
+
+                            d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy.transpose()))
+                            d2eePos[:,dind_i,dind_j] = d2eePos_col.reshape((6,))
 
             d2eePos_arr.append(d2eePos)
         return d2eePos_arr
