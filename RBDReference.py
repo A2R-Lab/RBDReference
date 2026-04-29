@@ -1031,7 +1031,7 @@ class RBDReference:
             qdd = np.zeros(n)
 
             gravity_vec = np.zeros((6))
-            gravity_vec[5] = GRAVITY  # a_base is gravity vec
+            gravity_vec[5] = -GRAVITY  # a_base is gravity vec
 
             # Initial Forward Pass
             for ind in range(NB): # curr_id = ind for this loop
@@ -1084,9 +1084,9 @@ class RBDReference:
                 U[:, inds_v] = np.squeeze(np.matmul(IA[ind], S))
                 d[ind] = np.matmul(np.transpose(S), U[:, inds_v])
                 u[inds_v] = tau[inds_v] - (np.matmul(S.T, pA[:, ind])) - (np.matmul(U[:, inds_v].T, c[:, ind]))
-                U[:, inds_v] = np.matmul(Xmat.T, U[:, inds_v]) # spatial edit
 
                 if parent_ind != -1:
+                    U[:, inds_v] = np.matmul(Xmat.T, U[:, inds_v]) # spatial edit
 
                     rightSide = np.reshape(U[:, inds_v], (6,1)) @ np.reshape(U[:, inds_v], (6,1)).T / d[ind]
                     Ia = np.matmul(Xmat.T, np.matmul(IA[ind], Xmat)) - rightSide # spatial edit
@@ -1113,7 +1113,7 @@ class RBDReference:
                 Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
 
                 if parent_ind == -1: # parent is base
-                    a[:, ind] = -gravity_vec
+                    a[:, ind] = np.matmul(np.linalg.inv(Xmat), gravity_vec)
                 else:
                     a[:, ind] = a[:, parent_ind]
                 
@@ -1124,7 +1124,7 @@ class RBDReference:
                     # qdd[inds_v] = np.matmul(np.linalg.inv(d[ind]), temp)
                     if self.robot.floating_base:
                         qdd[inds_v] = np.linalg.solve(d[ind], temp)
-                        a[:, ind] = np.matmul(Xmat, a[:, ind]) + np.matmul(S, qdd[inds_v]) + c[:, ind]
+                        a[:, ind] = a[:, ind] + np.matmul(S, qdd[inds_v]) + c[:, ind]
                     else:
                         qdd[ind] = temp / d[ind]
                         a[:, ind] = np.matmul(Xmat, a[:, ind]) + qdd[ind]*S.T + c[:, ind]
@@ -1264,6 +1264,7 @@ class RBDReference:
                         )
                         fh = np.matmul(Xmat.T, fh)
                         j = self.robot.get_parent_id(j)
+                        S = self.robot.get_S_by_id(j)
                         H[matrix_ind, j + 5] = np.matmul(fh.T, S)
                         H[j + 5, matrix_ind] = H[matrix_ind, j + 5]
                     # # treat floating base 6 dof joint
@@ -1283,6 +1284,15 @@ class RBDReference:
                     parent_ind = self.robot.get_parent_id(ind)
                     fh = np.matmul(IC[ind], S)
                     H[:6, :6] = np.matmul(S.T, fh)
+
+            # keep the user-facing floating-base convention in one place:
+            # the root block already matches the Pinocchio-style ordering,
+            # but the root-to-joint cross terms are still accumulated in the
+            # internal spatial row order [wx, wy, wz, vx, vy, vz].
+            root_order = [3, 4, 5, 0, 1, 2]
+            root_cross = H[:6, 6:].copy()
+            H[:6, 6:] = root_cross[root_order, :]
+            H[6:, :6] = np.transpose(H[:6, 6:])
         else:
             # # Fixed base implmentation of CRBA
             n = len(q)
