@@ -18,6 +18,65 @@ class RBDReference:
         """
         self.robot = robotObj # instance of Robot Object class created by URDFparser
 
+    def _normalize_q_input(self, q):
+        return self.robot.normalize_floating_base_q_input(q)
+
+    def _normalize_v_input(self, vec):
+        return self.robot.normalize_floating_base_v_input(vec)
+
+    def _denormalize_v_output(self, vec):
+        return self.robot.denormalize_floating_base_v_output(vec)
+
+    def _permute_matrix_prefix(self, matrix, permutation, axis):
+        if permutation is None:
+            return matrix
+        matrix = np.asarray(matrix, dtype=np.float64).copy()
+        prefix = len(permutation)
+        if axis == 0:
+            matrix[:prefix, :] = matrix[permutation, :]
+        else:
+            matrix[:, :prefix] = matrix[:, permutation]
+        return matrix
+
+    def _denormalize_qv_matrix_output(self, matrix, row_space=None, col_space=None):
+        matrix = np.asarray(matrix, dtype=np.float64).copy()
+        if row_space == "v":
+            matrix = self._permute_matrix_prefix(
+                matrix,
+                self.robot.get_floating_base_v_permutation_from_internal(),
+                axis=0,
+            )
+        elif row_space == "q":
+            matrix = self._permute_matrix_prefix(
+                matrix,
+                self.robot.get_floating_base_q_output_permutation_from_internal(),
+                axis=0,
+            )
+        if col_space == "v":
+            matrix = self._permute_matrix_prefix(
+                matrix,
+                self.robot.get_floating_base_v_permutation_from_internal(),
+                axis=1,
+            )
+        elif col_space == "q":
+            matrix = self._permute_matrix_prefix(
+                matrix,
+                self.robot.get_floating_base_q_output_permutation_from_internal(),
+                axis=1,
+            )
+        return matrix
+
+    def _denormalize_reduced_q_matrix_output(self, matrix, row_space=None):
+        return self._denormalize_qv_matrix_output(matrix, row_space=row_space, col_space=None)
+
+    def _denormalize_rnea_grad_output(self, dc_dq, dc_dqd):
+        return np.hstack(
+            (
+                self._denormalize_reduced_q_matrix_output(dc_dq, row_space="v"),
+                self._denormalize_qv_matrix_output(dc_dqd, row_space="v", col_space="v"),
+            )
+        )
+
     def cross_operator(self, v):
         """Compute the 6x6 spatial cross product matrix for a velocity vector.
 
@@ -1161,7 +1220,16 @@ class RBDReference:
 
         return (c, f)
 
-    def rnea(self, q, qd, qdd=None, GRAVITY=-9.81, f_ext=None):
+    def rnea(
+        self,
+        q,
+        qd,
+        qdd=None,
+        GRAVITY=-9.81,
+        f_ext=None,
+        public_output=True,
+        normalize_input=True,
+    ):
         """Compute the generalized forces using Recursive Newton-Euler Algorithm.
 
         Parameters
@@ -1180,10 +1248,17 @@ class RBDReference:
         (c, v, a, f) : tuple
             Generalized forces and intermediate link quantities.
         """
+        if normalize_input:
+            q = self._normalize_q_input(q)
+            qd = self._normalize_v_input(qd)
+            if qdd is not None:
+                qdd = self._normalize_v_input(qdd)
         # forward pass
         (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY)
         # backward pass
         (c, f) = self.rnea_bpass(q, f)
+        if public_output:
+            c = self._denormalize_v_output(c)
         return (c, v, a, f)
 
     def minv_bpass(self, q):
@@ -1332,7 +1407,7 @@ class RBDReference:
 
         return Minv
 
-    def minv(self, q, output_dense=True):
+    def minv(self, q, output_dense=True, public_output=True, normalize_input=True):
         """Compute the inverse of the joint-space inertia matrix.
 
         Parameters
@@ -1345,6 +1420,8 @@ class RBDReference:
         Minv : numpy.ndarray
             N x N inverse joint-space inertia matrix.
         """
+        if normalize_input:
+            q = self._normalize_q_input(q)
         # based on https://www.researchgate.net/publication/343098270_Analytical_Inverse_of_the_Joint_Space_Inertia_Matrix
         # backward pass
         (Minv, F, U, Dinv) = self.minv_bpass(q)
@@ -1360,6 +1437,8 @@ class RBDReference:
                     if col < row:
                         Minv[row, col] = Minv[col, row]
 
+        if public_output:
+            return self._denormalize_qv_matrix_output(Minv, row_space="v", col_space="v")
         return Minv
     
 
@@ -1383,7 +1462,7 @@ class RBDReference:
         return vcross
 
 
-    def aba(self, q, qd, tau, f_ext=[], GRAVITY = -9.81):
+    def aba(self, q, qd, tau, f_ext=[], GRAVITY = -9.81, normalize_input=True):
         """Compute forward dynamics using the Articulated-Body Algorithm.
 
         Parameters
@@ -1402,6 +1481,10 @@ class RBDReference:
         qdd : numpy.ndarray
             N-element joint accelerations.
         """
+        if normalize_input:
+            q = self._normalize_q_input(q)
+            qd = self._normalize_v_input(qd)
+            tau = self._normalize_v_input(tau)
         if self.robot.floating_base:
             # allocate memory TODO check NB vs. n
             n = len(qd)
@@ -1605,12 +1688,12 @@ class RBDReference:
                 qdd[ind] = temp / d[ind]
                 a[:,ind] = a[:,ind] + qdd[ind]*S.T
         
-        return qdd
+        return self._denormalize_v_output(qdd)
 
 
 
 
-    def crba(self, q):
+    def crba(self, q, normalize_input=True):
         """Compute the joint-space inertia matrix using the Composite Rigid Body Algorithm.
 
         Parameters
@@ -1623,6 +1706,8 @@ class RBDReference:
         M : numpy.ndarray
             N x N joint-space inertia matrix.
         """
+        if normalize_input:
+            q = self._normalize_q_input(q)
         if self.robot.floating_base:
             NB = self.robot.get_num_bodies()
             n = self.robot.get_num_vel()
@@ -1713,7 +1798,7 @@ class RBDReference:
                     H[ind, j] = np.matmul(S.T, fh)
                     H[j, ind] = H[ind, j]
 
-        return H
+        return self._denormalize_qv_matrix_output(H, row_space="v", col_space="v")
 
     ##### Testing original RNEA_grad to help with CUDA 
     def rnea_grad_fpass_dq(self, q, qd, v, a, GRAVITY = -9.81):
@@ -1977,7 +2062,16 @@ class RBDReference:
         
         return dc_dqd
 
-    def rnea_grad(self, q, qd, qdd = None, GRAVITY = -9.81, USE_VELOCITY_DAMPING = False):
+    def rnea_grad(
+        self,
+        q,
+        qd,
+        qdd = None,
+        GRAVITY = -9.81,
+        USE_VELOCITY_DAMPING = False,
+        public_output=True,
+        normalize_input=True,
+    ):
         """Compute the gradients of RNEA wrt joint positions and velocities.
 
         Parameters
@@ -1995,7 +2089,19 @@ class RBDReference:
             Gradients of generalized forces wrt q and qd.
         """
         
-        (c, v, a, f) = self.rnea(q, qd, qdd, GRAVITY)
+        if normalize_input:
+            q = self._normalize_q_input(q)
+            qd = self._normalize_v_input(qd)
+            if qdd is not None:
+                qdd = self._normalize_v_input(qdd)
+        (c, v, a, f) = self.rnea(
+            q,
+            qd,
+            qdd,
+            GRAVITY,
+            public_output=False,
+            normalize_input=False,
+        )
 
         # forward pass, dq
         (dv_dq, da_dq, df_dq) = self.rnea_grad_fpass_dq(q, qd, v, a, GRAVITY)
@@ -2009,11 +2115,12 @@ class RBDReference:
         # backward pass, dqd
         dc_dqd = self.rnea_grad_bpass_dqd(q, df_dqd, USE_VELOCITY_DAMPING)
 
-        dc_du = np.hstack((dc_dq,dc_dqd))
-        return dc_du
+        if public_output:
+            return self._denormalize_rnea_grad_output(dc_dq, dc_dqd)
+        return np.hstack((dc_dq, dc_dqd))
 
 
-    def forward_dynamics(self, q, qd, u):
+    def forward_dynamics(self, q, qd, u, public_output=True, normalize_input=True):
         """Compute the joint accelerations for the given state and torques.
 
         Parameters
@@ -2030,11 +2137,18 @@ class RBDReference:
         qdd : numpy.ndarray
             N-element joint accelerations.
         """
-        (c,v,a,f) = self.rnea(q, qd)
-        minv = self.minv(q)
-        return np.matmul(minv, u - c)
+        if normalize_input:
+            q = self._normalize_q_input(q)
+            qd = self._normalize_v_input(qd)
+            u = self._normalize_v_input(u)
+        (c,v,a,f) = self.rnea(q, qd, public_output=False, normalize_input=False)
+        minv = self.minv(q, public_output=False, normalize_input=False)
+        qdd = np.matmul(minv, u - c)
+        if public_output:
+            return self._denormalize_v_output(qdd)
+        return qdd
     
-    def forward_dynamics_grad(self, q, qd, u):
+    def forward_dynamics_grad(self, q, qd, u, normalize_input=True):
         """Compute the gradients of the forward dynamics.
 
         Parameters
@@ -2051,14 +2165,21 @@ class RBDReference:
         (qdd_dq, qdd_dqd) : tuple
             Gradients of joint accelerations wrt q and qd.
         """
-        qdd = self.forward_dynamics(q,qd,u)
-        dc_du = self.rnea_grad(q, qd, qdd)
+        if normalize_input:
+            q = self._normalize_q_input(q)
+            qd = self._normalize_v_input(qd)
+            u = self._normalize_v_input(u)
+        qdd = self.forward_dynamics(q, qd, u, public_output=False, normalize_input=False)
+        dc_du = self.rnea_grad(q, qd, qdd, public_output=False, normalize_input=False)
         dc_dq, dc_dqd = np.hsplit(dc_du, [len(qd)])
 
-        minv = self.minv(q)
+        minv = self.minv(q, public_output=False, normalize_input=False)
         qdd_dq = np.matmul(-minv, dc_dq)
         qdd_dqd = np.matmul(-minv, dc_dqd)
-        return qdd_dq, qdd_dqd
+        return (
+            self._denormalize_reduced_q_matrix_output(qdd_dq, row_space="v"),
+            self._denormalize_qv_matrix_output(qdd_dqd, row_space="v", col_space="v"),
+        )
 
 
     def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):
