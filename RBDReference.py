@@ -161,7 +161,7 @@ class RBDReference:
             [    0,  -v[5],  v[4],    0,    0,    0],
             [ v[5],    0,  -v[3],    0,    0,    0],
             [-v[4],  v[3],    0,    0,    0,    0]]
-        return -np.asmatrix(res)
+        return -np.asarray(res, dtype=np.float64)
     
     def factor_functions(self, I, v, number=3):
         """Helper functions for factorization in IDSVA and RNEA gradient.
@@ -528,7 +528,15 @@ class RBDReference:
     TODO: Add and test floating base support.
     """
 
-    def end_effector_pose(self, q, ee_joint_names = None, ee_offsets = [np.matrix([[0,0,0,1]])]):
+    def _normalize_ee_offsets(self, offsets=None):
+        if offsets is None:
+            offsets = [np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)]
+        return [
+            np.asarray(offset, dtype=np.float64).reshape(4, 1)
+            for offset in offsets
+        ]
+
+    def end_effector_pose(self, q, ee_joint_names = None, ee_offsets = None):
         """Compute the 4x4 homogeneous transformation matrix of the end effector.
 
         Parameters
@@ -571,20 +579,21 @@ class RBDReference:
         # TODO handle different offsets for different branches
         def eePos_from_Xmat_hom(Xmat_hom, ee_offsets):
             # xyz position is easy
-            eePos_xyz1 = Xmat_hom * ee_offsets[0].transpose()
+            eePos_xyz1 = np.matmul(np.asarray(Xmat_hom, dtype=np.float64), ee_offsets[0])
 
             # roll pitch yaw is a bit more difficult
             eePos_roll = np.arctan2(Xmat_hom[2,1],Xmat_hom[2,2])
             pitch_temp = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
             eePos_pitch = np.arctan2(-Xmat_hom[2,0],pitch_temp)
             eePos_yaw = np.arctan2(Xmat_hom[1,0],Xmat_hom[0,0])
-            eePos_rpy = np.matrix([[eePos_roll,eePos_pitch,eePos_yaw]])
+            eePos_rpy = np.array([[eePos_roll], [eePos_pitch], [eePos_yaw]], dtype=np.float64)
 
             # then stack it up!
-            eePos = np.vstack((eePos_xyz1[:3,:],eePos_rpy.transpose()))
+            eePos = np.vstack((eePos_xyz1[:3,:],eePos_rpy))
             return eePos
 
         # do the actual computations
+        ee_offsets = self._normalize_ee_offsets(ee_offsets)
         eePos_arr = []
         ee_jids, fixed_jids = self.select_end_effector_joints(ee_joint_names)
         for jid in ee_jids:
@@ -659,7 +668,7 @@ class RBDReference:
             q[3:7] = quat / quat_norm
         return q
 
-    def end_effector_pose_gradient(self, q, ee_joint_names = None, ee_offsets = [np.matrix([[0,0,0,1]])]):
+    def end_effector_pose_gradient(self, q, ee_joint_names = None, ee_offsets = None):
         """Compute the Jacobian (gradient) of the end-effector pose.
 
         Parameters
@@ -675,6 +684,7 @@ class RBDReference:
             Gradient of the end-effector pose.
         """
         q = self._normalize_kinematics_q(q)
+        ee_offsets = self._normalize_ee_offsets(ee_offsets)
         n = len(q)
 
         # local helper for handling scalar joints and the floating-base root
@@ -733,7 +743,7 @@ class RBDReference:
             # TODO handle different offsets for different branches
 
             # xyz position is easy
-            deePos_xyz1 = dXmat_hom * ee_offsets[0].transpose()
+            deePos_xyz1 = np.matmul(np.asarray(dXmat_hom, dtype=np.float64), ee_offsets[0])
 
             # roll pitch yaw is a bit more difficult
             # note: d/dz of arctan2(y(z),x(z)) = [-x'(z)y(z)+x(z)y'(z)]/[(x(z)^2 + y(z)^2)]
@@ -747,10 +757,10 @@ class RBDReference:
             dpitch_sqrt_term = (Xmat_hom[2,2]*dXmat_hom[2,2] + Xmat_hom[2,1]*dXmat_hom[2,1])/pitch_sqrt_term # note canceled out the 2 in the numer and denom
             deePos_pitch = darctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom[2,0],dpitch_sqrt_term)
             deePos_yaw = darctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom[1,0],dXmat_hom[0,0])
-            deePos_rpy = np.matrix([[deePos_roll,deePos_pitch,deePos_yaw]])
+            deePos_rpy = np.array([[deePos_roll], [deePos_pitch], [deePos_yaw]], dtype=np.float64)
 
             # then stack it up!
-            deePos_col = np.vstack((deePos_xyz1[:3,:],deePos_rpy.transpose()))
+            deePos_col = np.vstack((deePos_xyz1[:3,:],deePos_rpy))
             return deePos_col
 
         # Then compute the gradients for each end-effector requested
@@ -813,7 +823,7 @@ class RBDReference:
     """
     End Effector Pose Hessian
     """
-    def end_effector_pose_hessian(self, q, offsets = [np.matrix([[0,0,0,1]])], ee_joint_names = None):
+    def end_effector_pose_hessian(self, q, offsets = None, ee_joint_names = None):
         """Compute the Hessian of the end-effector pose.
 
         Parameters
@@ -829,6 +839,7 @@ class RBDReference:
             Hessian of the end-effector pose.
         """
         q = self._normalize_kinematics_q(q)
+        offsets = self._normalize_ee_offsets(offsets)
         n = len(q)
 
         # local helper for handling scalar joints and the floating-base root
@@ -955,7 +966,7 @@ class RBDReference:
                     
                     else:
                         # xyz position is easy
-                        d2eePos_xyz1 = d2Xmat_hom * offsets[0].transpose()
+                        d2eePos_xyz1 = np.matmul(np.asarray(d2Xmat_hom, dtype=np.float64), offsets[0])
 
                         # roll pitch yaw is a bit more difficult
                         # note: d/dz of arctan2(y(z),x(z)) = [-x'(z)y(z)+x(z)y'(z)]/[(x(z)^2 + y(z)^2)]
@@ -992,10 +1003,10 @@ class RBDReference:
                                          -dXmat_hom_j[2,0],dpitch_sqrt_term_j,-d2Xmat_hom[2,0],d2pitch_sqrt_term,dind_i,dind_j)
                         d2eePos_yaw = d2arctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom_i[1,0],dXmat_hom_i[0,0], \
                                         dXmat_hom_j[1,0],dXmat_hom_j[0,0],d2Xmat_hom[1,0],d2Xmat_hom[0,0],dind_i,dind_j)
-                        d2eePos_rpy = np.matrix([[d2eePos_roll,d2eePos_pitch,d2eePos_yaw]])
+                        d2eePos_rpy = np.array([[d2eePos_roll], [d2eePos_pitch], [d2eePos_yaw]], dtype=np.float64)
 
                         # then stack it up!
-                        d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy.transpose()))
+                        d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy))
                         d2eePos[:,dind_i,dind_j] = d2eePos_col.reshape((6,))
 
             d2eePos_arr.append(d2eePos)
@@ -1059,7 +1070,7 @@ class RBDReference:
                         if (dind_i not in jidChainQInds) or (dind_j not in jidChainQInds):
                             d2eePos[:,dind_i,dind_j] = np.zeros((6,))
                         else:
-                            d2eePos_xyz1 = d2Xmat_hom * offsets[0].transpose()
+                            d2eePos_xyz1 = np.matmul(np.asarray(d2Xmat_hom, dtype=np.float64), offsets[0])
 
                             def quotient_rule(top,bottom,dtop,dbottom):
                                 return (bottom*dtop - top*dbottom) / (bottom*bottom)
@@ -1087,9 +1098,9 @@ class RBDReference:
                                              -dXmat_hom_j[2,0],dpitch_sqrt_term_j,-d2Xmat_hom[2,0],d2pitch_sqrt_term,dind_i,dind_j)
                             d2eePos_yaw = d2arctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom_i[1,0],dXmat_hom_i[0,0], \
                                             dXmat_hom_j[1,0],dXmat_hom_j[0,0],d2Xmat_hom[1,0],d2Xmat_hom[0,0],dind_i,dind_j)
-                            d2eePos_rpy = np.matrix([[d2eePos_roll,d2eePos_pitch,d2eePos_yaw]])
+                            d2eePos_rpy = np.array([[d2eePos_roll], [d2eePos_pitch], [d2eePos_yaw]], dtype=np.float64)
 
-                            d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy.transpose()))
+                            d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy))
                             d2eePos[:,dind_i,dind_j] = d2eePos_col.reshape((6,))
 
             d2eePos_arr.append(d2eePos)
@@ -1169,14 +1180,14 @@ class RBDReference:
             _qd = qd[inds_v]
             
             if self.robot.floating_base and curr_id == 0:
-                vJ = np.matmul(S, np.transpose(np.matrix(_qd)))
+                vJ = np.matmul(S, np.asarray(_qd, dtype=np.float64).reshape(-1, 1))
             else: vJ = S * _qd
             v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
             a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
             if qdd is not None:
                 _qdd = qdd[inds_v]
                 if self.robot.floating_base and curr_id == 0:
-                    aJ = np.matmul(S, np.transpose(np.matrix(_qdd)))
+                    aJ = np.matmul(S, np.asarray(_qdd, dtype=np.float64).reshape(-1, 1))
                 else: aJ = S * _qdd
                 a[:, curr_id] += np.squeeze(np.array(aJ))  # reduces shape to (6,) matching a[:,curr_id]
             # compute f
