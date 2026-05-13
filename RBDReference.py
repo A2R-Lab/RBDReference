@@ -1,5 +1,6 @@
 import numpy as np
 import copy
+import sympy as sp
 np.set_printoptions(precision=4, suppress=True, linewidth=100)
 
 class RBDReference:
@@ -17,6 +18,8 @@ class RBDReference:
             None
         """
         self.robot = robotObj # instance of Robot Object class created by URDFparser
+        self._spatial_xmat_derivative_func_cache = {}
+        self._spatial_xmat_second_derivative_func_cache = {}
 
     def _normalize_q_input(self, q):
         return self.robot.normalize_floating_base_q_input(q)
@@ -76,6 +79,52 @@ class RBDReference:
                 self._denormalize_qv_matrix_output(dc_dqd, row_space="v", col_space="v"),
             )
         )
+
+    @staticmethod
+    def _normalize_xyzw_quaternion(quat):
+        quat = np.asarray(quat, dtype=np.float64).copy()
+        quat_norm = np.linalg.norm(quat)
+        if quat_norm == 0.0:
+            raise ValueError("Floating-base quaternion norm was zero during normalization.")
+        return quat / quat_norm
+
+    @staticmethod
+    def _quat_xyzw_from_rotation_matrix(rot, reference_quat=None):
+        rot = np.asarray(rot, dtype=np.float64)
+        trace = np.trace(rot)
+        if trace > 0.0:
+            s = np.sqrt(trace + 1.0) * 2.0
+            w = 0.25 * s
+            x = (rot[2, 1] - rot[1, 2]) / s
+            y = (rot[0, 2] - rot[2, 0]) / s
+            z = (rot[1, 0] - rot[0, 1]) / s
+        else:
+            diag = np.diag(rot)
+            if diag[0] > diag[1] and diag[0] > diag[2]:
+                s = np.sqrt(1.0 + rot[0, 0] - rot[1, 1] - rot[2, 2]) * 2.0
+                w = (rot[2, 1] - rot[1, 2]) / s
+                x = 0.25 * s
+                y = (rot[0, 1] + rot[1, 0]) / s
+                z = (rot[0, 2] + rot[2, 0]) / s
+            elif diag[1] > diag[2]:
+                s = np.sqrt(1.0 + rot[1, 1] - rot[0, 0] - rot[2, 2]) * 2.0
+                w = (rot[0, 2] - rot[2, 0]) / s
+                x = (rot[0, 1] + rot[1, 0]) / s
+                y = 0.25 * s
+                z = (rot[1, 2] + rot[2, 1]) / s
+            else:
+                s = np.sqrt(1.0 + rot[2, 2] - rot[0, 0] - rot[1, 1]) * 2.0
+                w = (rot[1, 0] - rot[0, 1]) / s
+                x = (rot[0, 2] + rot[2, 0]) / s
+                y = (rot[1, 2] + rot[2, 1]) / s
+                z = 0.25 * s
+        quat = RBDReference._normalize_xyzw_quaternion(np.array([x, y, z, w], dtype=np.float64))
+        if reference_quat is not None:
+            reference_quat = RBDReference._normalize_xyzw_quaternion(reference_quat)
+            if np.dot(quat, reference_quat) < 0.0:
+                quat = -quat
+        return quat
+
 
     def cross_operator(self, v):
         """Compute the 6x6 spatial cross product matrix for a velocity vector.
@@ -2192,9 +2241,297 @@ class RBDReference:
             self._denormalize_qv_matrix_output(qdd_dqd, row_space="v", col_space="v"),
         )
 
+    @staticmethod
+    def _skew_from_vector(vec):
+        x, y, z = np.asarray(vec, dtype=np.float64)
+        return np.array(
+            [
+                [0.0, -z, y],
+                [z, 0.0, -x],
+                [-y, x, 0.0],
+            ],
+            dtype=np.float64,
+        )
+
+    @staticmethod
+    def _vector_from_skew(skew):
+        skew = np.asarray(skew, dtype=np.float64)
+        return np.array([skew[2, 1], skew[0, 2], skew[1, 0]], dtype=np.float64)
+
+    @staticmethod
+    def _rotation_from_grid_rotvec(rotvec):
+        rotvec = np.asarray(rotvec, dtype=np.float64)
+        theta = np.linalg.norm(rotvec)
+        generator = RBDReference._skew_from_vector(rotvec)
+        if theta < 1e-12:
+            return np.eye(3, dtype=np.float64) + generator + 0.5 * (generator @ generator)
+        return (
+            np.eye(3, dtype=np.float64)
+            + (np.sin(theta) / theta) * generator
+            + ((1.0 - np.cos(theta)) / (theta * theta)) * (generator @ generator)
+        )
+
+    @staticmethod
+    def _spatial_transform_from_motion(rot, trans):
+        rot = np.asarray(rot, dtype=np.float64)
+        trans = np.asarray(trans, dtype=np.float64)
+        zeros = np.zeros((3, 3), dtype=np.float64)
+        xlt = np.block(
+            [
+                [np.eye(3, dtype=np.float64), zeros],
+                [-RBDReference._skew_from_vector(trans), np.eye(3, dtype=np.float64)],
+            ]
+        )
+        xrot = np.block([[rot, zeros], [zeros, rot]])
+        return xrot @ xlt
+
+    @staticmethod
+    def _floating_root_q_from_spatial_transform(xmat, reference_quat):
+        xmat = np.asarray(xmat, dtype=np.float64)
+        rot = xmat[:3, :3]
+        trans_skew = -rot.T @ xmat[3:6, :3]
+        quat = RBDReference._quat_xyzw_from_rotation_matrix(rot, reference_quat)
+        return np.hstack((RBDReference._vector_from_skew(trans_skew), quat))
+
+    def _floating_lie_perturbed_q(self, q, dind, step):
+        q_perturbed = np.asarray(q, dtype=np.float64).copy()
+        if dind >= 6:
+            q_perturbed[dind + 1] += step
+            return q_perturbed
+
+        root_delta = np.zeros(6, dtype=np.float64)
+        root_delta[dind] = step
+        delta_x = self._spatial_transform_from_motion(
+            self._rotation_from_grid_rotvec(root_delta[3:6]),
+            root_delta[:3],
+        )
+        root_q_inds = self.robot.get_joint_index_q(0)
+        root_x = self.robot.get_Xmat_Func_by_id(0)(q_perturbed[root_q_inds])
+        perturbed_x = root_x @ delta_x
+        q_perturbed[root_q_inds] = self._floating_root_q_from_spatial_transform(
+            perturbed_x,
+            q_perturbed[3:7],
+        )
+        return q_perturbed
+
+    def _floating_idsva_d2tau_dq_lie_finite_diff(self, q, qd, qdd, GRAVITY=-9.81, step=1e-6):
+        n = self.robot.get_num_vel()
+        q = np.asarray(q, dtype=np.float64).copy()
+        if self.robot.using_quaternion:
+            q[3:7] = self._normalize_xyzw_quaternion(q[3:7])
+        qd = np.asarray(qd, dtype=np.float64)
+        qdd = np.asarray(qdd, dtype=np.float64)
+        d2tau_dq = np.zeros((n, n, n), dtype=np.float64)
+        for dind in range(n):
+            q_pos = self._floating_lie_perturbed_q(q, dind, step)
+            q_neg = self._floating_lie_perturbed_q(q, dind, -step)
+            dc_dq_pos, _dc_dqd_pos = np.hsplit(
+                self.rnea_grad(q_pos, qd, qdd, GRAVITY), [n]
+            )
+            dc_dq_neg, _dc_dqd_neg = np.hsplit(
+                self.rnea_grad(q_neg, qd, qdd, GRAVITY), [n]
+            )
+            d2tau_dq[:, :, dind] = (dc_dq_pos - dc_dq_neg) / (2.0 * step)
+        return d2tau_dq
+
+    @staticmethod
+    def _as_index_list(index):
+        if isinstance(index, list):
+            return index
+        if isinstance(index, tuple):
+            return list(index)
+        if isinstance(index, np.ndarray):
+            return list(index.flatten())
+        return [index]
+
+    def _spatial_xmat_derivative_func(self, jid, local_index):
+        key = (jid, local_index)
+        if key not in self._spatial_xmat_derivative_func_cache:
+            joint = self.robot.get_joint_by_id(jid)
+            dX = sp.diff(joint.get_transformation_matrix(), joint.position_symbols[local_index])
+            self._spatial_xmat_derivative_func_cache[key] = sp.utilities.lambdify(
+                joint._local_q_lambdify_args(),
+                dX,
+                "numpy",
+            )
+        return self._spatial_xmat_derivative_func_cache[key]
+
+    def _spatial_xmat_second_derivative_func(self, jid, local_index_i, local_index_j):
+        key = (jid, local_index_i, local_index_j)
+        if key not in self._spatial_xmat_second_derivative_func_cache:
+            joint = self.robot.get_joint_by_id(jid)
+            self._spatial_xmat_second_derivative_func_cache[key] = (
+                joint.get_d2transformation_matrix_local_function(
+                    local_index_i,
+                    local_index_j,
+                )
+            )
+        return self._spatial_xmat_second_derivative_func_cache[key]
+
+    def _floating_gravity_d2tau_dq_lie_direct(self, q, GRAVITY=-9.81):
+        if not self.robot.floating_base:
+            raise ValueError("_floating_gravity_d2tau_dq_lie_direct requires a floating-base robot.")
+
+        q = self._normalize_q_input(q)
+        q = np.asarray(q, dtype=np.float64).copy()
+        if self.robot.using_quaternion:
+            q[3:7] = self._normalize_xyzw_quaternion(q[3:7])
+
+        NB = self.robot.get_num_bodies()
+        n = self.robot.get_num_vel()
+        gravity_vec = np.zeros(6, dtype=np.float64)
+        gravity_vec[5] = -GRAVITY
+
+        X = [None] * NB
+        X_first = np.zeros((n, NB, 6, 6), dtype=np.float64)
+        X_first_second = np.zeros((n, n, NB, 6, 6), dtype=np.float64)
+        for jid in range(NB):
+            joint = self.robot.get_joint_by_id(jid)
+            q_arg = q[self.robot.get_joint_index_q(jid)]
+            X[jid] = np.asarray(
+                self.robot.get_Xmat_Func_by_id(jid)(q_arg),
+                dtype=np.float64,
+            ).reshape(6, 6)
+            if not joint.position_symbols:
+                continue
+
+            body_v_inds = self._as_index_list(self.robot.get_joint_index_v(jid))
+            if jid == 0:
+                S_root = np.asarray(self.robot.get_S_by_id(0), dtype=np.float64)
+                generators = []
+                for local_index, vel_index in enumerate(body_v_inds):
+                    B = self.cross_operator(S_root[:, local_index])
+                    # Featherstone xlt has [[I, 0], [-skew(r), I]], so root
+                    # translations have the opposite right-Lie sign.
+                    if local_index < 3:
+                        B = -B
+                    generators.append(B)
+                    X_first[vel_index, jid] = X[jid] @ B
+                for first_local, first_vel in enumerate(body_v_inds):
+                    for second_local, second_vel in enumerate(body_v_inds):
+                        X_first_second[first_vel, second_vel, jid] = (
+                            X[jid] @ generators[second_local] @ generators[first_local]
+                        )
+                continue
+
+            for first_local, first_vel in enumerate(body_v_inds):
+                X_first[first_vel, jid] = np.asarray(
+                    self._spatial_xmat_derivative_func(jid, first_local)(q_arg),
+                    dtype=np.float64,
+                ).reshape(6, 6)
+                for second_local, second_vel in enumerate(body_v_inds):
+                    X_first_second[first_vel, second_vel, jid] = np.asarray(
+                        self._spatial_xmat_second_derivative_func(
+                            jid,
+                            first_local,
+                            second_local,
+                        )(q_arg),
+                        dtype=np.float64,
+                    ).reshape(6, 6)
+
+        a = np.zeros((6, NB), dtype=np.float64)
+        a_first = np.zeros((6, n, NB), dtype=np.float64)
+        a_first_second = np.zeros((6, n, n, NB), dtype=np.float64)
+
+        for jid in range(NB):
+            parent_id = self.robot.get_parent_id(jid)
+            if parent_id == -1:
+                inv_X = np.linalg.inv(X[jid])
+                a[:, jid] = inv_X @ gravity_vec
+                for first_dir in range(n):
+                    Xd_first = X_first[first_dir, jid]
+                    inv_X_first = -inv_X @ Xd_first @ inv_X
+                    a_first[:, first_dir, jid] = inv_X_first @ gravity_vec
+                    for second_dir in range(n):
+                        Xd_second = X_first[second_dir, jid]
+                        Xdd = X_first_second[first_dir, second_dir, jid]
+                        inv_X_first_second = (
+                            inv_X @ Xd_second @ inv_X @ Xd_first @ inv_X
+                            + inv_X @ Xd_first @ inv_X @ Xd_second @ inv_X
+                            - inv_X @ Xdd @ inv_X
+                        )
+                        a_first_second[:, first_dir, second_dir, jid] = (
+                            inv_X_first_second @ gravity_vec
+                        )
+            else:
+                parent_a = a[:, parent_id]
+                a[:, jid] = X[jid] @ parent_a
+                for first_dir in range(n):
+                    a_first[:, first_dir, jid] = (
+                        X_first[first_dir, jid] @ parent_a
+                        + X[jid] @ a_first[:, first_dir, parent_id]
+                    )
+                    for second_dir in range(n):
+                        a_first_second[:, first_dir, second_dir, jid] = (
+                            X_first_second[first_dir, second_dir, jid] @ parent_a
+                            + X_first[first_dir, jid] @ a_first[:, second_dir, parent_id]
+                            + X_first[second_dir, jid] @ a_first[:, first_dir, parent_id]
+                            + X[jid] @ a_first_second[:, first_dir, second_dir, parent_id]
+                        )
+
+        f = np.zeros((6, NB), dtype=np.float64)
+        f_first = np.zeros((6, n, NB), dtype=np.float64)
+        f_first_second = np.zeros((6, n, n, NB), dtype=np.float64)
+        for jid in range(NB):
+            Imat = self.robot.get_Imat_by_id(jid)
+            f[:, jid] = Imat @ a[:, jid]
+            for first_dir in range(n):
+                f_first[:, first_dir, jid] = Imat @ a_first[:, first_dir, jid]
+                for second_dir in range(n):
+                    f_first_second[:, first_dir, second_dir, jid] = (
+                        Imat @ a_first_second[:, first_dir, second_dir, jid]
+                    )
+
+        d2tau_dq = np.zeros((n, n, n), dtype=np.float64)
+        for jid in range(NB - 1, -1, -1):
+            S = np.asarray(self.robot.get_S_by_id(jid), dtype=np.float64)
+            if len(S.shape) == 1:
+                S = S.reshape(6, 1)
+            inds_f = self._as_index_list(self.robot.get_joint_index_f(jid))
+            d2tau_dq[inds_f, :, :] = np.einsum(
+                "sl,sab->lab",
+                S,
+                f_first_second[:, :, :, jid],
+                optimize=True,
+            )
+
+            parent_id = self.robot.get_parent_id(jid)
+            if parent_id == -1:
+                continue
+
+            f_parent_update = X[jid].T @ f[:, jid]
+            f_first_parent_update = np.zeros((6, n), dtype=np.float64)
+            f_first_second_parent_update = np.zeros((6, n, n), dtype=np.float64)
+            for first_dir in range(n):
+                f_first_parent_update[:, first_dir] = (
+                    X_first[first_dir, jid].T @ f[:, jid]
+                    + X[jid].T @ f_first[:, first_dir, jid]
+                )
+                for second_dir in range(n):
+                    f_first_second_parent_update[:, first_dir, second_dir] = (
+                        X_first_second[first_dir, second_dir, jid].T @ f[:, jid]
+                        + X_first[first_dir, jid].T @ f_first[:, second_dir, jid]
+                        + X_first[second_dir, jid].T @ f_first[:, first_dir, jid]
+                        + X[jid].T @ f_first_second[:, first_dir, second_dir, jid]
+                    )
+
+            f[:, parent_id] += f_parent_update
+            f_first[:, :, parent_id] += f_first_parent_update
+            f_first_second[:, :, :, parent_id] += f_first_second_parent_update
+
+        return d2tau_dq
 
     def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):
         """Compute second-order derivatives of inverse dynamics via parallel IDSVA.
+
+        Fixed-base robots use the unified IDSVA-SO sweep directly. Floating-base
+        robots additionally apply the Lie-algebra gravity Hessian correction
+        from `_floating_gravity_d2tau_dq_lie_direct` to `d2tau_dq` (and set
+        gravity to zero inside the main sweep so it doesn't double-count) —
+        this is the validated "spatial_lie" formulation; the previous mode
+        dispatch (spatial / analytic / finite_diff / compare / ...) was
+        diagnostic scaffolding for the gravity-correction investigation and
+        has been removed.
 
         Parameters
         ----------
@@ -2210,7 +2547,10 @@ class RBDReference:
         (d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq) : tuple
             Second-order derivatives of torques and inertia matrix.
         """
-        # allocate memory
+        # For floating-base the gravity Hessian is added analytically after the
+        # main sweep (via `_floating_gravity_d2tau_dq_lie_direct`), so the
+        # internal sweep must run with zero gravity to avoid double-counting.
+        idsva_gravity = 0.0 if self.robot.floating_base else GRAVITY
         NB = self.robot.get_num_bodies()
         n = self.robot.get_num_vel()
         v = np.zeros((6,NB))
@@ -2227,7 +2567,7 @@ class RBDReference:
         psid = [None] * NB
         psidd = [None] * NB
         gravity_vec = np.zeros(6)
-        gravity_vec[5] = -GRAVITY # a_base is gravity vec
+        gravity_vec[5] = -idsva_gravity # a_base is gravity vec
 
         def inds_to_list(inds):
             if isinstance(inds, list):
@@ -2499,45 +2839,13 @@ class RBDReference:
                             d2tau_dqd[st_j_inds, dd, cc] = -np.dot(t2, D1[:, st_j_inds])
 
         if self.robot.floating_base:
-            # The block-aware extension above is enough for:
-            #   - d2tau_dqd
-            #   - d2tau_dvdq
-            #   - dM_dq
-            #
-            # but the q-side second derivative tensor d2tau_dq still does not
-            # carry over cleanly from the old scalar-joint derivation. Rather
-            # than replacing the whole second-order path, patch only d2tau_dq
-            # from the already-verified first-order floating rnea_grad path and
-            # leave the rest of the second-order tensors analytic.
-            q = np.asarray(q, dtype=np.float64).copy()
-            if self.robot.using_quaternion:
-                quat = q[3:7]
-                quat_norm = np.linalg.norm(quat)
-                if quat_norm == 0.0:
-                    raise ValueError("Floating-base quaternion norm was zero during second-order dynamics normalization.")
-                q[3:7] = quat / quat_norm
-            qd = np.asarray(qd, dtype=np.float64)
-            qdd = np.asarray(qdd, dtype=np.float64)
-            step = 1e-6
-            for dind in range(n):
-                # Reduced floating q-side dynamics convention:
-                #   [x, y, z, qx, qy, qz, joints...]
-                # so the articulated coordinates are shifted by one slot in q
-                # because qw is present in configuration space but not in nv.
-                q_pos = q.copy()
-                q_neg = q.copy()
-                if dind < 6:
-                    q_pos[dind] += step
-                    q_neg[dind] -= step
-                else:
-                    q_pos[dind + 1] += step
-                    q_neg[dind + 1] -= step
-                if self.robot.using_quaternion:
-                    q_pos[3:7] = q_pos[3:7] / np.linalg.norm(q_pos[3:7])
-                    q_neg[3:7] = q_neg[3:7] / np.linalg.norm(q_neg[3:7])
-                dc_dq_pos, _dc_dqd_pos = np.hsplit(self.rnea_grad(q_pos, qd, qdd, GRAVITY), [n])
-                dc_dq_neg, _dc_dqd_neg = np.hsplit(self.rnea_grad(q_neg, qd, qdd, GRAVITY), [n])
-                d2tau_dq[:, :, dind] = (dc_dq_pos - dc_dq_neg) / (2.0 * step)
+            # Floating-base gravity Hessian: add the Lie-algebra gravity
+            # correction term that was deliberately omitted from the main
+            # sweep (idsva_gravity=0 above). The other three tensors
+            # (d2tau_dqd, d2tau_dvdq, dM_dq) are already correct from the
+            # block-aware sweep above and need no further floating-base
+            # adjustment.
+            d2tau_dq = d2tau_dq + self._floating_gravity_d2tau_dq_lie_direct(q, GRAVITY)
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
     
     def fdsva_so(self, q, qd, u, GRAVITY = -9.81):
