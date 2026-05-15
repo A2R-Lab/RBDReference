@@ -2368,7 +2368,18 @@ class RBDReference:
             )
         return self._spatial_xmat_second_derivative_func_cache[key]
 
-    def _floating_gravity_d2tau_dq_lie_direct(self, q, GRAVITY=-9.81):
+    def _floating_gravity_d2tau_dq_lie_direct(self, q, GRAVITY=-9.81, _dump_intermediates=None):
+        """Lie-tangent gravity Hessian d²τ_grav/dq² for floating-base robots.
+
+        Body-major layout (axis 0 = body id) keeps per-body slices contiguous so
+        the recursive operations dispatch as batched GEMMs. Gravity-only `a` is
+        propagated `a[i] = X[i] @ a[parent]` down the tree (rooted at
+        `inv(X[0]) @ g`), carrying first- and second-order q-derivatives, then
+        `f = I @ a` is back-propagated and projected onto each joint's S.
+
+        If `_dump_intermediates` is a dict, populates it with per-body intermediate
+        arrays for diagnostic comparison with alternate ports (debug-only hook).
+        """
         if not self.robot.floating_base:
             raise ValueError("_floating_gravity_d2tau_dq_lie_direct requires a floating-base robot.")
 
@@ -2377,161 +2388,110 @@ class RBDReference:
         if self.robot.using_quaternion:
             q[3:7] = self._normalize_xyzw_quaternion(q[3:7])
 
-        NB = self.robot.get_num_bodies()
-        n = self.robot.get_num_vel()
-        gravity_vec = np.zeros(6, dtype=np.float64)
-        gravity_vec[5] = -GRAVITY
+        NB, n = self.robot.get_num_bodies(), self.robot.get_num_vel()
+        gravity_vec = np.zeros(6); gravity_vec[5] = -GRAVITY
+        X = np.zeros((NB, 6, 6))
+        dX = np.zeros((NB, n, 6, 6))
+        d2X = np.zeros((NB, n, n, 6, 6))
+        Imats = np.stack([np.asarray(self.robot.get_Imat_by_id(jid)) for jid in range(NB)])  # (NB, 6, 6)
 
-        X = [None] * NB
-        X_first = np.zeros((n, NB, 6, 6), dtype=np.float64)
-        X_first_second = np.zeros((n, n, NB, 6, 6), dtype=np.float64)
         for jid in range(NB):
-            joint = self.robot.get_joint_by_id(jid)
             q_arg = q[self.robot.get_joint_index_q(jid)]
-            X[jid] = np.asarray(
-                self.robot.get_Xmat_Func_by_id(jid)(q_arg),
-                dtype=np.float64,
-            ).reshape(6, 6)
-            if not joint.position_symbols:
+            X[jid] = np.asarray(self.robot.get_Xmat_Func_by_id(jid)(q_arg)).reshape(6, 6)
+            if not self.robot.get_joint_by_id(jid).position_symbols:
                 continue
-
-            body_v_inds = self._as_index_list(self.robot.get_joint_index_v(jid))
+            vinds = self._as_index_list(self.robot.get_joint_index_v(jid))
             if jid == 0:
-                S_root = np.asarray(self.robot.get_S_by_id(0), dtype=np.float64)
-                generators = []
-                for local_index, vel_index in enumerate(body_v_inds):
-                    B = self.cross_operator(S_root[:, local_index])
-                    # Featherstone xlt has [[I, 0], [-skew(r), I]], so root
-                    # translations have the opposite right-Lie sign.
-                    if local_index < 3:
-                        B = -B
-                    generators.append(B)
-                    X_first[vel_index, jid] = X[jid] @ B
-                for first_local, first_vel in enumerate(body_v_inds):
-                    for second_local, second_vel in enumerate(body_v_inds):
-                        X_first_second[first_vel, second_vel, jid] = (
-                            X[jid] @ generators[second_local] @ generators[first_local]
-                        )
-                continue
-
-            for first_local, first_vel in enumerate(body_v_inds):
-                X_first[first_vel, jid] = np.asarray(
-                    self._spatial_xmat_derivative_func(jid, first_local)(q_arg),
-                    dtype=np.float64,
-                ).reshape(6, 6)
-                for second_local, second_vel in enumerate(body_v_inds):
-                    X_first_second[first_vel, second_vel, jid] = np.asarray(
-                        self._spatial_xmat_second_derivative_func(
-                            jid,
-                            first_local,
-                            second_local,
-                        )(q_arg),
-                        dtype=np.float64,
-                    ).reshape(6, 6)
-
-        a = np.zeros((6, NB), dtype=np.float64)
-        a_first = np.zeros((6, n, NB), dtype=np.float64)
-        a_first_second = np.zeros((6, n, n, NB), dtype=np.float64)
-
-        for jid in range(NB):
-            parent_id = self.robot.get_parent_id(jid)
-            if parent_id == -1:
-                inv_X = np.linalg.inv(X[jid])
-                a[:, jid] = inv_X @ gravity_vec
-                for first_dir in range(n):
-                    Xd_first = X_first[first_dir, jid]
-                    inv_X_first = -inv_X @ Xd_first @ inv_X
-                    a_first[:, first_dir, jid] = inv_X_first @ gravity_vec
-                    for second_dir in range(n):
-                        Xd_second = X_first[second_dir, jid]
-                        Xdd = X_first_second[first_dir, second_dir, jid]
-                        inv_X_first_second = (
-                            inv_X @ Xd_second @ inv_X @ Xd_first @ inv_X
-                            + inv_X @ Xd_first @ inv_X @ Xd_second @ inv_X
-                            - inv_X @ Xdd @ inv_X
-                        )
-                        a_first_second[:, first_dir, second_dir, jid] = (
-                            inv_X_first_second @ gravity_vec
-                        )
+                # Root joint: Lie generators with Featherstone xlt translation-sign flip.
+                S_root = np.asarray(self.robot.get_S_by_id(0))
+                B = [(-1 if li < 3 else 1) * self.cross_operator(S_root[:, li]) for li in range(len(vinds))]
+                for li, vi in enumerate(vinds):
+                    dX[jid, vi] = X[jid] @ B[li]
+                    for lj, vj in enumerate(vinds):
+                        d2X[jid, vi, vj] = X[jid] @ B[lj] @ B[li]
             else:
-                parent_a = a[:, parent_id]
-                a[:, jid] = X[jid] @ parent_a
-                for first_dir in range(n):
-                    a_first[:, first_dir, jid] = (
-                        X_first[first_dir, jid] @ parent_a
-                        + X[jid] @ a_first[:, first_dir, parent_id]
-                    )
-                    for second_dir in range(n):
-                        a_first_second[:, first_dir, second_dir, jid] = (
-                            X_first_second[first_dir, second_dir, jid] @ parent_a
-                            + X_first[first_dir, jid] @ a_first[:, second_dir, parent_id]
-                            + X_first[second_dir, jid] @ a_first[:, first_dir, parent_id]
-                            + X[jid] @ a_first_second[:, first_dir, second_dir, parent_id]
-                        )
+                for li, vi in enumerate(vinds):
+                    dX[jid, vi] = np.asarray(self._spatial_xmat_derivative_func(jid, li)(q_arg)).reshape(6, 6)
+                    for lj, vj in enumerate(vinds):
+                        d2X[jid, vi, vj] = np.asarray(
+                            self._spatial_xmat_second_derivative_func(jid, li, lj)(q_arg)
+                        ).reshape(6, 6)
 
-        f = np.zeros((6, NB), dtype=np.float64)
-        f_first = np.zeros((6, n, NB), dtype=np.float64)
-        f_first_second = np.zeros((6, n, n, NB), dtype=np.float64)
+        # Forward sweep. Per-body work is per-body sequential (parent dependency)
+        # but expressed as batched matmuls/broadcasts over the n direction axis.
+        a = np.zeros((NB, 6))
+        da = np.zeros((NB, n, 6))
+        d2a = np.zeros((NB, n, n, 6))
         for jid in range(NB):
-            Imat = self.robot.get_Imat_by_id(jid)
-            f[:, jid] = Imat @ a[:, jid]
-            for first_dir in range(n):
-                f_first[:, first_dir, jid] = Imat @ a_first[:, first_dir, jid]
-                for second_dir in range(n):
-                    f_first_second[:, first_dir, second_dir, jid] = (
-                        Imat @ a_first_second[:, first_dir, second_dir, jid]
-                    )
+            pid = self.robot.get_parent_id(jid)
+            if pid == -1:
+                inv_X = np.linalg.inv(X[jid])
+                a[jid] = inv_X @ gravity_vec
+                dX_inv = dX[jid] @ inv_X                                                      # (n, 6, 6)
+                inv_dX_inv = inv_X @ dX_inv                                                   # (n, 6, 6)
+                da[jid] = (-inv_dX_inv) @ gravity_vec                                         # (n, 6)
+                cross = inv_dX_inv[:, None] @ dX_inv[None, :]                                 # (n, n, 6, 6)
+                d2a[jid] = (cross + cross.transpose(1, 0, 2, 3) - inv_X @ d2X[jid] @ inv_X) @ gravity_vec
+            else:
+                a[jid] = X[jid] @ a[pid]
+                da[jid] = dX[jid] @ a[pid] + da[pid] @ X[jid].T
+                cross = (dX[jid] @ da[pid].T).transpose(0, 2, 1)                              # (n, n, 6) with axes (k, l, a)
+                d2a[jid] = d2X[jid] @ a[pid] + cross + cross.transpose(1, 0, 2) + d2a[pid] @ X[jid].T
 
-        d2tau_dq = np.zeros((n, n, n), dtype=np.float64)
+        # f = Imat @ a as a batched GEMM. Reshape d2a's (k, l) dirs into a single
+        # flat axis so the contraction is a clean (NB, *, 6) @ (NB, 6, 6) matmul.
+        Imats_T = np.transpose(Imats, (0, 2, 1))                               # (NB, 6, 6)
+        f = (Imats @ a[..., None]).squeeze(-1)                                 # (NB, 6)
+        df = da @ Imats_T                                                      # (NB, n, 6)
+        d2f = (d2a.reshape(NB, n * n, 6) @ Imats_T).reshape(NB, n, n, 6)        # (NB, n, n, 6)
+
+        if _dump_intermediates is not None:
+            _dump_intermediates["X"] = X.copy()
+            _dump_intermediates["dX"] = dX.copy()
+            _dump_intermediates["d2X"] = d2X.copy()
+            _dump_intermediates["a"] = a.copy()
+            _dump_intermediates["da"] = da.copy()
+            _dump_intermediates["d2a"] = d2a.copy()
+            _dump_intermediates["f_initial"] = f.copy()
+            _dump_intermediates["df_initial"] = df.copy()
+            _dump_intermediates["d2f_initial"] = d2f.copy()
+            _dump_intermediates["f_at_projection"] = {}
+            _dump_intermediates["df_at_projection"] = {}
+            _dump_intermediates["d2f_at_projection"] = {}
+            _dump_intermediates["d2tau_dq_per_body"] = {}
+
+        # Backward sweep: project onto S, then accumulate parent f-derivatives.
+        d2tau_dq = np.zeros((n, n, n))
         for jid in range(NB - 1, -1, -1):
-            S = np.asarray(self.robot.get_S_by_id(jid), dtype=np.float64)
-            if len(S.shape) == 1:
+            S = np.asarray(self.robot.get_S_by_id(jid))
+            if S.ndim == 1:
                 S = S.reshape(6, 1)
-            inds_f = self._as_index_list(self.robot.get_joint_index_f(jid))
-            d2tau_dq[inds_f, :, :] = np.einsum(
-                "sl,sab->lab",
-                S,
-                f_first_second[:, :, :, jid],
-                optimize=True,
-            )
-
-            parent_id = self.robot.get_parent_id(jid)
-            if parent_id == -1:
+            if _dump_intermediates is not None:
+                _dump_intermediates["f_at_projection"][jid] = f[jid].copy()
+                _dump_intermediates["df_at_projection"][jid] = df[jid].copy()
+                _dump_intermediates["d2f_at_projection"][jid] = d2f[jid].copy()
+            jid_finds = self._as_index_list(self.robot.get_joint_index_f(jid))
+            contribution = (d2f[jid] @ S).transpose(2, 0, 1)
+            d2tau_dq[jid_finds, :, :] = contribution
+            if _dump_intermediates is not None:
+                _dump_intermediates["d2tau_dq_per_body"][jid] = (jid_finds, contribution.copy())
+            pid = self.robot.get_parent_id(jid)
+            if pid == -1:
                 continue
+            Xt = X[jid].T
+            dXt = np.transpose(dX[jid], (0, 2, 1))
+            d2Xt = np.transpose(d2X[jid], (0, 1, 3, 2))
+            f[pid] += Xt @ f[jid]
+            df[pid] += dXt @ f[jid] + df[jid] @ Xt.T
+            cross_f = (dXt @ df[jid].T).transpose(0, 2, 1)                                    # (n, n, 6)
+            d2f[pid] += d2Xt @ f[jid] + cross_f + cross_f.transpose(1, 0, 2) + d2f[jid] @ Xt.T
 
-            f_parent_update = X[jid].T @ f[:, jid]
-            f_first_parent_update = np.zeros((6, n), dtype=np.float64)
-            f_first_second_parent_update = np.zeros((6, n, n), dtype=np.float64)
-            for first_dir in range(n):
-                f_first_parent_update[:, first_dir] = (
-                    X_first[first_dir, jid].T @ f[:, jid]
-                    + X[jid].T @ f_first[:, first_dir, jid]
-                )
-                for second_dir in range(n):
-                    f_first_second_parent_update[:, first_dir, second_dir] = (
-                        X_first_second[first_dir, second_dir, jid].T @ f[:, jid]
-                        + X_first[first_dir, jid].T @ f_first[:, second_dir, jid]
-                        + X_first[second_dir, jid].T @ f_first[:, first_dir, jid]
-                        + X[jid].T @ f_first_second[:, first_dir, second_dir, jid]
-                    )
-
-            f[:, parent_id] += f_parent_update
-            f_first[:, :, parent_id] += f_first_parent_update
-            f_first_second[:, :, :, parent_id] += f_first_second_parent_update
-
+        if _dump_intermediates is not None:
+            _dump_intermediates["d2tau_dq"] = d2tau_dq.copy()
         return d2tau_dq
 
     def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):
         """Compute second-order derivatives of inverse dynamics via parallel IDSVA.
-
-        Fixed-base robots use the unified IDSVA-SO sweep directly. Floating-base
-        robots additionally apply the Lie-algebra gravity Hessian correction
-        from `_floating_gravity_d2tau_dq_lie_direct` to `d2tau_dq` (and set
-        gravity to zero inside the main sweep so it doesn't double-count) —
-        this is the validated "spatial_lie" formulation; the previous mode
-        dispatch (spatial / analytic / finite_diff / compare / ...) was
-        diagnostic scaffolding for the gravity-correction investigation and
-        has been removed.
 
         Parameters
         ----------
@@ -2547,9 +2507,8 @@ class RBDReference:
         (d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq) : tuple
             Second-order derivatives of torques and inertia matrix.
         """
-        # For floating-base the gravity Hessian is added analytically after the
-        # main sweep (via `_floating_gravity_d2tau_dq_lie_direct`), so the
-        # internal sweep must run with zero gravity to avoid double-counting.
+        # Floating-base gravity Hessian is added analytically after the main
+        # sweep; the sweep itself runs with zero gravity to avoid double-counting.
         idsva_gravity = 0.0 if self.robot.floating_base else GRAVITY
         NB = self.robot.get_num_bodies()
         n = self.robot.get_num_vel()
@@ -2569,24 +2528,12 @@ class RBDReference:
         gravity_vec = np.zeros(6)
         gravity_vec[5] = -idsva_gravity # a_base is gravity vec
 
-        def inds_to_list(inds):
-            if isinstance(inds, list):
-                return inds
-            if isinstance(inds, tuple):
-                return list(inds)
-            if isinstance(inds, np.ndarray):
-                return list(inds.flatten())
-            return [inds]
-
-        body_v_inds = [inds_to_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
+        body_v_inds = [self._as_index_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
 
         def subtree_vel_inds(subtree):
-            st_inds = []
-            for body_id in subtree:
-                st_inds += body_v_inds[body_id]
-            return st_inds
+            return [vi for body_id in subtree for vi in body_v_inds[body_id]]
 
-        # forward pass 
+        # forward pass
         modelNB = NB
         modelNV = n
         for i in range(modelNB):
@@ -2717,19 +2664,7 @@ class RBDReference:
                         p1 = self.cross_operator(psid_c) @ S_d
                         p2 = self.cross_operator(psidd_c) @ S_d
                         
-                        # Updating the tensors based on the computed vectors and cross products
-                        # Fixed-base/scalar-joint version:
-                        # d2tau_dq[st_j, dd, cc] = -np.dot(t3, D3[:, st_j]) - np.dot(p1, T2[:, st_j]) + np.dot(p2, T1[:, st_j])
-                        #
-                        # This broadcast works when each body contributes exactly one
-                        # velocity coordinate, so the subtree body list and subtree
-                        # velocity-index list are effectively the same object. Once the
-                        # floating root contributes a 6-column block, that implicit
-                        # one-body/one-index assumption no longer holds, so use the
-                        # expanded subtree velocity indices instead.
-                        primary_d2tau_dq_vec = -np.dot(t3, D3[:, st_j_inds]) - np.dot(p1, T2[:, st_j_inds]) + np.dot(p2, T1[:, st_j_inds])
-                        for st_ind, st_j_ind in enumerate(st_j_inds):
-                            d2tau_dq[st_j_ind, dd, cc] = primary_d2tau_dq_vec[st_ind]
+                        d2tau_dq[st_j_inds, dd, cc] = -np.dot(t3, D3[:, st_j_inds]) - np.dot(p1, T2[:, st_j_inds]) + np.dot(p2, T1[:, st_j_inds])
                         d2tau_dvdq[st_j_inds, dd, cc] = -np.dot(t1, D3[:, st_j_inds])
 
                         # st_j is list of all ancestors of j
@@ -2740,35 +2675,17 @@ class RBDReference:
                             p4 = self.cross_operator(Sd_c + psid_c) @ S_d - 2 * self.cross_operator(psid_d) @ S_c
                             p5 = self.cross_operator(S_d) @ S_c
                             
-                            # Fixed-base/scalar-joint version:
-                            # d2tau_dq[st_j, cc, dd] = d2tau_dq[st_j, dd, cc]
-                            #
-                            # The symmetry itself still holds, but the index set has to
-                            # live in velocity-coordinate space rather than body-id
-                            # space once a joint can contribute multiple local columns.
-                            for st_j_ind in st_j_inds:
-                                d2tau_dq[st_j_ind, cc, dd] = d2tau_dq[st_j_ind, dd, cc]
+                            d2tau_dq[st_j_inds, cc, dd] = d2tau_dq[st_j_inds, dd, cc]
 
-                            
                             d2tau_dqd[st_j_inds, cc, dd] = -np.dot(t2.T, D3[:, st_j_inds])
                             d2tau_dqd[st_j_inds, dd, cc] = d2tau_dqd[st_j_inds, cc, dd]
                             
                             
                             d2tau_dvdq[st_j_inds, cc, dd] = -np.dot(t6, D3[:, st_j_inds]) - np.dot(p3, T2[:, st_j_inds]) + np.dot(p4, T1[:, st_j_inds])
-                        
-                            # Fixed-base/scalar-joint version:
-                            # d2tau_dq[cc, st_j, dd] = np.dot(t6, D2[:, st_j]) + np.dot(t7, D1[:, st_j]) - np.dot(p5, T3[:, st_j])
-                            #
-                            # This was the old fixed-base subtree broadcast. It works
-                            # when every successor body contributes one scalar
-                            # coordinate. In floating-base mode the root contributes a
-                            # multi-column block, so the same algebra has to be written
-                            # against the expanded subtree velocity-index list.
-                            transpose_d2tau_dq_vec = np.dot(t6, D2[:, st_j_inds]) + np.dot(t7, D1[:, st_j_inds]) - np.dot(p5, T3[:, st_j_inds])
-                            for st_ind, st_j_ind in enumerate(st_j_inds):
-                                d2tau_dq[cc, st_j_ind, dd] = transpose_d2tau_dq_vec[st_ind]
-                            
-                            d2tau_dvdq[cc, st_j_inds, dd] = np.dot(t6, D3[:, st_j_inds]) - np.dot(p5, T4[:, st_j_inds])             
+
+                            d2tau_dq[cc, st_j_inds, dd] = np.dot(t6, D2[:, st_j_inds]) + np.dot(t7, D1[:, st_j_inds]) - np.dot(p5, T3[:, st_j_inds])
+
+                            d2tau_dvdq[cc, st_j_inds, dd] = np.dot(t6, D3[:, st_j_inds]) - np.dot(p5, T4[:, st_j_inds])
 
 
                             # S_d @ IC[j] is just T1
@@ -2789,45 +2706,18 @@ class RBDReference:
                                 
                                 
                                 d2tau_dvdq[cc, dd, succ_j_inds] = np.dot(t8, D2[:, succ_j_inds]) + np.dot(t9, D1[:, succ_j_inds])
-                                
-                                
-                                
-                                # Fixed-base/scalar-joint version:
-                                # d2tau_dq[cc, dd, succ_j] = d2tau_dq[cc, succ_j, dd]
-                                #
-                                # The old reuse-by-body shortcut assumes each successor
-                                # contributes one coordinate. Keep the same symmetry, but
-                                # spell it in successor velocity-index space.
-                                for succ_j_ind in succ_j_inds:
-                                    d2tau_dq[cc, dd, succ_j_ind] = d2tau_dq[cc, succ_j_ind, dd]
-                                
+
+                                d2tau_dq[cc, dd, succ_j_inds] = d2tau_dq[cc, succ_j_inds, dd]
+
                         if succ_j_inds:
-                            # Fixed-base/scalar-joint version:
-                            # d2tau_dq[dd, cc, succ_j] = np.dot(t1, D2[:, succ_j]) + np.dot(t4, D1[:, succ_j])
-                            #
-                            # Again, the vector expression is the same, but the direct
-                            # successor-body broadcast only stays valid when successor
-                            # joints are all 1-DoF. Use the expanded successor
-                            # velocity-index list for floating-base compatibility.
-                            successor_d2tau_dq_vec = np.dot(t1, D2[:, succ_j_inds]) + np.dot(t4, D1[:, succ_j_inds])
-                            for succ_ind, succ_j_ind in enumerate(succ_j_inds):
-                                d2tau_dq[dd, cc, succ_j_ind] = successor_d2tau_dq_vec[succ_ind]
-                            
+                            d2tau_dq[dd, cc, succ_j_inds] = np.dot(t1, D2[:, succ_j_inds]) + np.dot(t4, D1[:, succ_j_inds])
 
                             d2tau_dqd[dd, cc, succ_j_inds] = np.dot(t2, D3[:, succ_j_inds])
                             d2tau_dqd[dd, succ_j_inds, cc] = d2tau_dqd[dd, cc, succ_j_inds]
 
-
                             d2tau_dvdq[dd, succ_j_inds, cc] = np.dot(t1, D3[:, succ_j_inds])
 
-                            # Fixed-base/scalar-joint version:
-                            # d2tau_dq[dd, succ_j, cc] = d2tau_dq[dd, cc, succ_j]
-                            #
-                            # Preserve the old symmetry relation, but apply it in the
-                            # expanded successor velocity-index space.
-                            for succ_j_ind in succ_j_inds:
-                                d2tau_dq[dd, succ_j_ind, cc] = d2tau_dq[dd, cc, succ_j_ind]
-
+                            d2tau_dq[dd, succ_j_inds, cc] = d2tau_dq[dd, cc, succ_j_inds]
 
                             d2tau_dvdq[dd, cc, succ_j_inds] = np.dot(t2, D2[:, succ_j_inds]) + np.dot(t5, D1[:, succ_j_inds])
                             
@@ -2835,19 +2725,268 @@ class RBDReference:
                             dM_dq[cc, dd, succ_j_inds] = np.dot(t8, D1[:, succ_j_inds])
                             dM_dq[dd, cc, succ_j_inds] = dM_dq[cc, dd, succ_j_inds]
                         
-                        if k == j: 
+                        if k == j:
                             d2tau_dqd[st_j_inds, dd, cc] = -np.dot(t2, D1[:, st_j_inds])
 
         if self.robot.floating_base:
-            # Floating-base gravity Hessian: add the Lie-algebra gravity
-            # correction term that was deliberately omitted from the main
-            # sweep (idsva_gravity=0 above). The other three tensors
-            # (d2tau_dqd, d2tau_dvdq, dM_dq) are already correct from the
-            # block-aware sweep above and need no further floating-base
-            # adjustment.
             d2tau_dq = d2tau_dq + self._floating_gravity_d2tau_dq_lie_direct(q, GRAVITY)
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
-    
+
+    def idsva_so_spatial_v2(self, q, qd, qdd, GRAVITY=-9.81, _dump_intermediates=None):
+        """Single-pass IDSVA-SO reference matching spatial_v2_extended's `ID_SO_derivatives.m`.
+
+        Implements Singh/Russell/Wensing 2023 (arXiv:2302.06001) Algorithm 1 with
+        the full triple-nested ancestor walk (i over bodies, j over ancestors of
+        i, k over ancestors of j) spelled out per-DoF. World-frame quantities
+        throughout (`S = Xdown0 @ S_local`, `IC = Xup0^T @ I @ Xup0`).
+
+        The root-acceleration initialisation `a[root] = -a_grav` plus the
+        explicit per-DoF accumulation captures the gravity contribution to the
+        Hessian natively — no separate gravity helper required.
+
+        Output convention (matches `idsva_so`):
+            (d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq), shape (n, n, n) each, with
+            d2tau_dvdq indexed [τ, qd, q].
+
+        Equivalence with `idsva_so`:
+            * Fixed-base: matches to machine precision (tested on iiwa14).
+            * Floating-base: matches to ~1e-13 on all four output tensors at
+              non-identity quaternion. The body-frame Lie-tangent convention
+              is achieved by inverting `X_local[0]` for the floating-base root
+              in the prepass (see comment at the `if parent == -1:` branch
+              below). Validated against the project's Lie FD oracle in
+              `test_floating_idsva_so_matches_lie_finite_difference`.
+
+        Bloated by design (~5× the inner work of `idsva_so`'s subtree-broadcast
+        form). Not on any hot path; not GPU-friendly.
+        """
+        q = self._normalize_q_input(q)
+        q = np.asarray(q, dtype=np.float64).copy()
+        if self.robot.floating_base and self.robot.using_quaternion:
+            q[3:7] = self._normalize_xyzw_quaternion(q[3:7])
+
+        NB = self.robot.get_num_bodies()
+        n = self.robot.get_num_vel()
+        # MATLAB convention: a_grav is the *gravitational* acceleration (negative if
+        # gravity points down); the "base acceleration" of the inertial frame is -a_grav.
+        a_grav = np.zeros(6)
+        a_grav[5] = GRAVITY
+
+        Xup0 = [None] * NB
+        Xdown0 = [None] * NB
+        S = [None] * NB
+        Sd = [None] * NB
+        psid = [None] * NB
+        psidd = [None] * NB
+        IC = [None] * NB
+        BC = [None] * NB
+        v = np.zeros((6, NB))
+        a = np.zeros((6, NB))
+        f = np.zeros((6, NB))
+
+        body_v_inds = [self._as_index_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
+
+        # Forward sweep: kinematic & dynamic per-body quantities in world frame.
+        for i in range(NB):
+            parent = self.robot.get_parent_id(i)
+            Xmat = np.asarray(self.robot.get_Xmat_Func_by_id(i)(q[self.robot.get_joint_index_q(i)])).reshape(6, 6)
+            if parent == -1:
+                # Floating-base root: the codebase's get_Xmat_Func_by_id(0) returns the
+                # body-to-world spatial transform, but the algorithm expects Xup (world-to-body)
+                # at this slot. Invert so the body-frame gravity at the root matches the
+                # shim/Lie-tangent oracle: aB_root = inv(X_local[0]) @ g_world.
+                Xup0[i] = np.linalg.inv(Xmat) if self.robot.floating_base else Xmat
+                a[:, i] = -a_grav
+            else:
+                Xup0[i] = Xmat @ Xup0[parent]
+                v[:, i] = v[:, parent]
+                a[:, i] = a[:, parent]
+            Xdown0[i] = np.linalg.inv(Xup0[i])
+
+            S_local = np.asarray(self.robot.get_S_by_id(i), dtype=np.float64)
+            if S_local.ndim == 1:
+                S_local = S_local.reshape(6, 1)
+            S[i] = Xdown0[i] @ S_local
+
+            _qd = np.atleast_1d(qd[body_v_inds[i]])
+            _qdd = np.atleast_1d(qdd[body_v_inds[i]])
+            vJ = (S[i] @ _qd).reshape(6)
+            aJ = self.cross_operator(v[:, i]) @ vJ + (S[i] @ _qdd).reshape(6)
+            psid[i] = self.cross_operator(v[:, i]) @ S[i]
+            psidd[i] = self.cross_operator(a[:, i]) @ S[i] + self.cross_operator(v[:, i]) @ psid[i]
+            v[:, i] = v[:, i] + vJ
+            a[:, i] = a[:, i] + aJ
+
+            I_body = np.asarray(self.robot.get_Imat_by_id(i))
+            IC[i] = Xup0[i].T @ I_body @ Xup0[i]
+            Sd[i] = self.cross_operator(v[:, i]) @ S[i]
+            BC[i] = (self.dual_cross_operator(v[:, i]) @ IC[i]
+                     + self.icrf(IC[i] @ v[:, i])
+                     - IC[i] @ self.cross_operator(v[:, i]))
+            f[:, i] = IC[i] @ a[:, i] + self.dual_cross_operator(v[:, i]) @ IC[i] @ v[:, i]
+
+        if _dump_intermediates is not None:
+            _dump_intermediates["Xup0"] = [arr.copy() for arr in Xup0]
+            _dump_intermediates["Xdown0"] = [arr.copy() for arr in Xdown0]
+            _dump_intermediates["S"] = [arr.copy() for arr in S]
+            _dump_intermediates["Sd"] = [arr.copy() for arr in Sd]
+            _dump_intermediates["psid"] = [arr.copy() for arr in psid]
+            _dump_intermediates["psidd"] = [arr.copy() for arr in psidd]
+            _dump_intermediates["IC"] = [arr.copy() for arr in IC]
+            _dump_intermediates["BC"] = [arr.copy() for arr in BC]
+            _dump_intermediates["v"] = v.copy()
+            _dump_intermediates["a"] = a.copy()
+            _dump_intermediates["f_initial"] = f.copy()
+
+        d2tau_dq = np.zeros((n, n, n))
+        d2tau_dqd = np.zeros((n, n, n))
+        d2tau_dvdq = np.zeros((n, n, n))
+        dM_dq = np.zeros((n, n, n))
+
+        # Triple ancestor walk: i = body, j = ancestor-or-self of i, k = ancestor-or-self of j.
+        # IC/BC/f are aggregated up to the parent at the end of each i-iteration so that
+        # when we process body i, IC[i] already contains its full subtree contribution.
+        for i in range(NB - 1, -1, -1):
+            for p in range(S[i].shape[1]):
+                S_p, Sd_p = S[i][:, p], Sd[i][:, p]
+                psid_p, psidd_p = psid[i][:, p], psidd[i][:, p]
+                i_v = body_v_inds[i][p]
+
+                # Per-body-i intermediate 6x6 matrices (A0..A7) used to form
+                # the per-(i,j) vectors u1..u12 inside the j-loop.
+                Bic_phi = (self.dual_cross_operator(S_p) @ IC[i]
+                           + self.icrf(IC[i] @ S_p)
+                           - IC[i] @ self.cross_operator(S_p))
+                Bic_psid = (self.dual_cross_operator(psid_p) @ IC[i]
+                            + self.icrf(IC[i] @ psid_p)
+                            - IC[i] @ self.cross_operator(psid_p))
+                A0 = self.icrf(IC[i] @ S_p)
+                A1 = self.dot_matrix(IC[i], S_p)
+                A2 = 2.0 * A0 - Bic_phi
+                A3 = Bic_psid + self.dot_matrix(BC[i], S_p)
+                A4 = self.icrf(BC[i].T @ S_p)
+                A5 = self.icrf(BC[i] @ psid_p + IC[i] @ psidd_p
+                               + self.dual_cross_operator(S_p) @ f[:, i])
+                A6 = self.dual_cross_operator(S_p) @ IC[i] + A0
+                A7 = self.icrf(BC[i] @ S_p + IC[i] @ (psid_p + Sd_p))
+
+                if _dump_intermediates is not None:
+                    _dump_intermediates.setdefault("per_p", {})[(i, p)] = {
+                        "Bic_phi": Bic_phi.copy(),
+                        "Bic_psid": Bic_psid.copy(),
+                        "A0": A0.copy(),
+                        "A1": A1.copy(),
+                        "A2": A2.copy(),
+                        "A3": A3.copy(),
+                        "A4": A4.copy(),
+                        "A5": A5.copy(),
+                        "A6": A6.copy(),
+                        "A7": A7.copy(),
+                    }
+
+                j = i
+                while j >= 0:
+                    for t in range(S[j].shape[1]):
+                        S_t, Sd_t = S[j][:, t], Sd[j][:, t]
+                        psid_t, psidd_t = psid[j][:, t], psidd[j][:, t]
+                        j_v = body_v_inds[j][t]
+
+                        # Per-(i,j) vectors. Each is a 6-vector contracted against
+                        # k's spatial quantities to give scalar tensor entries.
+                        u1  = A3.T @ S_t
+                        u2  = A1.T @ S_t
+                        u3  = A3 @ psid_t + A1 @ psidd_t + A5 @ S_t
+                        u4  = A6 @ S_t
+                        u5  = A2 @ psid_t + A4 @ S_t
+                        u6  = Bic_phi @ psid_t + A7 @ S_t
+                        u7  = A3 @ S_t + A1 @ (psid_t + Sd_t)
+                        u8  = A4 @ S_t - Bic_phi.T @ psid_t
+                        u9  = A0 @ S_t
+                        u10 = Bic_phi @ S_t
+                        u11 = Bic_phi.T @ S_t
+                        u12 = A1 @ S_t
+
+                        if _dump_intermediates is not None:
+                            _dump_intermediates.setdefault("per_pt", {})[(i, p, j, t)] = {
+                                "u1": u1.copy(),
+                                "u2": u2.copy(),
+                                "u3": u3.copy(),
+                                "u4": u4.copy(),
+                                "u5": u5.copy(),
+                                "u6": u6.copy(),
+                                "u7": u7.copy(),
+                                "u8": u8.copy(),
+                                "u9": u9.copy(),
+                                "u10": u10.copy(),
+                                "u11": u11.copy(),
+                                "u12": u12.copy(),
+                            }
+
+                        k = j
+                        while k >= 0:
+                            for r in range(S[k].shape[1]):
+                                S_r, Sd_r = S[k][:, r], Sd[k][:, r]
+                                psid_r, psidd_r = psid[k][:, r], psidd[k][:, r]
+                                k_v = body_v_inds[k][r]
+
+                                p1 = u11 @ psid_r
+                                p2 = u8 @ psid_r + u9 @ psidd_r
+
+                                d2tau_dq[i_v, j_v, k_v] = p2
+                                d2tau_dvdq[i_v, k_v, j_v] = -p1
+
+                                if j != i:
+                                    d2tau_dq[j_v, k_v, i_v] = u1 @ psid_r + u2 @ psidd_r
+                                    d2tau_dq[j_v, i_v, k_v] = d2tau_dq[j_v, k_v, i_v]
+                                    d2tau_dvdq[j_v, k_v, i_v] = p1
+                                    d2tau_dvdq[j_v, i_v, k_v] = u1 @ S_r + u2 @ (psid_r + Sd_r)
+                                    d2tau_dqd[j_v, k_v, i_v] = u11 @ S_r
+                                    d2tau_dqd[j_v, i_v, k_v] = d2tau_dqd[j_v, k_v, i_v]
+                                    dM_dq[k_v, j_v, i_v] = S_r @ u12
+                                    dM_dq[j_v, k_v, i_v] = dM_dq[k_v, j_v, i_v]
+
+                                if k != j:
+                                    d2tau_dq[i_v, k_v, j_v] = p2
+                                    d2tau_dq[k_v, i_v, j_v] = S_r @ u3
+                                    d2tau_dqd[i_v, j_v, k_v] = -u11 @ S_r
+                                    d2tau_dqd[i_v, k_v, j_v] = -u11 @ S_r
+                                    d2tau_dvdq[i_v, j_v, k_v] = S_r @ u5 + u9 @ (psid_r + Sd_r)
+                                    d2tau_dvdq[k_v, j_v, i_v] = S_r @ u6
+                                    dM_dq[k_v, i_v, j_v] = S_r @ u9
+                                    dM_dq[i_v, k_v, j_v] = dM_dq[k_v, i_v, j_v]
+
+                                    if j != i:
+                                        d2tau_dq[k_v, j_v, i_v] = d2tau_dq[k_v, i_v, j_v]
+                                        d2tau_dqd[k_v, i_v, j_v] = S_r @ u10
+                                        d2tau_dqd[k_v, j_v, i_v] = d2tau_dqd[k_v, i_v, j_v]
+                                        d2tau_dvdq[k_v, i_v, j_v] = S_r @ u7
+                                    else:
+                                        d2tau_dqd[k_v, j_v, i_v] = S_r @ u4
+                                else:
+                                    d2tau_dqd[i_v, j_v, k_v] = -u2 @ S_r
+                            k = self.robot.get_parent_id(k)
+                    j = self.robot.get_parent_id(j)
+
+            # Bubble this body's subtree-aggregated IC/BC/f up to its parent.
+            parent = self.robot.get_parent_id(i)
+            if parent >= 0:
+                IC[parent] = IC[parent] + IC[i]
+                BC[parent] = BC[parent] + BC[i]
+                f[:, parent] = f[:, parent] + f[:, i]
+
+        # MATLAB's `d2tau_cross` stores [τ, q, qd]; our convention is [τ, qd, q].
+        # Swap the trailing axes so the output matches `idsva_so`.
+        d2tau_dvdq = d2tau_dvdq.transpose(0, 2, 1)
+        if _dump_intermediates is not None:
+            _dump_intermediates["IC_aggregated"] = [arr.copy() for arr in IC]
+            _dump_intermediates["BC_aggregated"] = [arr.copy() for arr in BC]
+            _dump_intermediates["f_aggregated"] = f.copy()
+            _dump_intermediates["d2tau_dq"] = d2tau_dq.copy()
+            _dump_intermediates["d2tau_dqd"] = d2tau_dqd.copy()
+            _dump_intermediates["d2tau_dvdq"] = d2tau_dvdq.copy()
+            _dump_intermediates["dM_dq"] = dM_dq.copy()
+        return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
+
     def fdsva_so(self, q, qd, u, GRAVITY = -9.81):
         """Compute second-order derivatives of forward dynamics.
 
