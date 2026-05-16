@@ -2368,7 +2368,7 @@ class RBDReference:
             )
         return self._spatial_xmat_second_derivative_func_cache[key]
 
-    def _floating_gravity_d2tau_dq_lie_direct(self, q, GRAVITY=-9.81, _dump_intermediates=None):
+    def _floating_gravity_d2tau_dq_lie_direct(self, q, GRAVITY=-9.81):
         """Lie-tangent gravity Hessian d²τ_grav/dq² for floating-base robots.
 
         Body-major layout (axis 0 = body id) keeps per-body slices contiguous so
@@ -2376,9 +2376,6 @@ class RBDReference:
         propagated `a[i] = X[i] @ a[parent]` down the tree (rooted at
         `inv(X[0]) @ g`), carrying first- and second-order q-derivatives, then
         `f = I @ a` is back-propagated and projected onto each joint's S.
-
-        If `_dump_intermediates` is a dict, populates it with per-body intermediate
-        arrays for diagnostic comparison with alternate ports (debug-only hook).
         """
         if not self.robot.floating_base:
             raise ValueError("_floating_gravity_d2tau_dq_lie_direct requires a floating-base robot.")
@@ -2445,36 +2442,13 @@ class RBDReference:
         df = da @ Imats_T                                                      # (NB, n, 6)
         d2f = (d2a.reshape(NB, n * n, 6) @ Imats_T).reshape(NB, n, n, 6)        # (NB, n, n, 6)
 
-        if _dump_intermediates is not None:
-            _dump_intermediates["X"] = X.copy()
-            _dump_intermediates["dX"] = dX.copy()
-            _dump_intermediates["d2X"] = d2X.copy()
-            _dump_intermediates["a"] = a.copy()
-            _dump_intermediates["da"] = da.copy()
-            _dump_intermediates["d2a"] = d2a.copy()
-            _dump_intermediates["f_initial"] = f.copy()
-            _dump_intermediates["df_initial"] = df.copy()
-            _dump_intermediates["d2f_initial"] = d2f.copy()
-            _dump_intermediates["f_at_projection"] = {}
-            _dump_intermediates["df_at_projection"] = {}
-            _dump_intermediates["d2f_at_projection"] = {}
-            _dump_intermediates["d2tau_dq_per_body"] = {}
-
         # Backward sweep: project onto S, then accumulate parent f-derivatives.
         d2tau_dq = np.zeros((n, n, n))
         for jid in range(NB - 1, -1, -1):
             S = np.asarray(self.robot.get_S_by_id(jid))
             if S.ndim == 1:
                 S = S.reshape(6, 1)
-            if _dump_intermediates is not None:
-                _dump_intermediates["f_at_projection"][jid] = f[jid].copy()
-                _dump_intermediates["df_at_projection"][jid] = df[jid].copy()
-                _dump_intermediates["d2f_at_projection"][jid] = d2f[jid].copy()
-            jid_finds = self._as_index_list(self.robot.get_joint_index_f(jid))
-            contribution = (d2f[jid] @ S).transpose(2, 0, 1)
-            d2tau_dq[jid_finds, :, :] = contribution
-            if _dump_intermediates is not None:
-                _dump_intermediates["d2tau_dq_per_body"][jid] = (jid_finds, contribution.copy())
+            d2tau_dq[self._as_index_list(self.robot.get_joint_index_f(jid)), :, :] = (d2f[jid] @ S).transpose(2, 0, 1)
             pid = self.robot.get_parent_id(jid)
             if pid == -1:
                 continue
@@ -2486,8 +2460,6 @@ class RBDReference:
             cross_f = (dXt @ df[jid].T).transpose(0, 2, 1)                                    # (n, n, 6)
             d2f[pid] += d2Xt @ f[jid] + cross_f + cross_f.transpose(1, 0, 2) + d2f[jid] @ Xt.T
 
-        if _dump_intermediates is not None:
-            _dump_intermediates["d2tau_dq"] = d2tau_dq.copy()
         return d2tau_dq
 
     def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):
@@ -2571,7 +2543,7 @@ class RBDReference:
             IC[i] = np.array(Xup0[i]).T @ (I @ Xup0[i])
             Sd[i] = self.cross_operator(v[:,i]) @ S[i]
             BC[i] = (self.dual_cross_operator(v[:,i])@IC[i] + self.icrf( IC[i] @ v[:,i]) - IC[i] @ self.cross_operator(v[:,i]))
-            f[:,i] = IC[i] @ a[:,i] + self.dual_cross_operator(v[:,i]) @ IC[i] @v[:,i] 
+            f[:,i] = IC[i] @ a[:,i] + self.dual_cross_operator(v[:,i]) @ IC[i] @v[:,i]
 
         #backward pass: Can be parallelized across all j,d
         for i in range(modelNB-1,-1,-1):
@@ -2580,7 +2552,8 @@ class RBDReference:
                     IC[pi] = IC[pi] + IC[i]
                     BC[pi] = BC[pi] + BC[i]
                     f[:, pi] = f[:, pi] + f[:, i]
-        
+
+
         T1 = np.zeros((6,n))
         T2 = np.zeros((6,n))
         T3 = np.zeros((6,n))
@@ -2622,7 +2595,7 @@ class RBDReference:
                 D1[:, dd] = A1.flatten()
                 D2[:, dd] = A2.flatten(order='F')
                 D3[:, dd] = Bic_phii.flatten(order='F')
-                D4[:, dd] = A3.flatten(order='F')          
+                D4[:, dd] = A3.flatten(order='F')
 
         dM_dq = np.zeros((modelNV,modelNV,modelNV))
         d2tau_dq = np.zeros((modelNV,modelNV,modelNV))
@@ -2730,9 +2703,10 @@ class RBDReference:
 
         if self.robot.floating_base:
             d2tau_dq = d2tau_dq + self._floating_gravity_d2tau_dq_lie_direct(q, GRAVITY)
+
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
 
-    def idsva_so_spatial_v2(self, q, qd, qdd, GRAVITY=-9.81, _dump_intermediates=None):
+    def idsva_so_spatial_v2(self, q, qd, qdd, GRAVITY=-9.81):
         """Single-pass IDSVA-SO reference matching spatial_v2_extended's `ID_SO_derivatives.m`.
 
         Implements Singh/Russell/Wensing 2023 (arXiv:2302.06001) Algorithm 1 with
@@ -2825,19 +2799,6 @@ class RBDReference:
                      - IC[i] @ self.cross_operator(v[:, i]))
             f[:, i] = IC[i] @ a[:, i] + self.dual_cross_operator(v[:, i]) @ IC[i] @ v[:, i]
 
-        if _dump_intermediates is not None:
-            _dump_intermediates["Xup0"] = [arr.copy() for arr in Xup0]
-            _dump_intermediates["Xdown0"] = [arr.copy() for arr in Xdown0]
-            _dump_intermediates["S"] = [arr.copy() for arr in S]
-            _dump_intermediates["Sd"] = [arr.copy() for arr in Sd]
-            _dump_intermediates["psid"] = [arr.copy() for arr in psid]
-            _dump_intermediates["psidd"] = [arr.copy() for arr in psidd]
-            _dump_intermediates["IC"] = [arr.copy() for arr in IC]
-            _dump_intermediates["BC"] = [arr.copy() for arr in BC]
-            _dump_intermediates["v"] = v.copy()
-            _dump_intermediates["a"] = a.copy()
-            _dump_intermediates["f_initial"] = f.copy()
-
         d2tau_dq = np.zeros((n, n, n))
         d2tau_dqd = np.zeros((n, n, n))
         d2tau_dvdq = np.zeros((n, n, n))
@@ -2870,20 +2831,6 @@ class RBDReference:
                 A6 = self.dual_cross_operator(S_p) @ IC[i] + A0
                 A7 = self.icrf(BC[i] @ S_p + IC[i] @ (psid_p + Sd_p))
 
-                if _dump_intermediates is not None:
-                    _dump_intermediates.setdefault("per_p", {})[(i, p)] = {
-                        "Bic_phi": Bic_phi.copy(),
-                        "Bic_psid": Bic_psid.copy(),
-                        "A0": A0.copy(),
-                        "A1": A1.copy(),
-                        "A2": A2.copy(),
-                        "A3": A3.copy(),
-                        "A4": A4.copy(),
-                        "A5": A5.copy(),
-                        "A6": A6.copy(),
-                        "A7": A7.copy(),
-                    }
-
                 j = i
                 while j >= 0:
                     for t in range(S[j].shape[1]):
@@ -2905,22 +2852,6 @@ class RBDReference:
                         u10 = Bic_phi @ S_t
                         u11 = Bic_phi.T @ S_t
                         u12 = A1 @ S_t
-
-                        if _dump_intermediates is not None:
-                            _dump_intermediates.setdefault("per_pt", {})[(i, p, j, t)] = {
-                                "u1": u1.copy(),
-                                "u2": u2.copy(),
-                                "u3": u3.copy(),
-                                "u4": u4.copy(),
-                                "u5": u5.copy(),
-                                "u6": u6.copy(),
-                                "u7": u7.copy(),
-                                "u8": u8.copy(),
-                                "u9": u9.copy(),
-                                "u10": u10.copy(),
-                                "u11": u11.copy(),
-                                "u12": u12.copy(),
-                            }
 
                         k = j
                         while k >= 0:
@@ -2977,14 +2908,6 @@ class RBDReference:
         # MATLAB's `d2tau_cross` stores [τ, q, qd]; our convention is [τ, qd, q].
         # Swap the trailing axes so the output matches `idsva_so`.
         d2tau_dvdq = d2tau_dvdq.transpose(0, 2, 1)
-        if _dump_intermediates is not None:
-            _dump_intermediates["IC_aggregated"] = [arr.copy() for arr in IC]
-            _dump_intermediates["BC_aggregated"] = [arr.copy() for arr in BC]
-            _dump_intermediates["f_aggregated"] = f.copy()
-            _dump_intermediates["d2tau_dq"] = d2tau_dq.copy()
-            _dump_intermediates["d2tau_dqd"] = d2tau_dqd.copy()
-            _dump_intermediates["d2tau_dvdq"] = d2tau_dvdq.copy()
-            _dump_intermediates["dM_dq"] = dM_dq.copy()
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
 
     def fdsva_so(self, q, qd, u, GRAVITY = -9.81):
