@@ -2934,41 +2934,6 @@ class RBDReference:
 
         daba_dqdq = -np.einsum('il,ljk->ijk', Minv, di2_dq + np.einsum('ilk,lj->ijk', dm_dq, fd_dq) + np.einsum('ilk,lj->ikj', dm_dq, fd_dq))
         daba_dvdq = -np.einsum('il,ljk->ijk', Minv, di2_dvdq + np.einsum('ilk,lj->ijk', dm_dq, fd_dqd))
-        # daba_dqdv = -np.einsum('il,ljk->ijk', Minv, di2_dqd + np.einsum('ilk,lj->ikj', dm_dq, fd_dqd)) # Rotate second term
         daba_dvdv = -np.einsum('il,ljk->ijk', Minv, di2_dqd)
         daba_dtdq = -np.einsum('il,ljk->ijk', Minv, np.einsum('ilk,lj->ijk', dm_dq, Minv))
-
-        if self.robot.floating_base:
-            # The floating-base reduced-q convention is already verified in the
-            # first-order forward_dynamics_grad path. Keep the old analytic
-            # composition for the velocity-side and torque-side second-order
-            # tensors, but patch daba_dqdq from the first-order dq gradient so
-            # the floating completion mirrors the targeted d2tau_dq patch used
-            # in idsva_so above.
-            q = np.asarray(q, dtype=np.float64).copy()
-            if self.robot.using_quaternion:
-                quat = q[3:7]
-                quat_norm = np.linalg.norm(quat)
-                if quat_norm == 0.0:
-                    raise ValueError("Floating-base quaternion norm was zero during second-order forward-dynamics normalization.")
-                q[3:7] = quat / quat_norm
-            qd = np.asarray(qd, dtype=np.float64)
-            u = np.asarray(u, dtype=np.float64)
-            step = 1e-6
-            for dind in range(self.robot.get_num_vel()):
-                q_pos = q.copy()
-                q_neg = q.copy()
-                if dind < 6:
-                    q_pos[dind] += step
-                    q_neg[dind] -= step
-                else:
-                    q_pos[dind + 1] += step
-                    q_neg[dind + 1] -= step
-                if self.robot.using_quaternion:
-                    q_pos[3:7] = q_pos[3:7] / np.linalg.norm(q_pos[3:7])
-                    q_neg[3:7] = q_neg[3:7] / np.linalg.norm(q_neg[3:7])
-                fd_dq_pos, _fd_dqd_pos = self.forward_dynamics_grad(q_pos, qd, u)
-                fd_dq_neg, _fd_dqd_neg = self.forward_dynamics_grad(q_neg, qd, u)
-                daba_dqdq[:, :, dind] = (fd_dq_pos - fd_dq_neg) / (2.0 * step)
-
         return daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq
