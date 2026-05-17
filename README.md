@@ -56,10 +56,19 @@ outputs = rbd.ALGORITHM(inputs)
 | IDSVA-SO world-frame (single-pass) | `(d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq) = rbd.idsva_so_world_frame(q, qd, qdd, GRAVITY=-9.81)` |
 | FDSVA-SO (second-order forward dynamics) | `... = rbd.fdsva_so(q, qd, u, GRAVITY=-9.81)` |
 
-The two IDSVA-SO variants are mathematically equivalent. `idsva_so` is the
-original optimized formulation; `idsva_so_world_frame` is a cleaner
-single-pass implementation closer to the textbook spatial-vector-algebra derivation,
-useful as a structural reference.
+The two IDSVA-SO variants are mathematically equivalent — they differ only
+in **reference frame**:
+
+| Variant | Reference frame | Best for |
+|---|---|---|
+| `idsva_so_body_frame` | Body-frame propagation, body-frame inertia, body-frame motion subspace. Multi-pass forward/backward sweeps. | **Fixed-base** robots — wins by a wide margin (e.g. iiwa14 fixed: 27 µs vs 827 µs on GPU). |
+| `idsva_so_world_frame` | World-frame propagation, world-frame motion subspace, gravity baked into the main sweep. Single-pass reference (closer to the textbook spatial-vector-algebra derivation). | **Floating-base** robots — wins by 2–4× (e.g. iiwa14_floating 1.7×, g1_floating 3.6×, GPU). |
+
+GPU benchmarks above are from `test/benchmarks/run_multi_version.py` on
+sm_120 (RTX 5090). The crossover is purely a function of which kinematic
+chain depth dominates: body-frame's subtree-broadcast pays off when the
+chain is short and the tree is fixed; world-frame's single-pass cost is
+flat in chain depth which wins as DOF grows under floating base.
 
 ### Per-pass helpers
 
