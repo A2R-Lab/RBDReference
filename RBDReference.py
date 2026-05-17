@@ -2462,7 +2462,7 @@ class RBDReference:
 
         return d2tau_dq
 
-    def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):
+    def idsva_so_body_frame(self, q, qd, qdd, GRAVITY = -9.81):
         """Compute second-order derivatives of inverse dynamics via parallel IDSVA.
 
         Parameters
@@ -2706,7 +2706,7 @@ class RBDReference:
 
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
 
-    def idsva_so_spatial_v2(self, q, qd, qdd, GRAVITY=-9.81):
+    def idsva_so_world_frame(self, q, qd, qdd, GRAVITY=-9.81):
         """Single-pass IDSVA-SO reference matching spatial_v2_extended's `ID_SO_derivatives.m`.
 
         Implements Singh/Russell/Wensing 2023 (arXiv:2302.06001) Algorithm 1 with
@@ -2929,7 +2929,7 @@ class RBDReference:
         """
         Minv = self.minv(q)
         qdd = self.forward_dynamics(q, qd, u)
-        di2_dq, di2_dqd, di2_dvdq, dm_dq = self.idsva_so(q, qd, qdd, GRAVITY)
+        di2_dq, di2_dqd, di2_dvdq, dm_dq = self.idsva_so_body_frame(q, qd, qdd, GRAVITY)
         fd_dq, fd_dqd = self.forward_dynamics_grad(q, qd, u)
 
         daba_dqdq = -np.einsum('il,ljk->ijk', Minv, di2_dq + np.einsum('ilk,lj->ijk', dm_dq, fd_dq) + np.einsum('ilk,lj->ikj', dm_dq, fd_dq))

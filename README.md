@@ -52,13 +52,13 @@ outputs = rbd.ALGORITHM(inputs)
 
 | Algorithm | Signature |
 |---|---|
-| IDSVA-SO (rank-3 ∂²τ tensors) | `(d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq) = rbd.idsva_so(q, qd, qdd, GRAVITY=-9.81)` |
-| IDSVA-SO spatial_v2 (single-pass) | `(d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq) = rbd.idsva_so_spatial_v2(q, qd, qdd, GRAVITY=-9.81)` |
+| IDSVA-SO (rank-3 ∂²τ tensors) | `(d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq) = rbd.idsva_so_body_frame(q, qd, qdd, GRAVITY=-9.81)` |
+| IDSVA-SO world-frame (single-pass) | `(d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq) = rbd.idsva_so_world_frame(q, qd, qdd, GRAVITY=-9.81)` |
 | FDSVA-SO (second-order forward dynamics) | `... = rbd.fdsva_so(q, qd, u, GRAVITY=-9.81)` |
 
 The two IDSVA-SO variants are mathematically equivalent. `idsva_so` is the
-original optimized formulation; `idsva_so_spatial_v2` is a cleaner
-single-pass implementation closer to the textbook spatial_v2 derivation,
+original optimized formulation; `idsva_so_world_frame` is a cleaner
+single-pass implementation closer to the textbook spatial-vector-algebra derivation,
 useful as a structural reference.
 
 ### Per-pass helpers
