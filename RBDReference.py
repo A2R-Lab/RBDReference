@@ -2910,8 +2910,26 @@ class RBDReference:
         d2tau_dvdq = d2tau_dvdq.transpose(0, 2, 1)
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
 
+    def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):
+        """Compute second-order derivatives of inverse dynamics.
+
+        Dispatches at runtime by base type — body-frame is faster on fixed-base
+        (~30×), world-frame is faster on floating-base (2-4×). Both produce
+        numerically equivalent output (validated against Pinocchio). Either
+        `idsva_so_body_frame` and `idsva_so_world_frame` can be called
+        directly if you want to compare; this dispatcher is the convenience
+        entry point.
+        """
+        if self.robot.floating_base:
+            return self.idsva_so_world_frame(q, qd, qdd, GRAVITY)
+        return self.idsva_so_body_frame(q, qd, qdd, GRAVITY)
+
     def fdsva_so(self, q, qd, u, GRAVITY = -9.81):
         """Compute second-order derivatives of forward dynamics.
+
+        Internally delegates to `idsva_so` (dispatched body/world frame by
+        base type) — mirrors the C++ codegen, which embeds the world-frame
+        inner for floating-base and the body-frame inner for fixed-base.
 
         Parameters
         ----------
@@ -2929,7 +2947,7 @@ class RBDReference:
         """
         Minv = self.minv(q)
         qdd = self.forward_dynamics(q, qd, u)
-        di2_dq, di2_dqd, di2_dvdq, dm_dq = self.idsva_so_body_frame(q, qd, qdd, GRAVITY)
+        di2_dq, di2_dqd, di2_dvdq, dm_dq = self.idsva_so(q, qd, qdd, GRAVITY)
         fd_dq, fd_dqd = self.forward_dynamics_grad(q, qd, u)
 
         daba_dqdq = -np.einsum('il,ljk->ijk', Minv, di2_dq + np.einsum('ilk,lj->ijk', dm_dq, fd_dq) + np.einsum('ilk,lj->ikj', dm_dq, fd_dq))
