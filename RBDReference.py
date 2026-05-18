@@ -2914,11 +2914,18 @@ class RBDReference:
         """Compute second-order derivatives of inverse dynamics.
 
         Dispatches at runtime by base type — body-frame is faster on fixed-base
-        (~30×), world-frame is faster on floating-base (2-4×). Both produce
-        numerically equivalent output (validated against Pinocchio). Either
-        `idsva_so_body_frame` and `idsva_so_world_frame` can be called
-        directly if you want to compare; this dispatcher is the convenience
-        entry point.
+        (~7-10x at low DOF), world-frame is faster on floating-base (2-20x).
+        Both produce numerically equivalent output (validated against
+        Pinocchio). Either `idsva_so_body_frame` and `idsva_so_world_frame`
+        can be called directly if you want to compare; this dispatcher is
+        the convenience entry point.
+
+        Note (sm_120 / 2026-05-18): the body-vs-world crossover on the GPU is
+        DOF-sensitive. At NV<=12 (iiwa14, go2 fixed-base) body wins by 7-10x;
+        at NV=29 (g1 fixed-base) world is actually 6-15% faster. The current
+        rule is the safe choice (preserves the large wins on the common
+        low-DOF case), but a DOF-threshold refinement is on the open list
+        once more high-DOF fixed-base data points exist.
         """
         if self.robot.floating_base:
             return self.idsva_so_world_frame(q, qd, qdd, GRAVITY)
