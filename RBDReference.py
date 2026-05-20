@@ -88,6 +88,379 @@ class RBDReference:
             raise ValueError("Floating-base quaternion norm was zero during normalization.")
         return quat / quat_norm
 
+    # ----- SO(3) / SE(3) helpers used by the time-integrator step -----
+    # Quaternion convention: xyzw (matches Pinocchio's free-flyer joint).
+    # Free-flyer velocity convention: Pinocchio order, v = [v_lin (3); omega (3)],
+    # interpreted in the LOCAL/body frame. This matches the user-facing
+    # convention everywhere else in the project (see test_forward_dynamics_*).
+
+    @staticmethod
+    def _quat_mul_xyzw(a, b):
+        """Hamilton-product quaternion multiply: returns a ⊗ b in xyzw order."""
+        ax, ay, az, aw = a
+        bx, by, bz, bw = b
+        return np.array([
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ], dtype=np.float64)
+
+    @staticmethod
+    def _quat_exp_from_half_omega(half_omega):
+        """Quaternion exponential map (xyzw) from half-angle vector.
+
+        For an angular velocity * dt = omega_dt, the SO(3) retract is
+        `q_new = q ⊗ exp_quat(0.5 * omega_dt)`. This helper takes the
+        already-halved 3-vector and returns its quaternion exponential.
+        """
+        half_omega = np.asarray(half_omega, dtype=np.float64)
+        theta = float(np.linalg.norm(half_omega))
+        if theta < 1e-12:
+            # Small-angle Taylor: sin(theta)/theta ≈ 1 - theta^2/6
+            sinc = 1.0 - theta * theta / 6.0
+            cos_t = 1.0 - 0.5 * theta * theta
+        else:
+            sinc = np.sin(theta) / theta
+            cos_t = np.cos(theta)
+        vec = sinc * half_omega  # (xyz components)
+        return np.array([vec[0], vec[1], vec[2], cos_t], dtype=np.float64)
+
+    @staticmethod
+    def _rotation_from_quat_xyzw(q):
+        """Build a 3x3 rotation matrix from an xyzw quaternion."""
+        x, y, z, w = q
+        # Standard quaternion-to-rotation formula (assumes unit quaternion).
+        xx, yy, zz = x * x, y * y, z * z
+        xy, xz, yz = x * y, x * z, y * z
+        wx, wy, wz = w * x, w * y, w * z
+        return np.array([
+            [1 - 2 * (yy + zz), 2 * (xy - wz),     2 * (xz + wy)],
+            [2 * (xy + wz),     1 - 2 * (xx + zz), 2 * (yz - wx)],
+            [2 * (xz - wy),     2 * (yz + wx),     1 - 2 * (xx + yy)],
+        ], dtype=np.float64)
+
+    @staticmethod
+    def _so3_skew(v):
+        x, y, z = v
+        return np.array([
+            [0.0, -z,   y],
+            [z,    0.0, -x],
+            [-y,   x,    0.0],
+        ], dtype=np.float64)
+
+    @staticmethod
+    def _so3_V_matrix(phi):
+        """SE(3)-exp 'V' helper: p_delta = V(phi) @ rho where phi = omega*dt
+        and rho = v_lin * dt. Same closed-form as Pinocchio's local-frame
+        free-flyer exponential.
+        """
+        phi = np.asarray(phi, dtype=np.float64)
+        theta = float(np.linalg.norm(phi))
+        skew_phi = RBDReference._so3_skew(phi)
+        if theta < 1e-8:
+            # Small-angle Taylor:
+            #   V ≈ I + 0.5*[phi]_x + (1/6)*[phi]_x^2
+            return np.eye(3) + 0.5 * skew_phi + (1.0 / 6.0) * (skew_phi @ skew_phi)
+        a = (1.0 - np.cos(theta)) / (theta * theta)
+        b = (theta - np.sin(theta)) / (theta ** 3)
+        return np.eye(3) + a * skew_phi + b * (skew_phi @ skew_phi)
+
+    @staticmethod
+    def _so3_right_jacobian(phi):
+        """SO(3) right Jacobian J_r(phi). Used by SE(3) dIntegrate (free-flyer)."""
+        phi = np.asarray(phi, dtype=np.float64)
+        theta = float(np.linalg.norm(phi))
+        skew_phi = RBDReference._so3_skew(phi)
+        if theta < 1e-8:
+            return np.eye(3) - 0.5 * skew_phi + (1.0 / 6.0) * (skew_phi @ skew_phi)
+        a = (1.0 - np.cos(theta)) / (theta * theta)
+        b = (theta - np.sin(theta)) / (theta ** 3)
+        return np.eye(3) - a * skew_phi + b * (skew_phi @ skew_phi)
+
+    @staticmethod
+    def _se3_Q_block(rho, phi):
+        """SE(3) right-Jacobian coupling block Q(rho, phi) used by
+        `pin.dIntegrate(..., ARG1)` for free-flyer joints with body-frame
+        velocity. Closed-form adapted from Sola, Deray & Atchuthan,
+        'A micro Lie theory for state estimation in robotics' (2018) eq. (184),
+        evaluated at (rho, -phi) to match Pinocchio's sign convention. The
+        SO(3) part of phi appears at odd powers in some terms and even
+        powers in others — straight substitution gives Pinocchio's form."""
+        rho = np.asarray(rho, dtype=np.float64)
+        phi_neg = -np.asarray(phi, dtype=np.float64)
+        theta = float(np.linalg.norm(phi_neg))
+        Px = RBDReference._so3_skew(phi_neg)
+        Rx = RBDReference._so3_skew(rho)
+        Px2 = Px @ Px
+        Rx_Px = Rx @ Px
+        Px_Rx = Px @ Rx
+        Px_Rx_Px = Px @ Rx @ Px
+        Px2_Rx = Px2 @ Rx
+        Rx_Px2 = Rx @ Px2
+        if theta < 1e-4:
+            # Small-angle Taylor: closed-form formula loses precision below
+            # this threshold because the c3 numerator becomes catastrophically
+            # cancellation-prone (subtracts two near-equal O(theta^3) values).
+            sola = (0.5 * Rx
+                    + (1.0 / 6.0) * (Px_Rx + Rx_Px + Px_Rx_Px)
+                    - (1.0 / 24.0) * (Px2_Rx + Rx_Px2 - 3.0 * Px_Rx_Px))
+            return -sola
+        c1 = (theta - np.sin(theta)) / (theta ** 3)
+        c2 = (1.0 - 0.5 * theta * theta - np.cos(theta)) / (theta ** 4)
+        c3 = 0.5 * (c2 - 3.0 * (theta - np.sin(theta) - (theta ** 3) / 6.0) / (theta ** 5))
+        sola = (0.5 * Rx
+                + c1 * (Px_Rx + Rx_Px + Px_Rx_Px)
+                - c2 * (Px2_Rx + Rx_Px2 - 3.0 * Px_Rx_Px)
+                + c3 * (Px @ Rx_Px2 + Px2 @ Rx_Px))
+        return -sola
+
+    @staticmethod
+    def _so3_exp(phi):
+        """SO(3) exponential: returns the 3x3 rotation matrix R = exp([phi]_x)."""
+        phi = np.asarray(phi, dtype=np.float64)
+        theta = float(np.linalg.norm(phi))
+        Px = RBDReference._so3_skew(phi)
+        if theta < 1e-8:
+            return np.eye(3) + Px + 0.5 * (Px @ Px)
+        sin_t = np.sin(theta) / theta
+        one_minus_cos = (1.0 - np.cos(theta)) / (theta * theta)
+        return np.eye(3) + sin_t * Px + one_minus_cos * (Px @ Px)
+
+    def integrate(self, q, v_dt):
+        """Lie-group retract: q_new = q ⊕ v_dt.
+
+        Matches Pinocchio's `pin.integrate(model, q, v_dt)` for both fixed-base
+        and free-flyer + revolute joint robots (the only configurations in our
+        manifest). For fixed-base this is just `q + v_dt`; for floating-base
+        the first 6 v_dt components drive an SE(3) exponential update of the
+        position+quaternion prefix and the remainder is a vector add.
+
+        Convention (user-facing, matches Pinocchio):
+          q     = [pos(3), quat_xyzw(4), joint_q...]    size nq
+          v_dt  = [v_lin*dt(3), omega*dt(3), joint_v*dt...]  size nv
+          q_new is in the same convention as q.
+        """
+        q = np.asarray(q, dtype=np.float64).copy()
+        v_dt = np.asarray(v_dt, dtype=np.float64)
+        if not self.robot.floating_base:
+            return q + v_dt
+        # Free-flyer prefix:
+        rho = v_dt[0:3]   # v_lin * dt   (local/body frame)
+        phi = v_dt[3:6]   # omega * dt   (local/body frame)
+        # SE(3) exp returns local-frame (R_delta, p_delta).
+        V = self._so3_V_matrix(phi)
+        p_delta_local = V @ rho
+        delta_quat = self._quat_exp_from_half_omega(0.5 * phi)
+        # T_new = T_old * exp(twist_dt):
+        #   R_new = R_old * R_delta;  p_new = p_old + R_old * p_delta_local
+        R_old = self._rotation_from_quat_xyzw(q[3:7])
+        q_pos_new = q[0:3] + R_old @ p_delta_local
+        q_quat_new = self._normalize_xyzw_quaternion(self._quat_mul_xyzw(q[3:7], delta_quat))
+        q_joints_new = q[7:] + v_dt[6:]
+        return np.concatenate([q_pos_new, q_quat_new, q_joints_new])
+
+    def dIntegrate(self, q, v_dt, with_respect_to):
+        """Return the (nv, nv) Jacobian of `integrate(q, v_dt)` in tangent
+        space. `with_respect_to` is 'q' or 'v' (matching Pinocchio's
+        pin.ARG0 / pin.ARG1 — ARG1 is the Jacobian w.r.t. the v_dt argument,
+        not w.r.t. v itself).
+
+        Free-flyer block uses (in Pinocchio v_dt order [rho; phi] = [v_lin*dt; omega*dt]):
+          ARG_q : Ad(exp(-v_dt))  — SE(3) adjoint of the inverse exponential
+          ARG_v : SE(3) right-Jacobian J_r(v_dt) — with the Q(rho, phi) coupling
+        Revolute joint block is identity for both. For fixed-base this
+        collapses to identity overall.
+        """
+        del q  # unused for the closed-form free-flyer + revolute case
+        nv = self.robot.get_num_vel()
+        J = np.eye(nv)
+        if not self.robot.floating_base:
+            return J
+        v_dt = np.asarray(v_dt, dtype=np.float64)
+        rho = v_dt[0:3]   # v_lin * dt   (Pinocchio order: linear first)
+        phi = v_dt[3:6]   # omega * dt
+        if with_respect_to == "q":
+            # exp(-v_dt) = (R_inv, p_inv) where R_inv = exp(-phi),
+            #             p_inv = V(-phi) @ (-rho) = -V(-phi) @ rho.
+            R_inv = self._so3_exp(-phi)
+            V_neg = self._so3_V_matrix(-phi)
+            p_inv = -V_neg @ rho
+            # SE(3) Adjoint: [[R, [p]_x R], [0, R]]  in Pinocchio order [v_lin, omega].
+            P_inv_x = self._so3_skew(p_inv)
+            J[0:3, 0:3] = R_inv
+            J[0:3, 3:6] = P_inv_x @ R_inv
+            J[3:6, 0:3] = 0.0
+            J[3:6, 3:6] = R_inv
+            return J
+        if with_respect_to == "v":
+            # SE(3) right-Jacobian J_r(v_dt) in Pinocchio order [v_lin, omega]:
+            #   [[J_r(phi),  Q(rho, phi)],
+            #    [0,          J_r(phi)  ]]
+            J_r = self._so3_right_jacobian(phi)
+            Q = self._se3_Q_block(rho, phi)
+            J[0:3, 0:3] = J_r
+            J[0:3, 3:6] = Q
+            J[3:6, 0:3] = 0.0
+            J[3:6, 3:6] = J_r
+            return J
+        raise ValueError("with_respect_to must be 'q' or 'v'")
+
+    # ----- Multi-integrator one-step time-integration -----
+
+    @staticmethod
+    def _integrator_butcher(integrator_type: str):
+        """Return (c_list, b_list) for the given integrator.
+
+        c_list[i] is the stage-i offset applied to xdot (i.e. the
+        intermediate point for FD evaluation at stage i+1 uses
+        p_{i+1}.v = v_orig + c_i * dt * qdd_i).
+        b_list[i] is the combination weight for qdd_i in the final v update.
+        Lengths: len(c_list) = N-1, len(b_list) = N (N = stage count).
+        """
+        if integrator_type == "euler":
+            return [], [1.0]
+        if integrator_type in ("semi_implicit_euler", "si_euler"):
+            return [], [1.0]
+        if integrator_type == "midpoint":
+            return [0.5], [0.0, 1.0]
+        if integrator_type == "rk3":
+            return [0.5, 0.75], [2.0 / 9.0, 3.0 / 9.0, 4.0 / 9.0]
+        if integrator_type == "rk4":
+            return [0.5, 0.5, 1.0], [1.0 / 6.0, 2.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0]
+        raise ValueError(f"Unknown integrator_type: {integrator_type}")
+
+    def integrator(self, q, qd, u, dt, integrator_type: str = "euler"):
+        """One time-integration step: x_{k+1} = integrator(x_k, u_k, dt).
+
+        Returns x_kp1 of shape (nq + nv,) — concatenated [q_new, v_new] in the
+        user-facing q/v convention. Supports 'euler', 'semi_implicit_euler',
+        'midpoint', 'rk3', 'rk4'. For floating-base robots the q-update uses
+        `self.integrate` (Lie-group retract); for fixed-base this collapses
+        to `q + dt*v`.
+        """
+        q = np.asarray(q, dtype=np.float64)
+        qd = np.asarray(qd, dtype=np.float64)
+        u = np.asarray(u, dtype=np.float64)
+        qdd1 = np.asarray(self.forward_dynamics(q, qd, u)).reshape(-1)
+        if integrator_type == "euler":
+            q_new = self.integrate(q, dt * qd)
+            v_new = qd + dt * qdd1
+            return np.concatenate([q_new, v_new])
+        if integrator_type in ("semi_implicit_euler", "si_euler"):
+            v_new = qd + dt * qdd1
+            q_new = self.integrate(q, dt * v_new)
+            return np.concatenate([q_new, v_new])
+        # Multi-stage RK family — TrajoptPlant convention: each stage uses the
+        # ORIGINAL v for its xdot.v term (only qdd is refined across stages).
+        c_list, b_list = self._integrator_butcher(integrator_type)
+        N = len(b_list)
+        qdd_list = [qdd1]
+        prev_qdd = qdd1
+        for stage_idx in range(1, N):
+            c_prev = c_list[stage_idx - 1]
+            p_q  = self.integrate(q, c_prev * dt * qd)
+            p_qd = qd + c_prev * dt * prev_qdd
+            stage_qdd = np.asarray(self.forward_dynamics(p_q, p_qd, u)).reshape(-1)
+            qdd_list.append(stage_qdd)
+            prev_qdd = stage_qdd
+        accel = sum(b * qdd for b, qdd in zip(b_list, qdd_list))
+        q_new = self.integrate(q, dt * qd)   # q update is Euler-style for every RK variant
+        v_new = qd + dt * accel
+        return np.concatenate([q_new, v_new])
+
+    def integrator_grad(self, q, qd, u, dt, integrator_type: str = "euler"):
+        """Return [A | B] of shape (2*nv, 3*nv) — the Jacobian of the integrator
+        step in tangent space. Column order is [d/dq | d/dqd | d/du] where
+        d/dq is the nv-tangent perturbation of q (NOT the nq scalar
+        perturbation). For fixed-base this matches the historical layout.
+        """
+        q = np.asarray(q, dtype=np.float64)
+        qd = np.asarray(qd, dtype=np.float64)
+        u = np.asarray(u, dtype=np.float64)
+        nv = self.robot.get_num_vel()
+        I_n = np.eye(nv)
+        Z_n = np.zeros((nv, nv))
+
+        def fd_grad_at(pq, pqd):
+            J_qq, J_qv = self.forward_dynamics_grad(pq, pqd, u)
+            return (np.asarray(J_qq, dtype=np.float64),
+                    np.asarray(J_qv, dtype=np.float64),
+                    np.asarray(self.minv(pq), dtype=np.float64))
+
+        # dq_block / dv_block: (nv x nv) Jacobians of q_new w.r.t. q and v
+        # respectively, evaluated at v_dt. For fixed-base both reduce to
+        # identity (q_block) and dt*I (v_block); for floating-base they
+        # involve the SO(3) right-Jacobian on the free-flyer block.
+        def q_top_blocks(v_dt_arg):
+            dInt_q = self.dIntegrate(q, v_dt_arg, "q")
+            dInt_v = self.dIntegrate(q, v_dt_arg, "v")
+            return dInt_q, dInt_v
+
+        if integrator_type == "euler":
+            J_qq, J_qv, Minv = fd_grad_at(q, qd)
+            dInt_q, dInt_v = q_top_blocks(dt * qd)
+            top = np.hstack([dInt_q, dt * dInt_v, Z_n])
+            bottom = np.hstack([dt * J_qq, I_n + dt * J_qv, dt * Minv])
+            return np.vstack([top, bottom])
+        if integrator_type in ("semi_implicit_euler", "si_euler"):
+            J_qq, J_qv, Minv = fd_grad_at(q, qd)
+            # v_new = qd + dt*qdd(q, qd, u);  q_new = integrate(q, dt*v_new)
+            # ∂v_new/∂q  = dt*J_qq
+            # ∂v_new/∂qd = I + dt*J_qv
+            # ∂v_new/∂u  = dt*Minv
+            # ∂q_new/∂q  = dInt_q(dt*v_new) + dt*dInt_v(dt*v_new) @ ∂v_new/∂q
+            # ∂q_new/∂qd = dt*dInt_v(dt*v_new) @ ∂v_new/∂qd
+            # ∂q_new/∂u  = dt*dInt_v(dt*v_new) @ ∂v_new/∂u
+            qdd_si = np.asarray(self.forward_dynamics(q, qd, u)).reshape(-1)
+            v_new = qd + dt * qdd_si
+            dInt_q, dInt_v = q_top_blocks(dt * v_new)
+            dvdq = dt * J_qq
+            dvdv = I_n + dt * J_qv
+            dvdu = dt * Minv
+            dt_dInt_v = dt * dInt_v
+            top = np.hstack([dInt_q + dt_dInt_v @ dvdq,
+                              dt_dInt_v @ dvdv,
+                              dt_dInt_v @ dvdu])
+            bottom = np.hstack([dvdq, dvdv, dvdu])
+            return np.vstack([top, bottom])
+        # ----- Multi-stage chain rule (Midpoint / RK3 / RK4) -----
+        c_list, b_list = self._integrator_butcher(integrator_type)
+        N = len(b_list)
+        qdd_list = []
+        D_qdd_list = []
+        # Stage 1: FD at the original (q, qd).
+        qdd_list.append(np.asarray(self.forward_dynamics(q, qd, u)).reshape(-1))
+        J_qq, J_qv, Minv = fd_grad_at(q, qd)
+        D_qdd_list.append(np.hstack([J_qq, J_qv, Minv]))  # (nv, 3*nv)
+        # Subsequent stages: chain rule through self.integrate at the
+        # intermediate point (q_orig perturbed by c_{i-1}*dt*v_orig).
+        for stage_idx in range(1, N):
+            c_prev = c_list[stage_idx - 1]
+            prev_qdd = qdd_list[-1]
+            p_q = self.integrate(q, c_prev * dt * qd)
+            p_qd = qd + c_prev * dt * prev_qdd
+            stage_qdd = np.asarray(self.forward_dynamics(p_q, p_qd, u)).reshape(-1)
+            qdd_list.append(stage_qdd)
+            J_qq_i, J_qv_i, Minv_i = fd_grad_at(p_q, p_qd)
+            # ∂p_i.q / ∂(q, v, u) — block structure (each (nv, nv)):
+            #   [dInt_q(q, c_prev*dt*v) | c_prev*dt*dInt_v(q, c_prev*dt*v) | 0]
+            v_dt_stage = c_prev * dt * qd
+            dInt_q_stage, dInt_v_stage = q_top_blocks(v_dt_stage)
+            dp_q_block = np.hstack([dInt_q_stage, c_prev * dt * dInt_v_stage, Z_n])
+            # ∂p_i.qd / ∂(q, v, u) = [0, I, 0] + c_prev*dt * D_qdd_{i-1}
+            dp_qd_block = np.hstack([Z_n, I_n, Z_n]) + c_prev * dt * D_qdd_list[-1]
+            # Compose: D_qdd_i = J_qq_i @ dp_q_block + J_qv_i @ dp_qd_block + Minv_i @ [0|0|I]
+            d_u_block = np.hstack([Z_n, Z_n, Minv_i])
+            D_qdd_list.append(J_qq_i @ dp_q_block + J_qv_i @ dp_qd_block + d_u_block)
+
+        sum_b_D = sum(b * D for b, D in zip(b_list, D_qdd_list))
+        # Final assembly. q_new = integrate(q, dt*qd) — same as Euler.
+        dInt_q_final, dInt_v_final = q_top_blocks(dt * qd)
+        top = np.hstack([dInt_q_final, dt * dInt_v_final, Z_n])
+        bottom = np.hstack([Z_n, I_n, Z_n]) + dt * sum_b_D
+        return np.vstack([top, bottom])
+
     @staticmethod
     def _quat_xyzw_from_rotation_matrix(rot, reference_quat=None):
         rot = np.asarray(rot, dtype=np.float64)
