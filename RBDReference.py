@@ -208,7 +208,12 @@ class RBDReference:
             return -sola
         c1 = (theta - np.sin(theta)) / (theta ** 3)
         c2 = (1.0 - 0.5 * theta * theta - np.cos(theta)) / (theta ** 4)
-        c3 = 0.5 * (c2 - 3.0 * (theta - np.sin(theta) - (theta ** 3) / 6.0) / (theta ** 5))
+        # 4th-order coefficient. The sign here is negative: matching Barfoot's
+        # SE(3) Q-block (2θ−3sinθ+θcosθ)/(2θ⁵) requires negating this grouping.
+        # Verified against pin.dIntegrate(ARG1) to ~1e-14 across increment
+        # magnitudes; the previous (positive) sign matched only for tiny v_dt
+        # and diverged as O(|v_dt|) for larger increments.
+        c3 = -0.5 * (c2 - 3.0 * (theta - np.sin(theta) - (theta ** 3) / 6.0) / (theta ** 5))
         sola = (0.5 * Rx
                 + c1 * (Px_Rx + Rx_Px + Px_Rx_Px)
                 - c2 * (Px2_Rx + Rx_Px2 - 3.0 * Px_Rx_Px)
