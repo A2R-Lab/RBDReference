@@ -682,16 +682,11 @@ class RBDReference:
             Resulting 6D spatial vector.
         """
         vecX = np.zeros((6))
-        try:
-            vecX[1] = vec[2] * alpha
-            vecX[2] = -vec[1] * alpha
-            vecX[4] = vec[5] * alpha
-            vecX[5] = -vec[4] * alpha
-        except:
-            vecX[1] = vec[0, 2] * alpha
-            vecX[2] = -vec[0, 1] * alpha
-            vecX[4] = vec[0, 5] * alpha
-            vecX[5] = -vec[0, 4] * alpha
+        vec = np.asarray(vec).reshape(-1)
+        vecX[1] = vec[2] * alpha
+        vecX[2] = -vec[1] * alpha
+        vecX[4] = vec[5] * alpha
+        vecX[5] = -vec[4] * alpha
         return vecX
 
     def mx2(self, vec, alpha=1.0):
@@ -710,16 +705,11 @@ class RBDReference:
             Resulting 6D spatial vector.
         """
         vecX = np.zeros((6))
-        try:
-            vecX[0] = -vec[2] * alpha
-            vecX[2] = vec[0] * alpha
-            vecX[3] = -vec[5] * alpha
-            vecX[5] = vec[3] * alpha
-        except:
-            vecX[0] = -vec[0, 2] * alpha
-            vecX[2] = vec[0, 0] * alpha
-            vecX[3] = -vec[0, 5] * alpha
-            vecX[5] = vec[0, 3] * alpha
+        vec = np.asarray(vec).reshape(-1)
+        vecX[0] = -vec[2] * alpha
+        vecX[2] = vec[0] * alpha
+        vecX[3] = -vec[5] * alpha
+        vecX[5] = vec[3] * alpha
         return vecX
 
     def mx3(self, vec, alpha=1.0):
@@ -738,16 +728,11 @@ class RBDReference:
             Resulting 6D spatial vector.
         """
         vecX = np.zeros((6))
-        try:
-            vecX[0] = vec[1] * alpha
-            vecX[1] = -vec[0] * alpha
-            vecX[3] = vec[4] * alpha
-            vecX[4] = -vec[3] * alpha
-        except:
-            vecX[0] = vec[0, 1] * alpha
-            vecX[1] = -vec[0, 0] * alpha
-            vecX[3] = vec[0, 4] * alpha
-            vecX[4] = -vec[0, 3] * alpha
+        vec = np.asarray(vec).reshape(-1)
+        vecX[0] = vec[1] * alpha
+        vecX[1] = -vec[0] * alpha
+        vecX[3] = vec[4] * alpha
+        vecX[4] = -vec[3] * alpha
         return vecX
 
     def mx4(self, vec, alpha=1.0):
@@ -766,12 +751,9 @@ class RBDReference:
             Resulting 6D spatial force vector.
         """
         vecX = np.zeros((6))
-        try:
-            vecX[4] = vec[2] * alpha
-            vecX[5] = -vec[1] * alpha
-        except:
-            vecX[4] = vec[0, 2] * alpha
-            vecX[5] = -vec[0, 1] * alpha
+        vec = np.asarray(vec).reshape(-1)
+        vecX[4] = vec[2] * alpha
+        vecX[5] = -vec[1] * alpha
         return vecX
 
     def mx5(self, vec, alpha=1.0):
@@ -790,12 +772,9 @@ class RBDReference:
             Resulting 6D spatial force vector.
         """
         vecX = np.zeros((6))
-        try:
-            vecX[3] = -vec[2] * alpha
-            vecX[5] = vec[0] * alpha
-        except:
-            vecX[3] = -vec[0, 2] * alpha
-            vecX[5] = vec[0, 0] * alpha
+        vec = np.asarray(vec).reshape(-1)
+        vecX[3] = -vec[2] * alpha
+        vecX[5] = vec[0] * alpha
         return vecX
 
     def mx6(self, vec, alpha=1.0):
@@ -814,12 +793,9 @@ class RBDReference:
             Resulting 6D spatial force vector.
         """
         vecX = np.zeros((6))
-        try:
-            vecX[3] = vec[1] * alpha
-            vecX[4] = -vec[0] * alpha
-        except:
-            vecX[3] = vec[0, 1] * alpha
-            vecX[4] = -vec[0, 0] * alpha
+        vec = np.asarray(vec).reshape(-1)
+        vecX[3] = vec[1] * alpha
+        vecX[4] = -vec[0] * alpha
         return vecX
 
     def fxv(self, fxVec, timesVec):
