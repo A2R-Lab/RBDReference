@@ -652,6 +652,11 @@ class RBDReference:
             The 6xN matrix product.
         """
         result = np.zeros((6))
+        # Flatten S to 1-D so each S[k] is a scalar: a 6x1 subspace column
+        # arrives as shape (6,1), making S[k] a 1-element array. Passing that
+        # as the scalar `alpha` to mx1-mx6 triggers NumPy's "ndim>0 to scalar"
+        # DeprecationWarning (will error in a future NumPy) on every element write.
+        S = np.asarray(S).reshape(-1)
         if not S[0] == 0:
             result += self.mx1(vec, S[0])
         if not S[1] == 0:
