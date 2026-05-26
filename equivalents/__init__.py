@@ -22,11 +22,6 @@ reference backend's URDFParser dependency are pulled in only when actually
 built. See ``requirements-dev.txt`` for the developer/equivalence extras.
 """
 import os
-from pathlib import Path
-
-EQUIVALENTS_ROOT = Path(__file__).resolve().parent
-MANIFEST_PATH = EQUIVALENTS_ROOT / "robot_manifest.json"
-SOURCE_LOCK_PATH = EQUIVALENTS_ROOT / "ROBOT_SOURCE_LOCK.json"
 
 DEFAULT_BACKEND = "reference"
 SUPPORTED_BACKENDS = ("reference", "pinocchio")

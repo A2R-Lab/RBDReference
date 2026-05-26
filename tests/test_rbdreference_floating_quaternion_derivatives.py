@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from RBDReference.tests.conftest import MANIFEST_PATH
-from RBDReference.equivalents.model_sources import (
+from RBDReference.tests.model_sources import (
     iter_robot_cases,
     resolve_robot_spec,
 )

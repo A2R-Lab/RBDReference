@@ -2,9 +2,9 @@ import pytest
 
 from RBDReference.tests.conftest import build_case_params
 from RBDReference.tests.conftest import MANIFEST_PATH
-from RBDReference.equivalents.comparators import assert_close
-from RBDReference.equivalents.model_sources import iter_robot_cases
-from RBDReference.equivalents.state_sampling import build_dynamics_samples
+from RBDReference.tests.comparators import assert_close
+from RBDReference.tests.model_sources import iter_robot_cases
+from RBDReference.tests.state_sampling import build_dynamics_samples
 
 
 def build_fixed_case_params():

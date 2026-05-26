@@ -9,13 +9,13 @@ from RBDReference.equivalents.reference_backend import (
     ProjectParseError,
     build_project_adapter,
 )
-from RBDReference.equivalents.model_sources import (
+from RBDReference.tests.model_sources import (
     iter_robot_cases,
     load_manifest,
     resolve_robot_spec,
 )
-from RBDReference.equivalents.source_lock import build_lock_entry
-from RBDReference.equivalents import MANIFEST_PATH
+from RBDReference.tests.source_lock import build_lock_entry
+from RBDReference.tests import MANIFEST_PATH
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -84,7 +84,7 @@ def resolved_robot_spec(developer_environment, spec):
 
 @lru_cache(maxsize=None)
 def _project_model_attempt(robot_id, embodiment, source_kind, urdf_path, base_mode):
-    from RBDReference.equivalents.model_sources import (
+    from RBDReference.tests.model_sources import (
         ResolvedRobotModel,
         RobotSpec,
         SourceCandidate,

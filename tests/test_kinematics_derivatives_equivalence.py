@@ -2,9 +2,9 @@ import numpy as np
 import pytest
 
 from RBDReference.tests.conftest import MANIFEST_PATH, build_case_params
-from RBDReference.equivalents.comparators import assert_close
-from RBDReference.equivalents.model_sources import iter_robot_cases
-from RBDReference.equivalents.state_sampling import build_dynamics_samples
+from RBDReference.tests.comparators import assert_close
+from RBDReference.tests.model_sources import iter_robot_cases
+from RBDReference.tests.state_sampling import build_dynamics_samples
 
 
 def select_derivative_target(project_model, pinocchio_model):

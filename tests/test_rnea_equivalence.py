@@ -1,8 +1,8 @@
 import pytest
 
-from RBDReference.equivalents.comparators import assert_close
+from RBDReference.tests.comparators import assert_close
 from RBDReference.tests.conftest import build_case_params
-from RBDReference.equivalents.state_sampling import build_dynamics_samples
+from RBDReference.tests.state_sampling import build_dynamics_samples
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params(base_mode="fixed"))

@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 
 from RBDReference.tests.conftest import build_case_params
-from RBDReference.equivalents.comparators import assert_close
-from RBDReference.equivalents.state_sampling import build_dynamics_samples
+from RBDReference.tests.comparators import assert_close
+from RBDReference.tests.state_sampling import build_dynamics_samples
 
 
 _IDSVA_TENSOR_NAMES = ("d2tau_dq", "d2tau_dqd", "d2tau_dvdq", "dM_dq")

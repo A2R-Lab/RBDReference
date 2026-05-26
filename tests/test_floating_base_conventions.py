@@ -2,9 +2,9 @@ import numpy as np
 import pytest
 
 from RBDReference.tests.conftest import build_case_params
-from RBDReference.equivalents.comparators import assert_close
+from RBDReference.tests.comparators import assert_close
 from RBDReference.equivalents.reference_backend import build_project_adapter
-from RBDReference.equivalents.state_sampling import build_dynamics_samples
+from RBDReference.tests.state_sampling import build_dynamics_samples
 
 
 def _build_models(spec, resolved_robot_spec):
