@@ -1,0 +1,16 @@
+# Developer / equivalence-testing dependencies.
+# These power the `equivalents/` Pinocchio backend and the `tests/` suite that
+# checks the pure-Python reference against Pinocchio (C++). The core reference
+# does NOT need any of these — install them only to run equivalence tests.
+-r requirements.txt
+
+pin                          # Pinocchio (C++) Python wheel: `import pinocchio`
+robot_descriptions>=1.23.0   # resolves the robot URDFs in equivalents/robot_manifest.json
+xacrodoc                     # xacro -> URDF expansion for some robot descriptions
+beautifulsoup4>=4.9.3        # URDF joint-type parsing in the adapters
+pybind11                     # builds the pin_so_ext second-order RNEA binding
+pytest
+
+# Also required (sibling package, not on PyPI): URDFParser
+#   https://github.com/robot-acceleration/URDFParser
+# In the parent GRiD repo it is available as a submodule on sys.path.

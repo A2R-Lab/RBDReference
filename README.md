@@ -5,8 +5,8 @@ A Python reference implementation of rigid body dynamics algorithms.
 This package is designed to enable rapid prototyping and testing of new
 algorithms and algorithmic optimizations. The CUDA / FPGA / accelerator
 implementations in the parent GRiD-A2R repo use it as a golden CPU oracle
-during testing (in turn grounded against Pinocchio's C++ implementation in
-`test/pinocchio_equivalents/`).
+during testing (in turn grounded against Pinocchio's C++ implementation via
+the in-package `equivalents/` layer; see "Equivalence testing" below).
 
 If your favorite rigid body dynamics algorithm isn't yet implemented please
 submit a PR with the implementation.
@@ -79,20 +79,53 @@ independently. See `RBDReference/RBDReference.py` for full signatures.
 
 ## Installation
 
-The only external dependency is `numpy`:
-```shell
-pip install -r requirements.txt
-```
+Two dependency tiers:
 
-This package also depends on
-[URDFParser](https://github.com/robot-acceleration/URDFParser).
+* **Base (runtime)** — the pure-Python reference. Only `numpy` + `sympy`:
+  ```shell
+  pip install -r requirements.txt
+  ```
+  Building a `robot` object also requires
+  [URDFParser](https://github.com/robot-acceleration/URDFParser) (a sibling
+  package, not on PyPI).
+
+* **Developer / equivalence testing** — adds the Pinocchio backend and the
+  test suite (`pin`, `robot_descriptions`, `beautifulsoup4`, `pybind11`,
+  `pytest`):
+  ```shell
+  pip install -r requirements-dev.txt
+  ```
 
 ## Equivalence testing
 
-Each algorithm above is checked against Pinocchio (C++) as the golden
-oracle in the parent repo's `test/pinocchio_equivalents/` suite. Run:
-```shell
-pytest test/pinocchio_equivalents/
-```
-See `test/benchmarks/README.md` for the Pinocchio install steps needed to
-build the `pin_so_ext/` binding.
+Every algorithm above is checked against Pinocchio (C++) as the golden oracle.
+That machinery now lives **inside this package**:
+
+* `equivalents/` — the reusable, shared-interface layer. Two interchangeable
+  backends expose the *identical* adapter API:
+  * `reference` — the pure-Python `RBDReference` (base deps only);
+  * `pinocchio` — Pinocchio + the `pin_so_ext` second-order C++ binding,
+    reordered into the project convention by `equivalents/conventions.py`.
+
+  Pick one with the single swap point — no call-site changes:
+  ```python
+  from RBDReference.equivalents import build_adapter
+  adapter = build_adapter(spec, resolved_model, base_mode, backend="pinocchio")
+  # or leave backend=None and set GRID_REFERENCE_BACKEND=pinocchio in the env
+  ```
+  Because both backends share the surface, a consumer (e.g. the GRiD CUDA
+  equivalence harness) switches which reference it compares against by flipping
+  this one argument — turning the multi-hour pure-Python second-order
+  references into millisecond C++ calls.
+
+* `tests/` — this package's own suite, asserting the two backends agree. Run
+  (from the directory containing `RBDReference`, e.g. the GRiD repo root):
+  ```shell
+  pytest RBDReference/tests/
+  ```
+
+The `pin_so_ext` binding wraps `pinocchio::ComputeRNEASecondOrderDerivatives`
+(Pinocchio 3.x ships the C++ but does not expose it to Python); its loader
+builds it on first use. The parent repo's `developer_install.sh` also builds it
+ahead of time. See `equivalents/pin_so_ext/` and the parent
+`test/benchmarks/README.md` for the Pinocchio install details.

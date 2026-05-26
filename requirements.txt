@@ -1,1 +1,4 @@
+# Base (runtime) dependencies for the pure-Python RBDReference.
+# The core reference (RBDReference.py) needs only these.
 numpy >= 1.17.4
+sympy >= 1.7.1

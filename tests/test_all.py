@@ -1,0 +1,12 @@
+from RBDReference.tests.test_aba_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_crba_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_forward_dynamics_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_forward_dynamics_grad_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_kinematics_derivatives_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_kinematics_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_minv_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_model_metadata import *  # noqa: F401,F403
+from RBDReference.tests.test_parse_models import *  # noqa: F401,F403
+from RBDReference.tests.test_rnea_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_rnea_grad_equivalence import *  # noqa: F401,F403
+from RBDReference.tests.test_second_order_pinocchio_equivalence import *  # noqa: F401,F403
