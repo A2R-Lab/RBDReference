@@ -534,49 +534,27 @@ class PinocchioModelAdapter:
         return gradient
 
     def end_effector_pose_hessian(self, q, target_name: str, offset=None, step: float = 1e-5):
+        """End-effector pose Hessian d^2(pose)/dv^2 (TANGENT, pinocchio convention).
+
+        Output shape is 6 x nv x nv. Computed as a central-difference FD of the
+        d/dv Jacobian on the Lie-group integrator `pin.integrate(q, h*e_i)`,
+        matching the project adapter's new d/dv Hessian method."""
         if offset is None:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
         q = self._normalize_project_q_for_pose_differences(q)
-        nq = len(q)
-        hessian = np.zeros((6, nq, nq), dtype=np.float64)
+        nv = self.model.nv
+        hessian = np.zeros((6, nv, nv), dtype=np.float64)
 
-        base_pose = self.end_effector_pose(q, target_name, offset=offset)
-        for q_ind_i in range(nq):
-            for q_ind_j in range(q_ind_i, nq):
-                if q_ind_i == q_ind_j:
-                    q_pos = q.copy()
-                    q_neg = q.copy()
-                    q_pos[q_ind_i] += step
-                    q_neg[q_ind_i] -= step
-                    q_pos = self._normalize_project_q_for_pose_differences(q_pos)
-                    q_neg = self._normalize_project_q_for_pose_differences(q_neg)
-                    pose_pos = self.end_effector_pose(q_pos, target_name, offset=offset)
-                    pose_neg = self.end_effector_pose(q_neg, target_name, offset=offset)
-                    value = (pose_pos - 2.0 * base_pose + pose_neg) / (step * step)
-                else:
-                    q_pp = q.copy()
-                    q_pm = q.copy()
-                    q_mp = q.copy()
-                    q_mm = q.copy()
-                    q_pp[q_ind_i] += step
-                    q_pp[q_ind_j] += step
-                    q_pm[q_ind_i] += step
-                    q_pm[q_ind_j] -= step
-                    q_mp[q_ind_i] -= step
-                    q_mp[q_ind_j] += step
-                    q_mm[q_ind_i] -= step
-                    q_mm[q_ind_j] -= step
-                    q_pp = self._normalize_project_q_for_pose_differences(q_pp)
-                    q_pm = self._normalize_project_q_for_pose_differences(q_pm)
-                    q_mp = self._normalize_project_q_for_pose_differences(q_mp)
-                    q_mm = self._normalize_project_q_for_pose_differences(q_mm)
-                    pose_pp = self.end_effector_pose(q_pp, target_name, offset=offset)
-                    pose_pm = self.end_effector_pose(q_pm, target_name, offset=offset)
-                    pose_mp = self.end_effector_pose(q_mp, target_name, offset=offset)
-                    pose_mm = self.end_effector_pose(q_mm, target_name, offset=offset)
-                    value = (pose_pp - pose_pm - pose_mp + pose_mm) / (4.0 * step * step)
-                hessian[:, q_ind_i, q_ind_j] = value
-                hessian[:, q_ind_j, q_ind_i] = value
+        for i in range(nv):
+            v = np.zeros(nv, dtype=np.float64); v[i] = step
+            q_plus = self._pin_integrate(q, v)
+            q_minus = self._pin_integrate(q, -v)
+            Jp = self.end_effector_pose_gradient(q_plus, target_name, offset=offset)
+            Jm = self.end_effector_pose_gradient(q_minus, target_name, offset=offset)
+            hessian[:, :, i] = (Jp - Jm) / (2.0 * step)
+        # Symmetrize: analytic d^2/dv_j dv_i == d^2/dv_i dv_j; FD won't be exact,
+        # so average to suppress per-pair noise.
+        hessian = 0.5 * (hessian + np.transpose(hessian, axes=(0, 2, 1)))
         return hessian
 
 

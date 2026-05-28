@@ -1204,290 +1204,71 @@ class RBDReference:
     End Effector Pose Hessian
     """
     def end_effector_pose_hessian(self, q, offsets = None, ee_joint_names = None):
-        """Compute the Hessian of the end-effector pose.
+        """Hessian d^2(pose)/dv^2 of the end-effector pose w.r.t. generalized velocity v.
+
+        Convention: **d^2/dv^2 (tangent space)**, matching pinocchio. Output is a
+        list of 6 x nv x nv tensors (one per ee). For fixed-base nv == nq so the
+        shape is unchanged from earlier versions; for floating-base the (nv x nv)
+        block now indexes spatial twist components, not quaternion derivatives.
+
+        Implementation: central-difference FD of the (now-correct) d/dv pose
+        Jacobian on the Lie-group integrator `self.integrate(q, h*e_i)`. This
+        reuses the geometric-Jacobian gradient (machine-precision vs the proven
+        prototype + pinocchio backend) and SYMMETRIZES the result. FD is fine
+        for a reference oracle; the (separate) GPU codegen path is analytic.
 
         Parameters
         ----------
         q : numpy.ndarray
-            N-element vector of joint positions.
-        ee_id : int
-            Index of the end effector.
+            Generalized position (floating base: [xyz, quat_xyzw, joints]).
+        offsets : list, optional
+            Per-ee point offsets [x, y, z, 1] (currently the first offset is
+            applied to every ee, matching the gradient).
+        ee_joint_names : list of str, optional
+            Joint names to use as end-effectors; defaults to the robot leaves.
 
         Returns
         -------
-        H : numpy.ndarray
-            Hessian of the end-effector pose.
+        list of numpy.ndarray
+            Per end-effector 6 x nv x nv Hessian of d^2(pose)/dv^2.
         """
         q = self._normalize_kinematics_q(q)
-        offsets = self._normalize_ee_offsets(offsets)
-        n = len(q)
+        nv = self.robot.get_num_vel()
+        h = 1e-5
 
-        # local helper for handling scalar joints and the floating-base root
-        def qinds_to_list(inds):
-            if isinstance(inds, (list, tuple, np.ndarray)):
-                return list(inds)
-            return [inds]
+        # gradient base point + perturbed points; pose_gradient handles offsets/ee selection
+        ee_offsets = self._normalize_ee_offsets(offsets)
+        J_plus_per_i = []
+        J_minus_per_i = []
+        for i in range(nv):
+            v = np.zeros(nv, dtype=np.float64); v[i] = h
+            q_plus = self.integrate(q, v)
+            q_minus = self.integrate(q, -v)
+            J_plus_per_i.append(
+                self.end_effector_pose_gradient(q_plus, ee_joint_names=ee_joint_names,
+                                                ee_offsets=offsets if offsets is not None else None)
+            )
+            J_minus_per_i.append(
+                self.end_effector_pose_gradient(q_minus, ee_joint_names=ee_joint_names,
+                                                ee_offsets=offsets if offsets is not None else None)
+            )
 
-        def qeval_arg(jid, q):
-            inds = qinds_to_list(self.robot.get_joint_index_q(jid))
-            q_block = np.asarray(q[inds], dtype=np.float64)
-            if q_block.size == 1:
-                return float(q_block[0])
-            return q_block
-
-        def get_dlocal_info(jid, dind):
-            inds = qinds_to_list(self.robot.get_joint_index_q(jid))
-            if dind not in inds:
-                return None
-            return inds.index(dind)
-
-        # Determine which targets to compute
-        ee_jids, fixed_jids = self.select_end_effector_joints(ee_joint_names)
-        if ee_joint_names is None:
-            ee_jids = self.robot.get_leaf_nodes()
-            fixed_jids = []
-
-        # For each branch chain up the transformations across all possible derivatives
-        # Note: if not in branch then 0
+        # Each J_*_per_i[i] is a list[ee] of (6, nv) arrays. Stack into Hessians.
+        num_ees = len(J_plus_per_i[0])
         d2eePos_arr = []
-        for jid in ee_jids: # can be done in parallel
-            
-            # first get the joints in the chain
-            jidChain = sorted(self.robot.get_ancestors_by_id(jid))
-            jidChain.append(jid)
-            jidChainQInds = []
-            for ind in jidChain:
-                jidChainQInds += qinds_to_list(self.robot.get_joint_index_q(ind))
-
-            # first chain up the 1st derivative transforms
-            dXmat_hom_arr = np.zeros((4,4,n+1))
-            for dind in range(n+1): # can be done in parallel
-                # n+1 for standard as well (noting that n+1 will never trigger derivative)
-                dXmat_hom_arr[:,:,dind] = np.eye(4)
-                for ind in jidChain:
-                    currX = self.robot.get_Xmat_hom_Func_by_id(ind)(qeval_arg(ind, q))
-                    dlocal_ind = get_dlocal_info(ind, dind)
-                    if dlocal_ind is not None: # use derivative
-                        dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(ind, dlocal_ind)(qeval_arg(ind, q))
-                        dXmat_hom_arr[:,:,dind] = np.matmul(dXmat_hom_arr[:,:,dind],dcurrX)
-                    else: # use normal transform
-                        dXmat_hom_arr[:,:,dind] = np.matmul(dXmat_hom_arr[:,:,dind],currX)
-
-            # chain up the 1st derivative transforms (version 2 for starting from the leaf)
-            dXmat_hom_arr = np.zeros((4,4,n+1))
-            for dind in range(n+1): # can be done in parallel
-                currId = jid
-                dXmat_hom_arr[:,:,dind] = np.eye(4)
-                while(currId != -1):
-                    dlocal_ind = get_dlocal_info(currId, dind)
-                    if dlocal_ind is not None:
-                        dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
-                    else:
-                        dcurrX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
-                    dXmat_hom_arr[:,:,dind] = np.matmul(dcurrX,dXmat_hom_arr[:,:,dind])
-                    currId = self.robot.get_parent_id(currId)
-
-            # then chain up the 2nd derivative transforms
-            d2Xmat_hom_arr = np.zeros((4,4,n,n))
-            for dind_i in range(n): # can be done in parallel
-                for dind_j in range(n): # can be done in parallel
-                    d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.eye(4)
-                    for ind in jidChain:
-                        dlocal_ind_i = get_dlocal_info(ind, dind_i)
-                        dlocal_ind_j = get_dlocal_info(ind, dind_j)
-                        if (dlocal_ind_i is not None) or (dlocal_ind_j is not None):
-                            if (dlocal_ind_i is not None) and (dlocal_ind_j is not None): # use second derivative
-                                d2currX = self.robot.get_d2Xmat_hom_local_Func_by_id(ind, dlocal_ind_i, dlocal_ind_j)(qeval_arg(ind, q))
-                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],d2currX)
-                            else: # use first derivative values
-                                dlocal_ind = dlocal_ind_i if dlocal_ind_i is not None else dlocal_ind_j
-                                dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(ind, dlocal_ind)(qeval_arg(ind, q))
-                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],dcurrX)
-                        else: # use normal transform
-                            currX = self.robot.get_Xmat_hom_Func_by_id(ind)(qeval_arg(ind, q))
-                            d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2Xmat_hom_arr[:,:,dind_i,dind_j],currX)
-
-            # then chain up the 2nd derivative transforms (version 2 - backward)
-            for dind_i in range(n): # can be done in parallel
-                for dind_j in range(n): # can be done in parallel
-                    currId = jid
-                    d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.eye(4)
-                    while(currId != -1):
-                        dlocal_ind_i = get_dlocal_info(currId, dind_i)
-                        dlocal_ind_j = get_dlocal_info(currId, dind_j)
-                        if (dlocal_ind_i is not None) or (dlocal_ind_j is not None):
-                            if (dlocal_ind_i is not None) and (dlocal_ind_j is not None): # use second derivative
-                                d2currX = self.robot.get_d2Xmat_hom_local_Func_by_id(currId, dlocal_ind_i, dlocal_ind_j)(qeval_arg(currId, q))
-                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
-                            else: # use first derivative values
-                                dlocal_ind = dlocal_ind_i if dlocal_ind_i is not None else dlocal_ind_j
-                                dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
-                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(dcurrX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
-                        else: # use normal transform
-                            currX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
-                            d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
-                        currId = self.robot.get_parent_id(currId)
-
-            # Then extract the end-effector position with the given offset(s)
-            # TODO handle different offsets for different branches
-            d2eePos = np.zeros((6,n,n))
-            for dind_i in range(n): # can be done in parallel
-                for dind_j in range(n): # can be done in parallel
-
-                    # point to the correct transforms
-                    Xmat_hom = dXmat_hom_arr[:,:,n]
-                    dXmat_hom_i = dXmat_hom_arr[:,:,dind_i]
-                    dXmat_hom_j = dXmat_hom_arr[:,:,dind_j]
-                    d2Xmat_hom = d2Xmat_hom_arr[:,:,dind_i,dind_j]
-
-                    # Note: if not in branch then 0
-                    if (dind_i not in jidChainQInds) or (dind_j not in jidChainQInds):
-                        d2eePos[:,dind_i,dind_j] = np.zeros((6,))
-                    
-                    else:
-                        # xyz position is easy
-                        d2eePos_xyz1 = np.matmul(np.asarray(d2Xmat_hom, dtype=np.float64), offsets[0])
-
-                        # roll pitch yaw is a bit more difficult
-                        # note: d/dz of arctan2(y(z),x(z)) = [-x'(z)y(z)+x(z)y'(z)]/[(x(z)^2 + y(z)^2)]
-                        def darctan2(y,x,y_prime,x_prime):
-                            return (-x_prime*y + x*y_prime)/(x*x + y*y)
-                        # then another chain / quotient rule
-                        def quotient_rule(top,bottom,dtop,dbottom):
-                            return (bottom*dtop - top*dbottom) / (bottom*bottom)
-                        def d2arctan2(y,x,y_prime_i,x_prime_i,y_prime_j,x_prime_j,y_prime_prime,x_prime_prime,i,j):
-                            top = -x_prime_i*y + x*y_prime_i
-                            dtop = -x_prime_prime*y + x*y_prime_prime
-                            if (i != j):
-                                dtop = dtop + (-x_prime_i*y_prime_j + x_prime_j*y_prime_i)
-                            bottom = x*x + y*y
-                            dbottom = 2*x*x_prime_j + 2*y*y_prime_j
-                            return quotient_rule(top,bottom,dtop,dbottom)
-                        # in other words for each atan2 we are plugging in Xmat_hom and dXmat_hom at 
-                        # those indicies into the spots as specified by that equation.
-                        # also note that d/dz of sqrt(f(z)) = f'(z)/2sqrt(f(z))
-                        d2eePos_roll = d2arctan2(Xmat_hom[2,1],Xmat_hom[2,2],dXmat_hom_i[2,1],dXmat_hom_i[2,2], \
-                                        dXmat_hom_j[2,1],dXmat_hom_j[2,2],d2Xmat_hom[2,1],d2Xmat_hom[2,2],dind_i,dind_j)
-
-                        pitch_sqrt_term = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
-                        dpitch_sqrt_term_i_top = Xmat_hom[2,2]*dXmat_hom_i[2,2] + Xmat_hom[2,1]*dXmat_hom_i[2,1]
-                        dpitch_sqrt_term_i = dpitch_sqrt_term_i_top/pitch_sqrt_term # note canceled out the 2 in the numer and denom
-                        dpitch_sqrt_term_j_top = Xmat_hom[2,2]*dXmat_hom_j[2,2] + Xmat_hom[2,1]*dXmat_hom_j[2,1]
-                        dpitch_sqrt_term_j = dpitch_sqrt_term_j_top/pitch_sqrt_term # note canceled out the 2 in the numer and denom
-                        # d2pitch_sqrt_term is quotient rule of dpitch_sqrt_term_i
-                        # top = dpitch_sqrt_term_i, bottom = pitch_sqrt_term, dtop = dpitch_sqrt_term_i_top_dj, dbottom = dpitch_sqrt_term_j
-                        dpitch_sqrt_term_i_top_dj = dXmat_hom_j[2,2]*dXmat_hom_i[2,2] + Xmat_hom[2,2]*d2Xmat_hom[2,2] + \
-                                                    dXmat_hom_j[2,1]*dXmat_hom_i[2,1] + Xmat_hom[2,1]*d2Xmat_hom[2,1]
-                        # s = sqrt(g), s'_i = T_i/s with T_i=dpitch_sqrt_term_i_top; s''_ij = d/dq_j(T_i/s),
-                        # so the quotient-rule numerator uses T_i (not s'_i=T_i/s) or the s-scaling is wrong.
-                        d2pitch_sqrt_term = quotient_rule(dpitch_sqrt_term_i_top,pitch_sqrt_term,dpitch_sqrt_term_i_top_dj,dpitch_sqrt_term_j)
-                        d2eePos_pitch = d2arctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom_i[2,0],dpitch_sqrt_term_i, \
-                                         -dXmat_hom_j[2,0],dpitch_sqrt_term_j,-d2Xmat_hom[2,0],d2pitch_sqrt_term,dind_i,dind_j)
-                        d2eePos_yaw = d2arctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom_i[1,0],dXmat_hom_i[0,0], \
-                                        dXmat_hom_j[1,0],dXmat_hom_j[0,0],d2Xmat_hom[1,0],d2Xmat_hom[0,0],dind_i,dind_j)
-                        d2eePos_rpy = np.array([[d2eePos_roll], [d2eePos_pitch], [d2eePos_yaw]], dtype=np.float64)
-
-                        # then stack it up!
-                        d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy))
-                        d2eePos[:,dind_i,dind_j] = d2eePos_col.reshape((6,))
-
-            d2eePos_arr.append(d2eePos)
-
-        # Then for the fixed joints
-        for fjid in fixed_jids:
-            fj = self.robot.get_fixed_joint_by_id(fjid)
-            d2eePos = np.zeros((6,n,n))
-            if fj.parent_name != -1:
-                parent = self.robot.get_joint_by_name(fj.parent_name)
-                # first get the joints in the chain
-                jidChain = sorted(self.robot.get_ancestors_by_id(parent.get_id()))
-                jidChain.append(parent.get_id())
-                jidChainQInds = []
-                for ind in jidChain:
-                    jidChainQInds += qinds_to_list(self.robot.get_joint_index_q(ind))
-
-                # first chain up the 1st derivative transforms
-                dXmat_hom_arr = np.zeros((4,4,n+1))
-                for dind in range(n+1):
-                    dXmat_hom_arr[:,:,dind] = fj.get_transformation_matrix_hom() if dind == n else fj.get_transformation_matrix_hom()
-                    currId = parent.get_id()
-                    while(currId != -1):
-                        dlocal_ind = get_dlocal_info(currId, dind)
-                        if dlocal_ind is not None:
-                            dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
-                        else:
-                            dcurrX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
-                        dXmat_hom_arr[:,:,dind] = np.matmul(dcurrX,dXmat_hom_arr[:,:,dind])
-                        currId = self.robot.get_parent_id(currId)
-
-                # then chain up the 2nd derivative transforms (version 2 - backward)
-                d2Xmat_hom_arr = np.zeros((4,4,n,n))
-                for dind_i in range(n):
-                    for dind_j in range(n):
-                        d2Xmat_hom_arr[:,:,dind_i,dind_j] = fj.get_transformation_matrix_hom()
-                        currId = parent.get_id()
-                        while(currId != -1):
-                            dlocal_ind_i = get_dlocal_info(currId, dind_i)
-                            dlocal_ind_j = get_dlocal_info(currId, dind_j)
-                            if (dlocal_ind_i is not None) or (dlocal_ind_j is not None):
-                                if (dlocal_ind_i is not None) and (dlocal_ind_j is not None):
-                                    d2currX = self.robot.get_d2Xmat_hom_local_Func_by_id(currId, dlocal_ind_i, dlocal_ind_j)(qeval_arg(currId, q))
-                                    d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(d2currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
-                                else:
-                                    dlocal_ind = dlocal_ind_i if dlocal_ind_i is not None else dlocal_ind_j
-                                    dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
-                                    d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(dcurrX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
-                            else:
-                                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
-                                d2Xmat_hom_arr[:,:,dind_i,dind_j] = np.matmul(currX,d2Xmat_hom_arr[:,:,dind_i,dind_j])
-                            currId = self.robot.get_parent_id(currId)
-
-                for dind_i in range(n):
-                    for dind_j in range(n):
-                        Xmat_hom = dXmat_hom_arr[:,:,n]
-                        dXmat_hom_i = dXmat_hom_arr[:,:,dind_i]
-                        dXmat_hom_j = dXmat_hom_arr[:,:,dind_j]
-                        d2Xmat_hom = d2Xmat_hom_arr[:,:,dind_i,dind_j]
-
-                        if (dind_i not in jidChainQInds) or (dind_j not in jidChainQInds):
-                            d2eePos[:,dind_i,dind_j] = np.zeros((6,))
-                        else:
-                            d2eePos_xyz1 = np.matmul(np.asarray(d2Xmat_hom, dtype=np.float64), offsets[0])
-
-                            def quotient_rule(top,bottom,dtop,dbottom):
-                                return (bottom*dtop - top*dbottom) / (bottom*bottom)
-                            def d2arctan2(y,x,y_prime_i,x_prime_i,y_prime_j,x_prime_j,y_prime_prime,x_prime_prime,i,j):
-                                top = -x_prime_i*y + x*y_prime_i
-                                dtop = -x_prime_prime*y + x*y_prime_prime
-                                if (i != j):
-                                    dtop = dtop + (-x_prime_i*y_prime_j + x_prime_j*y_prime_i)
-                                bottom = x*x + y*y
-                                dbottom = 2*x*x_prime_j + 2*y*y_prime_j
-                                return quotient_rule(top,bottom,dtop,dbottom)
-
-                            d2eePos_roll = d2arctan2(Xmat_hom[2,1],Xmat_hom[2,2],dXmat_hom_i[2,1],dXmat_hom_i[2,2], \
-                                            dXmat_hom_j[2,1],dXmat_hom_j[2,2],d2Xmat_hom[2,1],d2Xmat_hom[2,2],dind_i,dind_j)
-
-                            pitch_sqrt_term = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
-                            dpitch_sqrt_term_i_top = Xmat_hom[2,2]*dXmat_hom_i[2,2] + Xmat_hom[2,1]*dXmat_hom_i[2,1]
-                            dpitch_sqrt_term_i = dpitch_sqrt_term_i_top/pitch_sqrt_term
-                            dpitch_sqrt_term_j_top = Xmat_hom[2,2]*dXmat_hom_j[2,2] + Xmat_hom[2,1]*dXmat_hom_j[2,1]
-                            dpitch_sqrt_term_j = dpitch_sqrt_term_j_top/pitch_sqrt_term
-                            dpitch_sqrt_term_i_top_dj = dXmat_hom_j[2,2]*dXmat_hom_i[2,2] + Xmat_hom[2,2]*d2Xmat_hom[2,2] + \
-                                                        dXmat_hom_j[2,1]*dXmat_hom_i[2,1] + Xmat_hom[2,1]*d2Xmat_hom[2,1]
-                            # s = sqrt(g), s'_i = T_i/s with T_i=dpitch_sqrt_term_i_top; s''_ij = d/dq_j(T_i/s),
-                            # so the quotient-rule numerator uses T_i (not s'_i=T_i/s) or the s-scaling is wrong.
-                            d2pitch_sqrt_term = quotient_rule(dpitch_sqrt_term_i_top,pitch_sqrt_term,dpitch_sqrt_term_i_top_dj,dpitch_sqrt_term_j)
-                            d2eePos_pitch = d2arctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom_i[2,0],dpitch_sqrt_term_i, \
-                                             -dXmat_hom_j[2,0],dpitch_sqrt_term_j,-d2Xmat_hom[2,0],d2pitch_sqrt_term,dind_i,dind_j)
-                            d2eePos_yaw = d2arctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom_i[1,0],dXmat_hom_i[0,0], \
-                                            dXmat_hom_j[1,0],dXmat_hom_j[0,0],d2Xmat_hom[1,0],d2Xmat_hom[0,0],dind_i,dind_j)
-                            d2eePos_rpy = np.array([[d2eePos_roll], [d2eePos_pitch], [d2eePos_yaw]], dtype=np.float64)
-
-                            d2eePos_col = np.vstack((d2eePos_xyz1[:3,:],d2eePos_rpy))
-                            d2eePos[:,dind_i,dind_j] = d2eePos_col.reshape((6,))
-
-            d2eePos_arr.append(d2eePos)
+        for ee_idx in range(num_ees):
+            H = np.zeros((6, nv, nv), dtype=np.float64)
+            for i in range(nv):
+                Jp = J_plus_per_i[i][ee_idx]
+                Jm = J_minus_per_i[i][ee_idx]
+                # dJ/dv_i -> H[:, :, i]; rows 3..5 are angle derivatives (still
+                # continuous since rpy branch cuts live in the POSE not its
+                # Jacobian) so no wrap-handling needed at this step.
+                H[:, :, i] = (Jp - Jm) / (2.0 * h)
+            # Symmetrize: analytic d^2/dv_j dv_i = d^2/dv_i dv_j; FD won't
+            # be exact, so average to suppress per-pair noise.
+            H = 0.5 * (H + np.transpose(H, axes=(0, 2, 1)))
+            d2eePos_arr.append(H)
         return d2eePos_arr
     
     def apply_external_forces(self, q, f_in, f_ext):
