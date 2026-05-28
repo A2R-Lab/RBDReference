@@ -1077,155 +1077,127 @@ class RBDReference:
         return q
 
     def end_effector_pose_gradient(self, q, ee_joint_names = None, ee_offsets = None):
-        """Compute the Jacobian (gradient) of the end-effector pose.
+        """Analytic gradient of the end-effector pose w.r.t. generalized velocity v.
+
+        Convention: **d/dv (tangent space)**, matching pinocchio. Output is 6 x nv per
+        end-effector (NOT 6 x nq). For fixed-base robots nq == nv so the shape is
+        unchanged. For floating-base robots nv = 6 + n_joints (spatial twist of the
+        base + joint velocities), versus nq = 7 + n_joints (xyz + quaternion + joint
+        positions). The base block is now standard spatial (omega; v_world) rather
+        than the older non-standard quaternion-component derivatives. Pose is
+        [xyz; rpy] with R = Rz(yaw)Ry(pitch)Rx(roll).
+
+        Algorithm: shared-chain geometric (spatial) Jacobian. One forward-kinematics
+        pass caches every joint's world transform, then each velocity column is
+        filled in O(1) -- O(nv + depth) total -- replacing the per-column FK
+        re-chain (O(nq * depth)) used previously.
 
         Parameters
         ----------
         q : numpy.ndarray
-            N-element vector of joint positions.
-        ee_id : int
-            Index of the end effector.
+            Generalized position. Floating base uses [xyz, quat(xyzw), joints].
+        ee_joint_names : list of str, optional
+            Joint names to use as end-effectors; defaults to the robot leaves.
+        ee_offsets : list, optional
+            Per-end-effector point offsets in the EE joint frame, as homogeneous
+            points [x, y, z, 1]. Currently the first offset is applied to every EE.
 
         Returns
         -------
-        J : numpy.ndarray
-            Gradient of the end-effector pose.
+        list of numpy.ndarray
+            Per end-effector 6 x nv matrix of d(pose)/dv.
         """
         q = self._normalize_kinematics_q(q)
         ee_offsets = self._normalize_ee_offsets(ee_offsets)
-        n = len(q)
+        nv = self.robot.get_num_vel()
+        n_joints = self.robot.get_num_joints()
 
-        # local helper for handling scalar joints and the floating-base root
-        def qinds_to_list(inds):
+        def vinds_for(jid):
+            try:
+                inds = self.robot.get_joint_index_v(jid)
+            except Exception:
+                inds = self.robot.get_joint_index_q(jid)
             if isinstance(inds, (list, tuple, np.ndarray)):
                 return list(inds)
             return [inds]
 
-        def qeval_arg(jid, q):
-            inds = qinds_to_list(self.robot.get_joint_index_q(jid))
-            q_block = np.asarray(q[inds], dtype=np.float64)
-            if q_block.size == 1:
-                return float(q_block[0])
-            return q_block
+        def q_arg(jid):
+            inds = self.robot.get_joint_index_q(jid)
+            if not isinstance(inds, (list, tuple, np.ndarray)):
+                inds = [inds]
+            block = np.asarray(q, dtype=np.float64)[list(inds)]
+            if block.size == 1:
+                return float(block[0])
+            return block
 
-        def get_dlocal_info(jid, dind):
-            inds = qinds_to_list(self.robot.get_joint_index_q(jid))
-            if dind not in inds:
-                return None
-            return inds.index(dind)
+        # one forward-kinematics pass: world transform of every joint
+        Xw = [None] * n_joints
+        for j in range(n_joints):
+            X_local = np.asarray(self.robot.get_Xmat_hom_Func_by_id(j)(q_arg(j)),
+                                 dtype=np.float64)
+            par = self.robot.get_parent_id(j)
+            Xw[j] = X_local if par == -1 else (Xw[par] @ X_local)
 
-        # chain up the transforms (version 1 for starting from the root)
-        def dforward_chain(self, jidChain, dind, q):
-            Xmat_hom = np.eye(4)
-            dXmat_hom = np.eye(4)
-            for ind in jidChain:
-                dlocal_ind = get_dlocal_info(ind, dind)
-                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(qeval_arg(ind, q))
-                if dlocal_ind is not None: # use derivative
-                    dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(ind, dlocal_ind)(qeval_arg(ind, q))
-                    dXmat_hom = np.matmul(dXmat_hom,dcurrX)
-                else: # use normal transform
-                    dXmat_hom = np.matmul(dXmat_hom,currX)
-                Xmat_hom = np.matmul(Xmat_hom,currX)
-            return Xmat_hom, dXmat_hom
+        # E(rpy) maps rpy-rates -> WORLD angular velocity for R = Rz(yaw)Ry(pitch)Rx(roll):
+        #   omega_world = E * [roll_dot; pitch_dot; yaw_dot]
+        # so d(rpy)/dv = E^{-1} * J_omega_world
+        def E_world(R_ee):
+            roll = np.arctan2(R_ee[2, 1], R_ee[2, 2])
+            pitch = np.arctan2(-R_ee[2, 0],
+                               np.sqrt(R_ee[2, 2] * R_ee[2, 2] + R_ee[2, 1] * R_ee[2, 1]))
+            yaw = np.arctan2(R_ee[1, 0], R_ee[0, 0])
+            cy, sy = np.cos(yaw), np.sin(yaw)
+            cp, sp = np.cos(pitch), np.sin(pitch)
+            return np.array([[cy * cp, -sy, 0.0],
+                             [sy * cp,  cy, 0.0],
+                             [-sp,     0.0, 1.0]], dtype=np.float64)
 
-        # chain up the transforms (version 2 for starting from the leaf)
-        def dbackward_chain(self, jid, dind, q, finalXmat_hom = np.eye(4)):
-            currId = jid
-            Xmat_hom = finalXmat_hom
-            dXmat_hom = finalXmat_hom
-            while(currId != -1):
-                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(qeval_arg(currId, q))
-                dcurrX = currX
-                dlocal_ind = get_dlocal_info(currId, dind)
-                if dlocal_ind is not None:
-                    dcurrX = self.robot.get_dXmat_hom_local_Func_by_id(currId, dlocal_ind)(qeval_arg(currId, q))
-                dXmat_hom = np.matmul(dcurrX,dXmat_hom)
-                Xmat_hom = np.matmul(currX,Xmat_hom)
-                currId = self.robot.get_parent_id(currId)
-            return Xmat_hom, dXmat_hom
-        
-        # Extract the end-effector position with the given offset(s)
-        def deePos_col_from_Xmat_hom(Xmat_hom, dXmat_hom, ee_offsets):
-            # Then extract the end-effector position with the given offset(s)
-            # TODO handle different offsets for different branches
+        def jacobian_for_chain(chain_jids, X_ee):
+            p_ee = (X_ee @ ee_offsets[0]).reshape(-1)[:3]
+            R_ee = X_ee[:3, :3]
+            Jv = np.zeros((3, nv), dtype=np.float64)
+            Jw = np.zeros((3, nv), dtype=np.float64)
+            for j in chain_jids:
+                S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+                if S.ndim == 1:
+                    S = S.reshape(-1, 1)
+                R_j = Xw[j][:3, :3]
+                p_j = Xw[j][:3, 3]
+                vinds = vinds_for(j)
+                for c in range(S.shape[1]):
+                    vi = vinds[c] if c < len(vinds) else vinds[-1]
+                    ang_local = S[:3, c]
+                    lin_local = S[3:6, c]
+                    if np.linalg.norm(ang_local) > 0.5:    # rotational DOF
+                        aw = R_j @ ang_local
+                        Jw[:, vi] = aw
+                        Jv[:, vi] = np.cross(aw, p_ee - p_j)
+                    else:                                   # translational DOF
+                        Jv[:, vi] = R_j @ lin_local
+            Einv = np.linalg.inv(E_world(R_ee))
+            return np.vstack([Jv, Einv @ Jw])
 
-            # xyz position is easy
-            deePos_xyz1 = np.matmul(np.asarray(dXmat_hom, dtype=np.float64), ee_offsets[0])
-
-            # roll pitch yaw is a bit more difficult
-            # note: d/dz of arctan2(y(z),x(z)) = [-x'(z)y(z)+x(z)y'(z)]/[(x(z)^2 + y(z)^2)]
-            def darctan2(y,x,y_prime,x_prime):
-                return (-x_prime*y + x*y_prime)/(x*x + y*y)
-            # in other words for each atan2 we are plugging in Xmat_hom and dXmat_hom at 
-            # those indicies into the spots as specified by that equation.
-            # also note that d/dz of sqrt(f(z)) = f'(z)/2sqrt(f(z))
-            deePos_roll = darctan2(Xmat_hom[2,1],Xmat_hom[2,2],dXmat_hom[2,1],dXmat_hom[2,2])
-            pitch_sqrt_term = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
-            dpitch_sqrt_term = (Xmat_hom[2,2]*dXmat_hom[2,2] + Xmat_hom[2,1]*dXmat_hom[2,1])/pitch_sqrt_term # note canceled out the 2 in the numer and denom
-            deePos_pitch = darctan2(-Xmat_hom[2,0],pitch_sqrt_term,-dXmat_hom[2,0],dpitch_sqrt_term)
-            deePos_yaw = darctan2(Xmat_hom[1,0],Xmat_hom[0,0],dXmat_hom[1,0],dXmat_hom[0,0])
-            deePos_rpy = np.array([[deePos_roll], [deePos_pitch], [deePos_yaw]], dtype=np.float64)
-
-            # then stack it up!
-            deePos_col = np.vstack((deePos_xyz1[:3,:],deePos_rpy))
-            return deePos_col
-
-        # Then compute the gradients for each end-effector requested
-        # -> For each branch chain up the transformations across all possible derivatives
-        deePos_arr = []
         ee_jids, fixed_jids = self.select_end_effector_joints(ee_joint_names)
-        # First for the standard joints
+        deePos_arr = []
+
         for jid in ee_jids:
-            # first get the joints in the chain
-            jidChain = sorted(self.robot.get_ancestors_by_id(jid))
-            jidChain.append(jid)
-            jidChainQInds = []
-            for ind in jidChain:
-                jidChainQInds += qinds_to_list(self.robot.get_joint_index_q(ind))
-            # then compute the gradients
-            deePos = None
-            for dind in range(n):
-                # Note: if not in branch then 0
-                if dind not in jidChainQInds:
-                    deePos_col = np.zeros((6,1))
-                    deePos = self.equals_or_hstack(deePos,deePos_col)
-                else:
-                    # chain up the transforms (2 options)
-                    # Xmat_hom, dXmat_hom = dforward_chain(self, jidChain, dind, q)
-                    Xmat_hom, dXmat_hom = dbackward_chain(self, jid, dind, q)
-                    deePos_col = deePos_col_from_Xmat_hom(Xmat_hom, dXmat_hom, ee_offsets)
-                    deePos = self.equals_or_hstack(deePos,deePos_col)
-            deePos_arr.append(deePos)
-        # Then for the fixed joints
+            chain = sorted(self.robot.get_ancestors_by_id(jid)) + [jid]
+            deePos_arr.append(jacobian_for_chain(chain, Xw[jid]))
+
         for fjid in fixed_jids:
             fj = self.robot.get_fixed_joint_by_id(fjid)
+            X_fixed = np.asarray(fj.get_transformation_matrix_hom(), dtype=np.float64)
             if fj.parent_name == -1:
-                deePos = None
-                Xmat_hom = fj.get_transformation_matrix_hom()
-                for _dind in range(n):
-                    deePos_col = deePos_col_from_Xmat_hom(Xmat_hom, np.zeros((4,4)), ee_offsets)
-                    deePos = self.equals_or_hstack(deePos, deePos_col)
+                # EE rigidly attached to the world root: no DOFs in the chain,
+                # gradient is zero (the offset-shifted position is constant).
+                deePos_arr.append(np.zeros((6, nv), dtype=np.float64))
             else:
                 parent = self.robot.get_joint_by_name(fj.parent_name)
-                # first get the joints in the chain
-                jidChain = sorted(self.robot.get_ancestors_by_id(parent.get_id()))
-                jidChain.append(parent.get_id())
-                jidChainQInds = []
-                for ind in jidChain:
-                    jidChainQInds += qinds_to_list(self.robot.get_joint_index_q(ind))
-                # then compute the gradients
-                deePos = None
-                for dind in range(n):
-                    # Note: if not in branch then 0
-                    if dind not in jidChainQInds:
-                        deePos_col = np.zeros((6,1))
-                        deePos = self.equals_or_hstack(deePos,deePos_col)
-                    else:
-                        Xmat_hom, dXmat_hom = dbackward_chain(self, parent.get_id(), dind, q, fj.get_transformation_matrix_hom())
-                        deePos_col = deePos_col_from_Xmat_hom(Xmat_hom, dXmat_hom, ee_offsets)
-                        deePos = self.equals_or_hstack(deePos,deePos_col)
-            deePos_arr.append(deePos)
+                pid = parent.get_id()
+                X_ee = Xw[pid] @ X_fixed
+                chain = sorted(self.robot.get_ancestors_by_id(pid)) + [pid]
+                deePos_arr.append(jacobian_for_chain(chain, X_ee))
+
         return deePos_arr
 
     """
