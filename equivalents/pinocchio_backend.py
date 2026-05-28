@@ -508,22 +508,29 @@ class PinocchioModelAdapter:
         return q
 
     def end_effector_pose_gradient(self, q, target_name: str, offset=None, step: float = 1e-6):
+        """End-effector pose gradient w.r.t. generalized velocity v (TANGENT space).
+
+        Output shape is 6 x nv (matches pinocchio's convention and the project
+        adapter's new d/dv method). Implemented as a central-difference FD on the
+        Lie-group integrator `pin.integrate(q, h*e_i)`, so the floating-base block
+        is the spatial Jacobian (omega; v) in the same v-ordering as the project."""
         if offset is None:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
         q = self._normalize_project_q_for_pose_differences(q)
-        nq = len(q)
-        gradient = np.zeros((6, nq), dtype=np.float64)
+        nv = self.model.nv
+        gradient = np.zeros((6, nv), dtype=np.float64)
 
-        for q_ind in range(nq):
-            q_pos = q.copy()
-            q_neg = q.copy()
-            q_pos[q_ind] += step
-            q_neg[q_ind] -= step
-            q_pos = self._normalize_project_q_for_pose_differences(q_pos)
-            q_neg = self._normalize_project_q_for_pose_differences(q_neg)
+        for v_ind in range(nv):
+            v = np.zeros(nv, dtype=np.float64)
+            v[v_ind] = step
+            q_pos = self._pin_integrate(q, v)
+            q_neg = self._pin_integrate(q, -v)
             pose_pos = self.end_effector_pose(q_pos, target_name, offset=offset)
             pose_neg = self.end_effector_pose(q_neg, target_name, offset=offset)
-            gradient[:, q_ind] = (pose_pos - pose_neg) / (2.0 * step)
+            diff = pose_pos - pose_neg
+            # angle-wrap the rpy rows so finite differences are sane near branch cuts
+            diff[3:6] = ((diff[3:6] + np.pi) % (2.0 * np.pi)) - np.pi
+            gradient[:, v_ind] = diff / (2.0 * step)
         return gradient
 
     def end_effector_pose_hessian(self, q, target_name: str, offset=None, step: float = 1e-5):
