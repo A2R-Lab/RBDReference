@@ -111,10 +111,48 @@ def resolve_robot_descriptions(spec: RobotSpec, candidate: SourceCandidate) -> R
     )
 
 
+def resolve_vendored(spec: RobotSpec, candidate: SourceCandidate) -> ResolvedRobotModel:
+    """Resolve a vendored URDF from `<repo_root>/robot_assets/<robot_id>.urdf`.
+
+    Vendoring avoids pulling the multi-GB `robot_descriptions` package for
+    standard equivalence + bench runs. Provenance is recorded in
+    `robot_assets/URDF_SOURCES.md`. Falls through to the next candidate if
+    the vendored asset is missing.
+    """
+    # Walk up looking for robot_assets/<robot_id>.urdf. Supports both layouts:
+    #   - Parent-repo layout: GRiD/robot_assets/ (the standard developer flow).
+    #   - Submodule-only layout: RBDReference/robot_assets/ (RBDReference used
+    #     standalone without the parent project).
+    start = Path(__file__).resolve().parent
+    vendored_path = None
+    for ancestor in [start, *start.parents]:
+        candidate_path = ancestor / "robot_assets" / f"{spec.robot_id}.urdf"
+        if candidate_path.is_file():
+            vendored_path = candidate_path
+            break
+    if vendored_path is None:
+        raise FileNotFoundError(
+            f"vendored URDF {spec.robot_id}.urdf not found in any ancestor robot_assets/"
+        )
+    return ResolvedRobotModel(
+        robot_id=spec.robot_id,
+        source_kind=candidate.source_kind,
+        description_name=candidate.description_name or spec.robot_id,
+        urdf_path=str(vendored_path),
+        package_path=None,
+        repository_path=None,
+        repository_url=None,
+        revision=None,
+        notes=spec.notes,
+    )
+
+
 def resolve_robot_spec(spec: RobotSpec) -> ResolvedRobotModel:
     failures = []
     for candidate in spec.source_candidates:
         try:
+            if candidate.source_kind == "vendored":
+                return resolve_vendored(spec, candidate)
             if candidate.source_kind == "robot_descriptions":
                 return resolve_robot_descriptions(spec, candidate)
             if candidate.source_kind == "example_robot_data":
