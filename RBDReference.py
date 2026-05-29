@@ -1858,6 +1858,22 @@ class RBDReference:
             c = self._denormalize_v_output(c)
         return (c, v, a, f)
 
+    def _has_mimic_joints(self):
+        """Return True if any actuated joint is a URDF <mimic> joint.
+
+        Used to gate algorithms (minv / aba / forward-dynamics gradient) that
+        need a different reduced-model treatment when mimic joints are
+        present -- the standard ABA `Ia = IA - U U^T / d` recursion uses
+        per-body (S, U, d) that diverge by alpha / alpha^2 factors for mimic
+        joints, and pinocchio handles this via reduced-model constraint
+        projection rather than the `+=` accumulation that suffices for CRBA
+        / RNEA-grad. See OPEN ISSUE on `aba`.
+        """
+        for joint in self.robot.joints:
+            if getattr(joint, "is_mimic", False):
+                return True
+        return False
+
     def minv_bpass(self, q):
         """Backward pass for the Articulated-Body Algorithm to compute inverse inertia.
 
@@ -1871,12 +1887,10 @@ class RBDReference:
         (Minv, F, U, Dinv) : tuple
             Matrices for inverse inertia composition.
         """
-        # Allocate memory
+        # Allocate memory. Size in v-space (nv) is the correct size for the
+        # reduced output matrix; mimic joints don't carry their own v-slot.
         NB = self.robot.get_num_bodies()
-        if self.robot.floating_base:
-            n = NB + 5  # count fb_joint as 6 instead of 1 joint else set n = len(qd)
-        else:
-            n = self.robot.get_num_vel()
+        n = self.robot.get_num_vel()
         Minv = np.zeros((n, n))
         F = np.zeros((n, 6, n))
         U = np.zeros((n, 6))
@@ -1885,32 +1899,33 @@ class RBDReference:
         # set initial IA to I
         IA = copy.deepcopy(self.robot.get_Imats_dict_by_id())
 
-        # # Backward pass
+        # # Backward pass.
+        # Use get_joint_index_v(ind) for matrix indices so the pass works
+        # uniformly across fixed-base, floating-base, and (the indexing parts
+        # of) mimic robots. Mimic-joint reduced-model handling itself is done
+        # in the public `minv` entry by falling back to inv(crba(q)); the
+        # ABA recursion below assumes per-body (U, d) which would need
+        # projection for true reduced-model M^{-1}.
         for ind in range(NB - 1, -1, -1):
             subtreeInds = self.robot.get_subtree_by_id(ind)
-            if self.robot.floating_base:
-                matrix_ind = ind + 5  # use for Minv, F, U, Dinv
-                adj_subtreeInds = list(
-                    np.array(subtreeInds) + 5
-                )  # adjusted for matrix calculation
-            else:
-                matrix_ind = ind
-                adj_subtreeInds = subtreeInds
+            adj_subtreeInds = self._vinds_for_subtree(subtreeInds)
+            matrix_ind = self.robot.get_joint_index_v(ind)
             parent_ind = self.robot.get_parent_id(ind)
             if (
                 parent_ind == -1 and self.robot.floating_base
             ):  # floating base joint check
-                # Compute U, D
+                # Compute U, D over the floating-base 6-wide v-block (matrix_ind is [0..5]).
                 S = self.robot.get_S_by_id(ind)  # np.eye(6) for floating base
-                U[ind : ind + 6, :] = np.matmul(IA[ind], S)
+                U[:6, :] = np.matmul(IA[ind], S)
                 fb_Dinv = np.linalg.inv(
-                    np.matmul(S.transpose(), U[ind : ind + 6, :])
+                    np.matmul(S.transpose(), U[:6, :])
                 )  # vectorized Dinv calc
                 # Update Minv and subtrees - subtree calculation for Minv -= Dinv * S.T * F with clever indexing
-                Minv[ind : ind + 6, ind : ind + 6] = Minv[ind, ind] + fb_Dinv
-                Minv[ind : ind + 6, adj_subtreeInds] -= (
+                Minv[:6, :6] = Minv[0, 0] + fb_Dinv
+                Minv[np.ix_(list(range(6)), adj_subtreeInds)] -= (
                     np.matmul(
-                        np.matmul(fb_Dinv, S), F[ind : ind + 6, :, adj_subtreeInds]
+                        np.matmul(fb_Dinv, S),
+                        F[np.ix_(list(range(6)), list(range(6)), adj_subtreeInds)],
                     )
                 )[-1]
             else:
@@ -1933,12 +1948,8 @@ class RBDReference:
                 # update parent if applicable
                 parent_ind = self.robot.get_parent_id(ind)
                 if parent_ind != -1:
-                    if self.robot.floating_base:
-                        matrix_parent_ind = parent_ind + 5
-                    else:
-                        matrix_parent_ind = parent_ind
-                    inds_q = self.robot.get_joint_index_q(ind)
-                    _q = q[inds_q]
+                    matrix_parent_ind = self.robot.get_joint_index_v(parent_ind)
+                    _q = self.robot.q_for_joint(ind, q)
                     Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
                     # update F
                     for subInd in adj_subtreeInds:
@@ -1957,6 +1968,20 @@ class RBDReference:
                     IA[parent_ind] += IaParent
 
         return Minv, F, U, Dinv
+
+    def _vinds_for_subtree(self, subtreeInds):
+        """Flatten a subtree's joint ids into a list of v-space indices.
+
+        Handles the floating-base root (whose v-index is a 6-wide list).
+        """
+        result = []
+        for s in subtreeInds:
+            vs = self.robot.get_joint_index_v(s)
+            if isinstance(vs, (list, tuple, np.ndarray)):
+                result.extend(list(vs))
+            else:
+                result.append(vs)
+        return result
 
     def minv_fpass(self, q, Minv, F, U, Dinv):
         """Forward pass for the Articulated-Body Algorithm to compute inverse inertia.
@@ -1978,14 +2003,13 @@ class RBDReference:
             Inverse of the joint-space inertia matrix.
         """
         NB = self.robot.get_num_bodies()
-        # # Forward pass
+        # # Forward pass.
+        # Mimic-aware: use the v-space index (get_joint_index_v) and the
+        # mimic-aware q_for_joint helper so the loop runs over all bodies
+        # (including mimics) without ever indexing beyond nv.
         for ind in range(NB):
-            if self.robot.floating_base:
-                matrix_ind = ind + 5
-            else:
-                matrix_ind = ind
-            inds_q = self.robot.get_joint_index_q(ind)
-            _q = q[inds_q]
+            matrix_ind = self.robot.get_joint_index_v(ind)
+            _q = self.robot.q_for_joint(ind, q)
             parent_ind = self.robot.get_parent_id(ind)
             S = self.robot.get_S_by_id(ind)
             Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
@@ -1998,9 +2022,9 @@ class RBDReference:
                 )
             else:
                 if self.robot.floating_base:
-                    F[ind] = np.matmul(S, Minv[ind : ind + 6, ind:])
+                    F[ind] = np.matmul(S, Minv[:6, :])
                 else:
-                    F[ind] = np.outer(S, Minv[ind, :])
+                    F[ind] = np.outer(S, Minv[matrix_ind, :])
 
         return Minv
 
@@ -2019,6 +2043,22 @@ class RBDReference:
         """
         if normalize_input:
             q = self._normalize_q_input(q)
+        # Mimic-aware fast path: the ABA-based recursion below uses per-body
+        # (S, U, d) that diverge by alpha/alpha^2 factors for mimic joints
+        # (see _has_mimic_joints docstring and OPEN ISSUE for `aba`).
+        # Pinocchio's reduced-model inverse is (G^T M_full G)^{-1}, which is
+        # NOT equal to G^T M_full^{-1} G in general -- so the only correct
+        # general handling is to invert the reduced M directly. CRBA already
+        # produces the reduced M (G^T M_full G) via its mimic-aware += pattern,
+        # so for mimic robots we simply invert that.
+        if self._has_mimic_joints():
+            M = self.crba(q, normalize_input=False)
+            Minv = np.linalg.inv(M)
+            if public_output:
+                return self._denormalize_qv_matrix_output(
+                    Minv, row_space="v", col_space="v"
+                )
+            return Minv
         # based on https://www.researchgate.net/publication/343098270_Analytical_Inverse_of_the_Joint_Space_Inertia_Matrix
         # backward pass
         (Minv, F, U, Dinv) = self.minv_bpass(q)
@@ -2313,40 +2353,54 @@ class RBDReference:
             IC = copy.deepcopy(
                 self.robot.get_Imats_dict_by_id()
             )  # composite inertia calculation
+            # Mimic-aware floating-base CRBA: bodies still chain their
+            # composite inertia upward through the body's local transform
+            # (use q_for_joint so mimic joints see the scaled+offset block).
+            # H is assembled with v-space indices via get_joint_index_v and
+            # joint contributions are scaled by their mimic multipliers
+            # (1.0 for non-mimic joints) and accumulated with +=.
             for ind in range(NB - 1, -1, -1):
                 parent_ind = self.robot.get_parent_id(ind)
-                matrix_ind = ind + 5
                 if ind > 0:
-                    _q = q[self.robot.get_joint_index_q(ind)]
+                    _q = self.robot.q_for_joint(ind, q)
                     Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
                     S = self.robot.get_S_by_id(ind)
                     IC[parent_ind] = IC[parent_ind] + np.matmul(
                         np.matmul(Xmat.T, IC[ind]), Xmat
                     )
+                    alpha_i = self._mimic_multiplier(ind)
+                    vi = self.robot.get_joint_index_v(ind)
                     fh = np.matmul(IC[ind], S)
-                    H[matrix_ind, matrix_ind] = np.matmul(S.T, fh)
+                    diag = alpha_i * alpha_i * np.matmul(S.T, fh)
+                    H[vi, vi] += float(np.asarray(diag).reshape(-1)[0])
                     j = ind
                     while self.robot.get_parent_id(j) > 0:
-                        Xmat = self.robot.get_Xmat_Func_by_id(j)(
-                            q[self.robot.get_joint_index_q(j)]
-                        )
+                        _qj = self.robot.q_for_joint(j, q)
+                        Xmat = self.robot.get_Xmat_Func_by_id(j)(_qj)
                         fh = np.matmul(Xmat.T, fh)
                         j = self.robot.get_parent_id(j)
                         S = self.robot.get_S_by_id(j)
-                        H[matrix_ind, j + 5] = np.matmul(fh.T, S)
-                        H[j + 5, matrix_ind] = H[matrix_ind, j + 5]
+                        alpha_j = self._mimic_multiplier(j)
+                        vj = self.robot.get_joint_index_v(j)
+                        contribution = alpha_i * alpha_j * float(
+                            np.asarray(np.matmul(fh.T, S)).reshape(-1)[0]
+                        )
+                        # Symmetric: both halves contribute to (v_i, v_j) and
+                        # (v_j, v_i); when v_i == v_j (mimic-ancestor share)
+                        # the cell correctly accumulates twice.
+                        H[vi, vj] += contribution
+                        H[vj, vi] += contribution
                     # # treat floating base 6 dof joint
-                    inds_q = self.robot.get_joint_index_q(j)
-                    _q = q[inds_q]
-                    Xmat = self.robot.get_Xmat_Func_by_id(j)(_q)
+                    _qroot = self.robot.q_for_joint(j, q)
+                    Xmat = self.robot.get_Xmat_Func_by_id(j)(_qroot)
                     S = np.eye(6)
                     fh = np.matmul(Xmat.T, fh)
-                    H[matrix_ind, :6] = np.matmul(fh.T, S)
-                    H[:6, matrix_ind] = H[matrix_ind, :6].T
+                    cross = alpha_i * np.matmul(fh.T, S).reshape(-1)
+                    H[vi, :6] += cross
+                    H[:6, vi] += cross
                 else:
                     ind = 0
-                    inds_q = self.robot.get_joint_index_q(ind)
-                    _q = q[inds_q]
+                    _q = self.robot.q_for_joint(ind, q)
                     Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
                     S = self.robot.get_S_by_id(ind)
                     parent_ind = self.robot.get_parent_id(ind)
@@ -2363,13 +2417,19 @@ class RBDReference:
             H[6:, :6] = np.transpose(H[:6, 6:])
         else:
             # # Fixed base implmentation of CRBA
-            n = len(q)
+            NB = self.robot.get_num_bodies()
+            n = self.robot.get_num_vel()
             IC = copy.deepcopy(
                 self.robot.get_Imats_dict_by_id()
             )  # composite inertia calculation
-            for ind in range(n - 1, -1, -1):
+            # IA-up-the-chain: each body's inertia (mimic or not) still
+            # composes upward via the body's own X_local. Loop over bodies,
+            # use the mimic-aware q_for_joint helper so a mimic joint sees
+            # `multiplier * q[target] + offset` in its transform.
+            for ind in range(NB - 1, -1, -1):
                 parent_ind = self.robot.get_parent_id(ind)
-                Xmat = self.robot.get_Xmat_Func_by_id(ind)(q[ind])
+                _q = self.robot.q_for_joint(ind, q)
+                Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
 
                 if parent_ind != -1:
                     IC[parent_ind] = IC[parent_ind] + np.matmul(
@@ -2378,22 +2438,40 @@ class RBDReference:
 
             H = np.zeros((n, n))
 
-            for ind in range(n):
+            # Mimic-aware H assembly. Each joint i contributes its column
+            # scaled by alpha_i (the URDF mimic multiplier; 1.0 for non-mimic);
+            # H[v_i, v_j] = alpha_i * alpha_j * S_i^T (chain) S_j. Both the
+            # mimic and the mimicked write to the same v-slot, so we ACCUMULATE
+            # with += (the symmetric H[v_j, v_i] also accumulates, avoiding
+            # double-count when v_i == v_j).
+            for ind in range(NB):
+                vi = self.robot.get_joint_index_v(ind)
+                alpha_i = self._mimic_multiplier(ind)
                 S = self.robot.get_S_by_id(ind)
                 fh = np.matmul(IC[ind], S)
-                H[ind, ind] = np.matmul(S.T, fh)
+                diag = alpha_i * alpha_i * np.matmul(S.T, fh)
+                H[vi, vi] += float(np.asarray(diag).reshape(-1)[0])
                 j = ind
 
                 while self.robot.get_parent_id(j) > -1:
-                    Xmat = self.robot.get_Xmat_Func_by_id(j)(q[j])
-                    
+                    _qj = self.robot.q_for_joint(j, q)
+                    Xmat = self.robot.get_Xmat_Func_by_id(j)(_qj)
                     fh = np.matmul(Xmat.T, fh) # add an addition Xmat.T everytime
                     j = self.robot.get_parent_id(j)
-
-                    
                     S = self.robot.get_S_by_id(j)
-                    H[ind, j] = np.matmul(S.T, fh)
-                    H[j, ind] = H[ind, j]
+                    alpha_j = self._mimic_multiplier(j)
+                    vj = self.robot.get_joint_index_v(j)
+                    contribution = alpha_i * alpha_j * float(
+                        np.asarray(np.matmul(S.T, fh)).reshape(-1)[0]
+                    )
+                    # Off-diagonal chain pair (ind, j) represents the
+                    # symmetric M_full[ind,j] + M_full[j,ind] coupling. Both
+                    # halves contribute to the reduced model H[v_i, v_j] and
+                    # H[v_j, v_i]. When v_i == v_j (mimic-ancestor sharing a
+                    # v-slot) both writes land in the same cell, so the cell
+                    # correctly accumulates 2 * alpha_i * alpha_j * (S^T fh).
+                    H[vi, vj] += contribution
+                    H[vj, vi] += contribution
 
         return self._denormalize_qv_matrix_output(H, row_space="v", col_space="v")
 
@@ -2426,28 +2504,25 @@ class RBDReference:
         gravity_vec = np.zeros((6))
         gravity_vec[5] = -GRAVITY # a_base is gravity vec
 
+        # Mimic-aware: idx is the joint's v-slot (a list for the floating-base
+        # root, a scalar otherwise). Mimic joints SHARE their target's v-slot,
+        # so writes to `[:, idx, ind]` use `+=` with an alpha-multiplier so
+        # that both the mimic and the mimicked accumulate cleanly; reads of
+        # qd[idx] / a-parent likewise scale by alpha (the URDF mimic relation
+        # v_full = alpha * v_target).
         for ind in range(NB):
             parent_ind = self.robot.get_parent_id(ind)
-            if self.robot.floating_base: 
-                # dc_dqd gets idx
-                if parent_ind != -1:
-                    idx = ind + 5
-                    parent_idx = parent_ind + 5
-                else:
-                    idx = [0,1,2,3,4,5]
-            else:
-                idx = ind
-                parent_idx = parent_ind
+            idx = self.robot.get_joint_index_v(ind)
+            alpha = self._mimic_multiplier(ind)
             # Xmat access sequence
-            inds_q = self.robot.get_joint_index_q(ind)
-            _q = q[inds_q]
+            _q = self.robot.q_for_joint(ind, q)
             Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
             S = self.robot.get_S_by_id(ind)
             # dv_du = X * dv_du_parent + (if c == ind){mxS(Xvp)}
             if parent_ind != -1: # note that v_base is zero so dv_du parent contribution is 0
                 dv_dq[:,:,ind] = np.matmul(Xmat,dv_dq[:,:,parent_ind])
-                dv_dq[:,idx,ind] += self._mxS(S,np.matmul(Xmat,v[:,parent_ind])) # replace with new mxS
-                
+                dv_dq[:,idx,ind] += alpha * self._mxS(S,np.matmul(Xmat,v[:,parent_ind])) # replace with new mxS
+
             # da_du = x*da_du_parent + mxS_onCols(dv_du)*qd + (if c == ind){mxS(Xap)}
             if parent_ind != -1: # note that a_base is constant gravity so da_du parent contribution is 0
                 da_dq[:,:,ind] = np.matmul(Xmat,da_dq[:,:,parent_ind])
@@ -2457,27 +2532,28 @@ class RBDReference:
                     for ii in range(len(idx)):
                         da_dq[:,c,ii] += self._mxS(S[ii],dv_dq[:,c,ii],qd[ii]) # dv/du x S*q
                 else:
-                    da_dq[:,c,ind] += self._mxS(S,dv_dq[:,c,ind],qd[idx]) # replace with new mxS
-                    
+                    # qd[idx] for this body is the (alpha-scaled) joint velocity.
+                    da_dq[:,c,ind] += self._mxS(S,dv_dq[:,c,ind], alpha * qd[idx]) # replace with new mxS
+
             if parent_ind != -1: # note that a_base is just gravity
-                da_dq[:,idx,ind] += self._mxS(S,np.matmul(Xmat,a[:,parent_ind])) # replace with new mxS
+                da_dq[:,idx,ind] += alpha * self._mxS(S,np.matmul(Xmat,a[:,parent_ind])) # replace with new mxS
             else:
                 if self.robot.floating_base:
                     root_gravity = np.matmul(np.linalg.inv(Xmat), gravity_vec)
                 else:
                     root_gravity = np.matmul(Xmat, gravity_vec)
-                da_dq[:,idx,ind] += self._mxS(S,root_gravity) # replace with new mxS 
+                da_dq[:,idx,ind] += alpha * self._mxS(S,root_gravity) # replace with new mxS
             # df_du = I*da_du + fx_onCols(dv_du)*Iv + fx(v)*I*dv_du
             Imat = self.robot.get_Imat_by_id(ind)
-            
+
             df_dq[:,:,ind] = np.matmul(Imat,da_dq[:,:,ind])# puts 0.0014 instead of -0.0014 in df_dq[2,7,7]
             Iv = np.matmul(Imat,v[:,ind])
-       
+
             for c in range(n):
-               
+
                 df_dq[:,c,ind] += self.fxv(dv_dq[:,c,ind],Iv)
                 df_dq[:,c,ind] += self.fxv(v[:,ind],np.matmul(Imat,dv_dq[:,c,ind]))
-    
+
         return (dv_dq, da_dq, df_dq)
 
     def rnea_grad_fpass_dqd(self, q, qd, v):
@@ -2500,52 +2576,46 @@ class RBDReference:
         da_dqd = np.zeros((6,n,NB))
         df_dqd = np.zeros((6,n,NB))
 
-        # forward pass
+        # forward pass.
+        # Mimic-aware: same idiom as rnea_grad_fpass_dq above. inds_v / idx
+        # is the joint's v-slot (a list for the floating-base root); mimic
+        # joints fold into their target's v-slot via `+=` scaled by alpha,
+        # and reads of qd[idx] / S contributions likewise scale by alpha.
         for ind in range(NB):
             parent_ind = self.robot.get_parent_id(ind)
-            if self.robot.floating_base:
-                # dc_dqd gets idx, special matrix indexing
-                if parent_ind != -1:
-                    idx = ind + 5
-                    parent_idx = parent_ind + 5
-                else:
-                    idx = [0,1,2,3,4,5]
-            else: 
-                idx = ind
-                parent_idx = parent_ind
-            # Xmat access sequence
-            inds_v = self.robot.get_joint_index_v(ind) #joint index for all joints without quaternion (does special joint indexing by itself)
-            inds_q = self.robot.get_joint_index_q(ind) #joint index for all joints
-            _q = q[inds_q]
+            idx = self.robot.get_joint_index_v(ind)
+            inds_v = idx  # legacy local name kept for parity with the original code
+            alpha = self._mimic_multiplier(ind)
+            _q = self.robot.q_for_joint(ind, q)
             Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
             S = self.robot.get_S_by_id(ind)
-            # dv_du = X * dv_du_parent + (if c == ind){S}
+            # dv_du = X * dv_du_parent + (if c == ind){alpha * S}
             if parent_ind != -1: # note that v_base is zero so dv_du parent contribution is 0
                 dv_dqd[:,:,ind] = np.matmul(Xmat,dv_dqd[:,:,parent_ind])
-            dv_dqd[:,inds_v,ind] += np.squeeze(np.array(S)) # added squeeze and mxS
+            dv_dqd[:,inds_v,ind] += alpha * np.squeeze(np.array(S)) # added squeeze and mxS
             # da_du = x*da_du_parent + mxS_onCols(dv_du)*qd + (if c == ind){mxS(v)}
             if parent_ind != -1: # note that a_base is constant gravity so da_du parent contribution is 0
                 da_dqd[:,:,ind] = np.matmul(Xmat,da_dqd[:,:,parent_ind])
-            for c in range(n): 
+            for c in range(n):
                 if parent_ind == -1 and self.robot.floating_base:
                     for ii in range(len(idx)):
-                        da_dqd[:,c,ind] += self._mxS(S[ii],dv_dqd[:,c,ind],qd[ii]) 
+                        da_dqd[:,c,ind] += self._mxS(S[ii],dv_dqd[:,c,ind],qd[ii])
                 else:
-                    da_dqd[:,c,ind] += self._mxS(S,dv_dqd[:,c,ind],qd[idx]) 
+                    da_dqd[:,c,ind] += self._mxS(S,dv_dqd[:,c,ind], alpha * qd[idx])
 
-            
-            da_dqd[:,idx,ind] += self._mxS(S,v[:,ind]) 
+
+            da_dqd[:,idx,ind] += alpha * self._mxS(S,v[:,ind])
             # df_du = I*da_du + fx_onCols(dv_du)*Iv + fx(v)*I*dv_du
             Imat = self.robot.get_Imat_by_id(ind)
-            
+
             df_dqd[:,:,ind] = np.matmul(Imat,da_dqd[:,:,ind])
             Iv = np.matmul(Imat,v[:,ind])
             for c in range(n):
-                
+
                 df_dqd[:,c,ind] += self.fxv(dv_dqd[:,c,ind],Iv)
                 df_dqd[:,c,ind] += self.fxv(v[:,ind],np.matmul(Imat,dv_dqd[:,c,ind]))
-        
-        
+
+
         return (dv_dqd, da_dqd, df_dqd)
 
     def rnea_grad_bpass_dq(self, q, f, df_dq):
@@ -2566,39 +2636,29 @@ class RBDReference:
         NB = self.robot.get_num_bodies()
         n = self.robot.get_num_vel() # assuming len(q) = len(qd)
         dc_dq = np.zeros((n,n))
-        
+
+        # Mimic-aware: idx is the joint's v-slot; mimic joints share their
+        # target's slot, so both the dc_dq row-write and the per-joint S^T
+        # term must `+=` with the alpha multiplier so mimic and mimicked
+        # contributions fold together correctly.
         for ind in range(NB-1,-1,-1):
             parent_ind = self.robot.get_parent_id(ind)
+            idx = self.robot.get_joint_index_v(ind)
+            alpha = self._mimic_multiplier(ind)
 
-            if self.robot.floating_base:
-                # dc_dqd gets idx
-                if parent_ind != -1:
-                    idx = ind + 5
-                    parent_idx = parent_ind + 5
-                else:
-                    idx = [0,1,2,3,4,5]
-            else:
-                idx = ind
-                parent_idx = parent_ind
-            
-            # dc_du is S^T*df_du
+            # dc_du is alpha * S^T * df_du (accumulate on shared mimic slots)
             S = self.robot.get_S_by_id(ind)
-            if parent_ind == -1 and self.robot.floating_base:
-                dc_dq[idx,:] = np.matmul(np.transpose(S),df_dq[:,:,ind])
-            else:
-                dc_dq[idx,:]  = np.matmul(np.transpose(S),df_dq[:,:,ind]) 
-            # df_du_parent += X^T*df_du + (if ind == c){X^T*fxS(f)}
+            dc_dq[idx,:] += alpha * np.matmul(np.transpose(S),df_dq[:,:,ind])
+            # df_du_parent += X^T*df_du + (if ind == c){alpha * X^T*fxS(f)}
             if parent_ind != -1:
-                # Xmat access sequence
-                inds_q = self.robot.get_joint_index_q(ind)
-                _q = q[inds_q]
+                _q = self.robot.q_for_joint(ind, q)
                 Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
                 df_dq[:,:,parent_ind] += np.matmul(np.transpose(Xmat),df_dq[:,:,ind])
                 delta_dq = np.matmul(np.transpose(Xmat),self.fxS(S,f[:,ind]))
                 for entry in range(6):
-                    df_dq[entry,idx,parent_ind] += delta_dq[entry]
-                    
-            
+                    df_dq[entry,idx,parent_ind] += alpha * delta_dq[entry]
+
+
         return dc_dq
 
     def rnea_grad_bpass_dqd(self, q, df_dqd, USE_VELOCITY_DAMPING = False):
@@ -2619,35 +2679,24 @@ class RBDReference:
         NB = self.robot.get_num_bodies()
         n = self.robot.get_num_vel() # len(qd) always
         dc_dqd = np.zeros((n,n))
-        
+
+        # Mimic-aware: idx is the v-slot (a list for the floating-base root).
+        # Mimic joints share their target's slot, so the dc_dqd row-write
+        # uses += with the alpha multiplier.
         for ind in range(NB-1,-1,-1):
             parent_ind = self.robot.get_parent_id(ind)
-
-            if self.robot.floating_base:
-                # dc_dqd gets idx, special matrix indexing
-                if parent_ind != -1:
-                    idx = ind + 5
-                    parent_idx = parent_ind + 5
-                else:
-                    idx = [0,1,2,3,4,5]
-            else: 
-                idx = ind
-                parent_idx = parent_ind
-            # dc_du is S^T*df_du
+            idx = self.robot.get_joint_index_v(ind)
+            alpha = self._mimic_multiplier(ind)
+            # dc_du is alpha * S^T * df_du
             S = self.robot.get_S_by_id(ind)
-            # if parent_ind == -1 and self.robot.floating_base:
-            #     for ii in range(len(idx)):
-            #         dc_dqd[ii,:] = np.matmul(np.transpose(S[ii]),df_dqd[:,:,ii])
-            # else:
-            dc_dqd[idx,:] = np.matmul(np.transpose(S),df_dqd[:,:,ind])
+            dc_dqd[idx,:] += alpha * np.matmul(np.transpose(S),df_dqd[:,:,ind])
             # df_du_parent += X^T*df_du
             if parent_ind != -1:
-                inds_q = self.robot.get_joint_index_q(ind)
-                _q = q[inds_q]
+                _q = self.robot.q_for_joint(ind, q)
                 Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
-                df_dqd[:,:,parent_ind] += np.matmul(np.transpose(Xmat),df_dqd[:,:,ind]) 
+                df_dqd[:,:,parent_ind] += np.matmul(np.transpose(Xmat),df_dqd[:,:,ind])
 
-            
+
         # add in the damping and simplify this expression later
         # suggestion: have a getter function that automatically indexes and allocates for floating base functions
         if USE_VELOCITY_DAMPING:
@@ -2656,7 +2705,7 @@ class RBDReference:
                     dc_dqd[ind:ind+5, ind:ind+5] += self.robot.get_damping_by_id(ind)
                 else:
                     dc_dqd[ind,ind] += self.robot.get_damping_by_id(ind)
-        
+
         return dc_dqd
 
     def rnea_grad(

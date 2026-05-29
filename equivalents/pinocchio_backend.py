@@ -262,17 +262,10 @@ class PinocchioModelAdapter:
         qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
         qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
         pin.computeRNEADerivatives(self.model, self.data, q_pin, qd_pin, qdd_pin)
-        dtau_dq = reduce_pinocchio_q_jacobian_to_project(
-            np.asarray(self.data.dtau_dq, dtype=np.float64),
-            self.base_mode,
-            q,
-            joint_names=self.project_scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
-        dtau_dv = normalize_matrix(np.asarray(self.data.dtau_dv, dtype=np.float64))
-        # For mimic robots, fold both axes (mimic columns into target cols,
-        # mimic rows into target rows) on the v-space matrix; same on the
-        # q-space matrix.
+        # For mimic robots fold both axes (mimic columns into target cols,
+        # mimic rows into target rows) BEFORE the q-Jacobian chain reduction;
+        # otherwise the matrix carries pinocchio-full v-width which doesn't
+        # match the project nq layout expected by reduce_pinocchio_q_jacobian.
         if self.mimic_info is not None and not self.mimic_info.is_empty():
             dtau_dq = self._reduce_pin_matrix_to_project(
                 np.asarray(self.data.dtau_dq, dtype=np.float64),
@@ -282,6 +275,15 @@ class PinocchioModelAdapter:
                 np.asarray(self.data.dtau_dv, dtype=np.float64),
                 axes_to_reduce=[(0, "v"), (1, "v")],
             )
+        else:
+            dtau_dq = reduce_pinocchio_q_jacobian_to_project(
+                np.asarray(self.data.dtau_dq, dtype=np.float64),
+                self.base_mode,
+                q,
+                joint_names=self.project_scalar_joint_names,
+                joint_types_by_name=self.urdf_joint_types_by_name,
+            )
+            dtau_dv = normalize_matrix(np.asarray(self.data.dtau_dv, dtype=np.float64))
         return (dtau_dq, dtau_dv)
 
     def idsva_so_body_frame(self, q, qd, qdd):
@@ -369,14 +371,10 @@ class PinocchioModelAdapter:
         qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
         u_pin = self._expand_project_v_to_pin(np.asarray(u, dtype=np.float64))
         pin.computeABADerivatives(self.model, self.data, q_pin, qd_pin, u_pin)
-        ddq_dq = reduce_pinocchio_q_jacobian_to_project(
-            np.asarray(self.data.ddq_dq, dtype=np.float64),
-            self.base_mode,
-            q,
-            joint_names=self.project_scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
-        ddq_dv = normalize_matrix(np.asarray(self.data.ddq_dv, dtype=np.float64))
+        # For mimic robots fold both axes (mimic columns into target cols,
+        # mimic rows into target rows) BEFORE the q-Jacobian chain reduction;
+        # otherwise the matrix carries pinocchio-full v-width which doesn't
+        # match the project nq layout expected by reduce_pinocchio_q_jacobian.
         if self.mimic_info is not None and not self.mimic_info.is_empty():
             ddq_dq = self._reduce_pin_matrix_to_project(
                 np.asarray(self.data.ddq_dq, dtype=np.float64),
@@ -386,6 +384,15 @@ class PinocchioModelAdapter:
                 np.asarray(self.data.ddq_dv, dtype=np.float64),
                 axes_to_reduce=[(0, "v"), (1, "v")],
             )
+        else:
+            ddq_dq = reduce_pinocchio_q_jacobian_to_project(
+                np.asarray(self.data.ddq_dq, dtype=np.float64),
+                self.base_mode,
+                q,
+                joint_names=self.project_scalar_joint_names,
+                joint_types_by_name=self.urdf_joint_types_by_name,
+            )
+            ddq_dv = normalize_matrix(np.asarray(self.data.ddq_dv, dtype=np.float64))
         return (ddq_dq, ddq_dv)
 
     # ----- Time integrators (canonical via pinocchio.integrate / dIntegrate) -----
