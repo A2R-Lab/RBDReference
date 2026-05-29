@@ -1122,13 +1122,13 @@ class RBDReference:
             return [inds]
 
         def q_arg(jid):
-            inds = self.robot.get_joint_index_q(jid)
-            if not isinstance(inds, (list, tuple, np.ndarray)):
-                inds = [inds]
-            block = np.asarray(q, dtype=np.float64)[list(inds)]
-            if block.size == 1:
-                return float(block[0])
-            return block
+            # Use the mimic-aware helper so a mimic joint's transform sees
+            # `multiplier * q[mimicked] + offset`, exactly as the URDF prescribes.
+            return self.robot.q_for_joint(jid, q)
+
+        def mimic_scale(jid):
+            joint = self.robot.get_joint_by_id(jid)
+            return joint.get_mimic_multiplier() if getattr(joint, "is_mimic", False) else 1.0
 
         # one forward-kinematics pass: world transform of every joint
         Xw = [None] * n_joints
@@ -1164,16 +1164,22 @@ class RBDReference:
                 R_j = Xw[j][:3, :3]
                 p_j = Xw[j][:3, 3]
                 vinds = vinds_for(j)
+                # Mimic joints fold into the mimicked joint's v-column scaled
+                # by their multiplier; accumulate (not assign) so the proper
+                # column gets BOTH the mimicked joint's direct contribution
+                # AND the mimic joint's chain contribution (when both happen
+                # to lie in the same chain).
+                scale = mimic_scale(j)
                 for c in range(S.shape[1]):
                     vi = vinds[c] if c < len(vinds) else vinds[-1]
                     ang_local = S[:3, c]
                     lin_local = S[3:6, c]
                     if np.linalg.norm(ang_local) > 0.5:    # rotational DOF
                         aw = R_j @ ang_local
-                        Jw[:, vi] = aw
-                        Jv[:, vi] = np.cross(aw, p_ee - p_j)
+                        Jw[:, vi] += scale * aw
+                        Jv[:, vi] += scale * np.cross(aw, p_ee - p_j)
                     else:                                   # translational DOF
-                        Jv[:, vi] = R_j @ lin_local
+                        Jv[:, vi] += scale * (R_j @ lin_local)
             Einv = np.linalg.inv(E_world(R_ee))
             return np.vstack([Jv, Einv @ Jw])
 
@@ -1329,13 +1335,13 @@ class RBDReference:
             return [inds]
 
         def q_arg(jid):
-            inds = self.robot.get_joint_index_q(jid)
-            if not isinstance(inds, (list, tuple, np.ndarray)):
-                inds = [inds]
-            block = np.asarray(q, dtype=np.float64)[list(inds)]
-            if block.size == 1:
-                return float(block[0])
-            return block
+            # Mimic-aware: feeds the joint's transform the value the URDF
+            # mimic relation prescribes (`multiplier * q[target] + offset`).
+            return self.robot.q_for_joint(jid, q)
+
+        def mimic_scale(jid):
+            joint = self.robot.get_joint_by_id(jid)
+            return joint.get_mimic_multiplier() if getattr(joint, "is_mimic", False) else 1.0
 
         # one forward-kinematics pass: world transform of every joint
         Xw = [None] * n_joints
@@ -1485,78 +1491,69 @@ class RBDReference:
                 Ti[:3, 3] = -Rt @ T[:3, 3]
                 return Ti
 
-            # Map each DOF index i (in v-space) to (block_idx, column_idx) for the chain.
-            dof_to_block = {}
-            block_dof_lists = []  # block_dof_lists[a] = list of v-indices in joint chain_jids[a]
+            # Map each chain block to (vi, c, scale) entries. A v-index can
+            # appear in MULTIPLE blocks when the chain contains a mimic joint
+            # and its mimicked target (their contributions both fold into the
+            # same column with the multiplier scaling).
+            block_entries = []  # block_entries[a] = list of (vi, c, scale)
+            vi_to_blocks = {}   # vi -> list of (a, c, scale)
             for a, j in enumerate(chain_jids):
                 S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
                 if S.ndim == 1:
                     S = S.reshape(-1, 1)
                 vinds = vinds_for(j)
-                this_dofs = []
+                scale = mimic_scale(j)
+                this_entries = []
                 for c in range(S.shape[1]):
                     vi = vinds[c] if c < len(vinds) else vinds[-1]
-                    dof_to_block[vi] = (a, c)
-                    this_dofs.append(vi)
-                block_dof_lists.append(this_dofs)
-            chain_dofs = sorted(dof_to_block.keys())
+                    this_entries.append((vi, c, scale))
+                    vi_to_blocks.setdefault(vi, []).append((a, c, scale))
+                block_entries.append(this_entries)
+            chain_dofs = sorted(vi_to_blocks.keys())
 
-            # First derivatives dM/dv_i = L[a] @ A_i_local @ R_post[a]
-            # for i in joint a, local column c.
-            dM = {}  # dM[i] = 4x4
+            # First derivatives dM/dv_i = sum_{(a, c, scale) for i} scale * L[a] @ A_local @ R_post[a]
+            dM = {i: np.zeros((4, 4), dtype=np.float64) for i in chain_dofs}
             for i in chain_dofs:
-                a, c = dof_to_block[i]
-                A = A_for_dof(chain_jids[a], c)
-                dM[i] = L[a] @ A @ R_post[a]
+                for a, c, scale in vi_to_blocks[i]:
+                    A = A_for_dof(chain_jids[a], c)
+                    dM[i] += scale * (L[a] @ A @ R_post[a])
 
-            # Second derivatives d2M/dv_i dv_j.
-            # We'll compute it directly using L, R_post, and a "between" product.
-            #
-            # For i in block a, j in block b, with a <= b in chain order:
-            #   - a == b (same joint): d2M = L[a] @ B(c_i, c_j) @ R_post[a]
-            #     where B is the joint's intra-joint second-derivative tensor.
-            #   - a < b: d2M = L[a] @ A_i @ P_a_to_b @ A_j @ R_post[b]
-            #     where P_a_to_b = X_chain_local[a+1] @ X_chain_local[a+2] @ ... @ X_chain_local[b]
-            # Note: For (i, j) in different blocks with a < b, symmetry gives
-            # the same result for (j, i).
+            # Second derivatives d2M/dv_i dv_j follow the product rule across
+            # all (a, c, s_i) for i and (b, c', s_j) for j. With at most one
+            # block per non-mimic vi and a mimic joint adding a second block,
+            # we just sum the per-pair contributions.
             d2M = np.zeros((len(chain_dofs), len(chain_dofs), 4, 4), dtype=np.float64)
             chain_dof_index = {vi: idx for idx, vi in enumerate(chain_dofs)}
 
-            # Precompute between products P_ab for a <= b.
-            # P_a_to_b for a < b: from L[a]^{-1} @ L[b] (this is X_{a+1}*...*X_b).
-            # But Delta is identity at v=0, so L[b] = L[a] @ X_{a+1} @ ... @ X_b.
-            # Therefore X_{a+1} @ ... @ X_b = se3_inv(L[a]) @ L[b].
-            # Precompute Linv[a].
+            # Precompute between products P_ab for a <= b via L / Linv.
             Linv = [se3_inv(L[a]) for a in range(n_chain)]
 
-            for ii, i in enumerate(chain_dofs):
-                a, c_i = dof_to_block[i]
-                for jj, j in enumerate(chain_dofs):
-                    b, c_j = dof_to_block[j]
-                    if a == b:
-                        if c_i <= c_j:
-                            B = B_for_dofpair(chain_jids[a], c_i, c_j)
-                            M2 = L[a] @ B @ R_post[a]
-                        else:
-                            # by symmetry, just copy from (c_j, c_i)
-                            B = B_for_dofpair(chain_jids[a], c_j, c_i)
-                            M2 = L[a] @ B @ R_post[a]
-                        d2M[ii, jj] = M2
+            def pair_contribution(a, c_i, b, c_j):
+                """4x4 contribution from block-pair (a, b) with local-cols (c_i, c_j).
+                Caller multiplies in the (s_i * s_j) scaling.
+                """
+                if a == b:
+                    if c_i <= c_j:
+                        B = B_for_dofpair(chain_jids[a], c_i, c_j)
                     else:
-                        # different blocks; order them.
-                        if a < b:
-                            ap, bp = a, b
-                            i_prox, i_dist = i, j
-                            c_prox, c_dist = c_i, c_j
-                        else:
-                            ap, bp = b, a
-                            i_prox, i_dist = j, i
-                            c_prox, c_dist = c_j, c_i
-                        A_prox = A_for_dof(chain_jids[ap], c_prox)
-                        A_dist = A_for_dof(chain_jids[bp], c_dist)
-                        P_a_to_b = Linv[ap] @ L[bp]
-                        M2 = L[ap] @ A_prox @ P_a_to_b @ A_dist @ R_post[bp]
-                        d2M[ii, jj] = M2
+                        B = B_for_dofpair(chain_jids[a], c_j, c_i)
+                    return L[a] @ B @ R_post[a]
+                if a < b:
+                    A_prox = A_for_dof(chain_jids[a], c_i)
+                    A_dist = A_for_dof(chain_jids[b], c_j)
+                    return L[a] @ A_prox @ (Linv[a] @ L[b]) @ A_dist @ R_post[b]
+                # a > b: same as (b, a) by chain-order symmetry of the product
+                A_prox = A_for_dof(chain_jids[b], c_j)
+                A_dist = A_for_dof(chain_jids[a], c_i)
+                return L[b] @ A_prox @ (Linv[b] @ L[a]) @ A_dist @ R_post[a]
+
+            for ii, i in enumerate(chain_dofs):
+                for jj, j in enumerate(chain_dofs):
+                    acc = np.zeros((4, 4), dtype=np.float64)
+                    for (a, c_i, s_i) in vi_to_blocks[i]:
+                        for (b, c_j, s_j) in vi_to_blocks[j]:
+                            acc += s_i * s_j * pair_contribution(a, c_i, b, c_j)
+                    d2M[ii, jj] = acc
 
             # ----- Extract xyz Hessian: H_xyz[:, i, j] = (d2M @ ee_offset)[:3] -----
             H_xyz = np.zeros((3, nv, nv), dtype=np.float64)
@@ -1693,6 +1690,28 @@ class RBDReference:
                     f_out[curr_id] -= np.matmul(np.linalg.inv(Xa.T), f_ext[curr_id])
         return f_out
 
+    def _mimic_multiplier(self, jid):
+        """Return the URDF mimic multiplier for `jid` (1.0 for non-mimic).
+
+        Centralizes the mimic-scaling pattern used in dynamics passes:
+        every place that reads `qd[get_joint_index_v(jid)]` (or qdd) for a
+        mimic joint must scale by this multiplier (since the mimic's
+        generalized velocity is `multiplier * v_target`); every place
+        that writes to `tau[get_joint_index_v(jid)]` for a mimic joint
+        must also scale by it (since the mimic's torque contribution
+        folds into the target column with the same multiplier).
+        """
+        joint = self.robot.get_joint_by_id(jid)
+        if getattr(joint, "is_mimic", False):
+            return float(joint.get_mimic_multiplier())
+        return 1.0
+
+    def _mimic_offset(self, jid):
+        joint = self.robot.get_joint_by_id(jid)
+        if getattr(joint, "is_mimic", False):
+            return float(joint.get_mimic_offset())
+        return 0.0
+
     def rnea_fpass(self, q, qd, qdd=None, GRAVITY=-9.81):
         """Perform the forward pass of the Recursive Newton-Euler Algorithm.
 
@@ -1722,8 +1741,10 @@ class RBDReference:
         for curr_id in range(NB):
             parent_id = self.robot.get_parent_id(curr_id)
             S = self.robot.get_S_by_id(curr_id)
-            inds_q = self.robot.get_joint_index_q(curr_id)
-            _q = q[inds_q]
+            # Mimic-aware: feed the joint's transform `multiplier * q[target]
+            # + offset` so a URDF mimic joint correctly sees the mimicked
+            # joint's coordinate (with the prescribed scaling).
+            _q = self.robot.q_for_joint(curr_id, q)
             Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
             # compute v and a
             if parent_id == -1:  # parent is fixed base or world
@@ -1736,15 +1757,16 @@ class RBDReference:
                 v[:, curr_id] = np.matmul(Xmat, v[:, parent_id])
                 a[:, curr_id] = np.matmul(Xmat, a[:, parent_id])
             inds_v = self.robot.get_joint_index_v(curr_id)
-            _qd = qd[inds_v]
-            
+            mimic_scale = self._mimic_multiplier(curr_id)
+            _qd = mimic_scale * qd[inds_v]
+
             if self.robot.floating_base and curr_id == 0:
                 vJ = np.matmul(S, np.asarray(_qd, dtype=np.float64).reshape(-1, 1))
             else: vJ = S * _qd
             v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
             a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
             if qdd is not None:
-                _qdd = qdd[inds_v]
+                _qdd = mimic_scale * qdd[inds_v]
                 if self.robot.floating_base and curr_id == 0:
                     aJ = np.matmul(S, np.asarray(_qdd, dtype=np.float64).reshape(-1, 1))
                 else: aJ = S * _qdd
@@ -1778,12 +1800,17 @@ class RBDReference:
             parent_id = self.robot.get_parent_id(curr_id)
             S = self.robot.get_S_by_id(curr_id)
             inds_f = self.robot.get_joint_index_f(curr_id)
-            # compute c
-            c[inds_f] = np.matmul(np.transpose(S), f[:, curr_id])
+            mimic_scale = self._mimic_multiplier(curr_id)
+            # compute c. Mimic joints fold into the mimicked joint's slot
+            # scaled by the multiplier, so use ACCUMULATE (not assign) and
+            # apply the scale: c[inds_f] += scale * S^T @ f[:, curr_id].
+            # For non-mimic joints this is `+= 1.0 * (...)`, which is
+            # bit-identical to the legacy assign because each non-mimic
+            # joint's inds_f is hit exactly once over the bpass.
+            c[inds_f] = c[inds_f] + mimic_scale * np.matmul(np.transpose(S), f[:, curr_id])
             # update f if applicable
             if parent_id != -1:
-                inds_q = self.robot.get_joint_index_q(curr_id)
-                _q = q[inds_q]
+                _q = self.robot.q_for_joint(curr_id, q)
                 Xmat = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
                 temp = np.matmul(np.transpose(Xmat), f[:, curr_id])
                 f[:, parent_id] = f[:, parent_id] + temp.flatten()

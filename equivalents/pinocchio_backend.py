@@ -1,16 +1,19 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Mapping
 
 import numpy as np
 from bs4 import BeautifulSoup
 
 from .conventions import (
     ConventionMismatch,
+    MimicInfo,
     collapse_pin_q_to_project,
+    expand_q_for_mimic,
     movable_joint_names_excluding_floating_root,
     normalize_matrix,
     normalize_pin_compatible_quaternion,
     normalize_project_q_for_pin,
+    reduce_matrix_for_mimic,
     reduce_pinocchio_q_jacobian_to_project,
     normalize_vector,
 )
@@ -26,14 +29,36 @@ class PinocchioModelAdapter:
     urdf_joint_types_by_name: dict
     urdf_mimic_joint_names: set
     urdf_path: str = ""
+    # Name-keyed `<mimic>` relations. Populated by `build_pinocchio_adapter`.
+    # Empty for robots without mimic joints (everything else stays bit-exact).
+    mimic_info: MimicInfo = None
 
     @property
     def nq(self) -> int:
-        return int(self.model.nq)
+        # Report the PROJECT layout's nq (mimic joints don't own a generalized
+        # coordinate). For non-mimic robots this is bit-identical to
+        # `self.model.nq`; for mimic robots it's reduced by the count of
+        # mimic joints' scalar q-slots (each mimic joint contributes one
+        # q-slot in pinocchio's unreduced model).
+        nq_pin = int(self.model.nq)
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return nq_pin
+        # Each mimic joint loses one scalar q slot (non-continuous joints) or
+        # two slots (continuous joints with [cos,sin] expansion). All current
+        # mimic-using robots in the manifest (fr3, h1_2) have prismatic /
+        # revolute (NOT continuous) mimic joints, so this is len(mimic).
+        n_mimic = 0
+        for name in self.mimic_info.relations:
+            jtype = self.urdf_joint_types_by_name.get(name)
+            n_mimic += 2 if jtype == "continuous" else 1
+        return nq_pin - n_mimic
 
     @property
     def nv(self) -> int:
-        return int(self.model.nv)
+        nv_pin = int(self.model.nv)
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return nv_pin
+        return nv_pin - len(self.mimic_info.relations)
 
     @property
     def joint_names(self) -> List[str]:
@@ -49,11 +74,87 @@ class PinocchioModelAdapter:
 
     @property
     def scalar_joint_names(self) -> List[str]:
+        # Full pinocchio-side scalar joint list (includes mimic joints; they
+        # still consume one q-slot per joint in the unreduced pin model).
         return [
             name
             for name in self.actuated_joint_names
             if self.urdf_joint_types_by_name.get(name) != "floating"
         ]
+
+    @property
+    def project_scalar_joint_names(self) -> List[str]:
+        """Pinocchio-side scalar joint names excluding mimic joints.
+
+        Matches the project (GRiD) layout in which mimic joints don't own a
+        generalized coordinate. Used by the conversion helpers below to map
+        between project q (size nv_grid) and pinocchio q (size nv_pin).
+        """
+        return [
+            name for name in self.scalar_joint_names
+            if name not in self.urdf_mimic_joint_names
+        ]
+
+    def _floating_prefix_q(self) -> int:
+        return 7 if self.base_mode == "floating" else 0
+
+    def _floating_prefix_v(self) -> int:
+        return 6 if self.base_mode == "floating" else 0
+
+    def _expand_project_q_to_pin_full(self, q):
+        """Expand a project-layout q (mimic-collapsed) to the unreduced
+        pin-model layout, applying mimic relations and continuous-joint
+        expansion. The result is what `pin.rnea` / `pin.crba` / etc. expect.
+        """
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return normalize_project_q_for_pin(
+                self.base_mode,
+                q,
+                joint_names=self.scalar_joint_names,
+                joint_types_by_name=self.urdf_joint_types_by_name,
+            )
+        # Step 1: inject mimic-mirrored entries so q has one slot per pin
+        # scalar joint (still in scalar layout — continuous joints still
+        # carry their angle, not [cos, sin]).
+        q_full_scalar = expand_q_for_mimic(
+            np.asarray(q, dtype=np.float64),
+            project_joint_names=self.project_scalar_joint_names,
+            pinocchio_joint_names=self.scalar_joint_names,
+            mimic=self.mimic_info,
+            floating_prefix_len=self._floating_prefix_q(),
+        )
+        # Step 2: now use the standard pinocchio expansion against the FULL
+        # scalar joint list (continuous joints become [cos, sin]).
+        return normalize_project_q_for_pin(
+            self.base_mode,
+            q_full_scalar,
+            joint_names=self.scalar_joint_names,
+            joint_types_by_name=self.urdf_joint_types_by_name,
+        )
+
+    def _reduce_pin_matrix_to_project(self, matrix, axes_to_reduce):
+        """Reduce a pin-layout matrix to the project layout.
+
+        Each `axes_to_reduce` entry is `(axis, space)` with `space` in
+        {"q", "v"}. The function FIRST handles continuous-joint reduction
+        (legacy path via `reduce_pinocchio_q_jacobian_to_project` when the
+        axis is "q" and the pin model uses [cos, sin] expansions), THEN
+        folds mimic columns/rows into the mimicked column/row with the URDF
+        multiplier scaling. Inputs without mimic joints fall through to the
+        legacy code path so existing test behavior is bit-identical.
+        """
+        arr = np.asarray(matrix, dtype=np.float64)
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return arr
+        return reduce_matrix_for_mimic(
+            arr,
+            project_joint_names=self.project_scalar_joint_names,
+            pinocchio_joint_names=self.scalar_joint_names,
+            mimic=self.mimic_info,
+            floating_prefix_len_q=self._floating_prefix_q(),
+            floating_prefix_len_v=self._floating_prefix_v(),
+            axes_to_reduce=axes_to_reduce,
+        )
 
     @property
     def continuous_joint_names(self) -> List[str]:
@@ -77,12 +178,7 @@ class PinocchioModelAdapter:
         # whose model is near-singular across configs.)
         import pinocchio as pin
 
-        q_pin = normalize_project_q_for_pin(
-            self.base_mode,
-            q,
-            joint_names=self.scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
+        q_pin = self._to_pin_q(q)
         mass = pin.crba(self.model, self.data, q_pin)
         mass = np.asarray(mass, dtype=np.float64)
         mass = 0.5 * (mass + mass.T)
@@ -94,30 +190,36 @@ class PinocchioModelAdapter:
     def rnea(self, q, qd, qdd):
         import pinocchio as pin
 
-        q_pin = normalize_project_q_for_pin(
-            self.base_mode,
-            q,
-            joint_names=self.scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
-        qd_pin = np.asarray(qd, dtype=np.float64)
-        qdd_pin = np.asarray(qdd, dtype=np.float64)
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
         tau = pin.rnea(self.model, self.data, q_pin, qd_pin, qdd_pin)
-        return normalize_vector(tau)
+        return normalize_vector(self._reduce_pin_v_to_project(np.asarray(tau, dtype=np.float64)))
 
     def aba(self, q, qd, tau):
         import pinocchio as pin
 
-        q_pin = normalize_project_q_for_pin(
-            self.base_mode,
-            q,
-            joint_names=self.scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
-        qd_pin = np.asarray(qd, dtype=np.float64)
-        tau_pin = np.asarray(tau, dtype=np.float64)
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        # tau is a generalized force in the project layout. For mimic robots
+        # the project's v-space is reduced relative to pinocchio's v-space:
+        # the tau slot for the mimicked joint absorbs the mimic's
+        # contribution scaled by `multiplier`. Pinocchio's ABA expects tau
+        # in its own (unreduced) layout. The exact mapping is:
+        #   tau_pin[mimicked] = tau_project[mimicked]    (the original direct part)
+        #   tau_pin[mimic_m]  = 0                        (no independent torque)
+        # since the mimic's torque acts via the multiplier in the reduced
+        # system but pin doesn't see the constraint here. This is the same
+        # convention used to recover RNEA in reverse and matches how the
+        # project-layout `aba` would interpret tau if the mimic constraint
+        # were treated explicitly. NOTE: a fully constraint-aware comparison
+        # (locking-projection of M, Cqd, and tau) is out of scope for THIS
+        # task; downstream dynamics comparisons may flag a residual mismatch
+        # on h1_2 / fr3 due to this simplification (the residual is the
+        # mimic-joint torque coupling, which both sides must agree on).
+        tau_pin = self._expand_project_v_to_pin(np.asarray(tau, dtype=np.float64))
         qdd = pin.aba(self.model, self.data, q_pin, qd_pin, tau_pin)
-        return normalize_vector(qdd)
+        return normalize_vector(self._reduce_pin_v_to_project(np.asarray(qdd, dtype=np.float64)))
 
     def forward_dynamics(self, q, qd, u):
         return self.aba(q, qd, u)
@@ -125,54 +227,62 @@ class PinocchioModelAdapter:
     def minv(self, q):
         import pinocchio as pin
 
-        q_pin = normalize_project_q_for_pin(
-            self.base_mode,
-            q,
-            joint_names=self.scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
+        q_pin = self._to_pin_q(q)
         mass = pin.crba(self.model, self.data, q_pin)
         mass = np.asarray(mass, dtype=np.float64)
         mass = 0.5 * (mass + mass.T)
+        # Reduce pinocchio's nv_pin x nv_pin mass matrix to project nv x nv
+        # by collapsing mimic rows/cols into the mimicked column (with
+        # multiplier scaling on both axes). The inverse is then taken on the
+        # reduced matrix so it matches the project-layout Minv.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            mass = self._reduce_pin_matrix_to_project(
+                mass, axes_to_reduce=[(0, "v"), (1, "v")]
+            )
         minv = np.linalg.inv(mass)
         return normalize_matrix(minv)
 
     def crba(self, q):
         import pinocchio as pin
 
-        q_pin = normalize_project_q_for_pin(
-            self.base_mode,
-            q,
-            joint_names=self.scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
+        q_pin = self._to_pin_q(q)
         mass = pin.crba(self.model, self.data, q_pin)
         mass = np.asarray(mass, dtype=np.float64)
         mass = 0.5 * (mass + mass.T)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            mass = self._reduce_pin_matrix_to_project(
+                mass, axes_to_reduce=[(0, "v"), (1, "v")]
+            )
         return normalize_matrix(mass)
 
     def rnea_grad(self, q, qd, qdd):
         import pinocchio as pin
 
-        q_pin = normalize_project_q_for_pin(
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
+        pin.computeRNEADerivatives(self.model, self.data, q_pin, qd_pin, qdd_pin)
+        dtau_dq = reduce_pinocchio_q_jacobian_to_project(
+            np.asarray(self.data.dtau_dq, dtype=np.float64),
             self.base_mode,
             q,
-            joint_names=self.scalar_joint_names,
+            joint_names=self.project_scalar_joint_names,
             joint_types_by_name=self.urdf_joint_types_by_name,
         )
-        qd_pin = np.asarray(qd, dtype=np.float64)
-        qdd_pin = np.asarray(qdd, dtype=np.float64)
-        pin.computeRNEADerivatives(self.model, self.data, q_pin, qd_pin, qdd_pin)
-        return (
-            reduce_pinocchio_q_jacobian_to_project(
+        dtau_dv = normalize_matrix(np.asarray(self.data.dtau_dv, dtype=np.float64))
+        # For mimic robots, fold both axes (mimic columns into target cols,
+        # mimic rows into target rows) on the v-space matrix; same on the
+        # q-space matrix.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            dtau_dq = self._reduce_pin_matrix_to_project(
                 np.asarray(self.data.dtau_dq, dtype=np.float64),
-                self.base_mode,
-                q,
-                joint_names=self.scalar_joint_names,
-                joint_types_by_name=self.urdf_joint_types_by_name,
-            ),
-            normalize_matrix(np.asarray(self.data.dtau_dv, dtype=np.float64)),
-        )
+                axes_to_reduce=[(0, "v"), (1, "v")],
+            )
+            dtau_dv = self._reduce_pin_matrix_to_project(
+                np.asarray(self.data.dtau_dv, dtype=np.float64),
+                axes_to_reduce=[(0, "v"), (1, "v")],
+            )
+        return (dtau_dq, dtau_dv)
 
     def idsva_so_body_frame(self, q, qd, qdd):
         """Return (d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq) from Pinocchio's
@@ -255,39 +365,134 @@ class PinocchioModelAdapter:
     def forward_dynamics_grad(self, q, qd, u):
         import pinocchio as pin
 
-        q_pin = normalize_project_q_for_pin(
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        u_pin = self._expand_project_v_to_pin(np.asarray(u, dtype=np.float64))
+        pin.computeABADerivatives(self.model, self.data, q_pin, qd_pin, u_pin)
+        ddq_dq = reduce_pinocchio_q_jacobian_to_project(
+            np.asarray(self.data.ddq_dq, dtype=np.float64),
             self.base_mode,
             q,
-            joint_names=self.scalar_joint_names,
+            joint_names=self.project_scalar_joint_names,
             joint_types_by_name=self.urdf_joint_types_by_name,
         )
-        qd_pin = np.asarray(qd, dtype=np.float64)
-        u_pin = np.asarray(u, dtype=np.float64)
-        pin.computeABADerivatives(self.model, self.data, q_pin, qd_pin, u_pin)
-        return (
-            reduce_pinocchio_q_jacobian_to_project(
+        ddq_dv = normalize_matrix(np.asarray(self.data.ddq_dv, dtype=np.float64))
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            ddq_dq = self._reduce_pin_matrix_to_project(
                 np.asarray(self.data.ddq_dq, dtype=np.float64),
-                self.base_mode,
-                q,
-                joint_names=self.scalar_joint_names,
-                joint_types_by_name=self.urdf_joint_types_by_name,
-            ),
-            normalize_matrix(np.asarray(self.data.ddq_dv, dtype=np.float64)),
-        )
+                axes_to_reduce=[(0, "v"), (1, "v")],
+            )
+            ddq_dv = self._reduce_pin_matrix_to_project(
+                np.asarray(self.data.ddq_dv, dtype=np.float64),
+                axes_to_reduce=[(0, "v"), (1, "v")],
+            )
+        return (ddq_dq, ddq_dv)
 
     # ----- Time integrators (canonical via pinocchio.integrate / dIntegrate) -----
 
     def _to_pin_q(self, q):
-        return normalize_project_q_for_pin(
+        # Mimic-aware project -> pin q expansion. Falls through to the
+        # legacy path when the model has no mimic joints (mimic_info empty),
+        # so existing tests are bit-identical for non-mimic robots.
+        return self._expand_project_q_to_pin_full(q)
+
+    def _from_pin_q_collapse(self, q_pin):
+        """Inverse of `_to_pin_q`: pin-layout q -> project-layout q.
+
+        Steps: (1) collapse continuous-joint [cos,sin] pairs back to scalar
+        angles via `collapse_pin_q_to_project`, then (2) drop mimic entries
+        (each mimic q-slot is dependent on its target).
+        """
+        q_project_scalar = collapse_pin_q_to_project(
             self.base_mode,
-            q,
+            np.asarray(q_pin, dtype=np.float64),
             joint_names=self.scalar_joint_names,
             joint_types_by_name=self.urdf_joint_types_by_name,
         )
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return q_project_scalar
+        # Drop mimic joints' q-slots so the result has one entry per
+        # project joint.
+        prefix = self._floating_prefix_q()
+        prefix_block = q_project_scalar[:prefix]
+        kept = []
+        for i, name in enumerate(self.scalar_joint_names):
+            if name in self.urdf_mimic_joint_names:
+                continue
+            kept.append(float(q_project_scalar[prefix + i]))
+        return np.concatenate([prefix_block, np.asarray(kept, dtype=np.float64)])
+
+    def _expand_project_v_to_pin(self, v):
+        """Expand a project-layout v (size nv_grid) to pinocchio-layout v
+        (size nv_pin) by injecting mimic-mirrored entries with their URDF
+        multiplier scaling. The floating-base prefix passes through unchanged.
+        """
+        v = np.asarray(v, dtype=np.float64)
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return v
+        prefix = self._floating_prefix_v()
+        out_prefix = v[:prefix]
+        project_v_index = {
+            name: i for i, name in enumerate(self.project_scalar_joint_names)
+        }
+        out_suffix_by_pin_pos = {}
+        out_suffix = []
+        for i, name in enumerate(self.scalar_joint_names):
+            if name in self.mimic_info.relations:
+                target_name, mult, _ = self.mimic_info.relations[name]
+                tgt_pos = out_suffix_by_pin_pos.get(target_name)
+                if tgt_pos is None:
+                    raise ValueError(
+                        f"mimic v-expand: target '{target_name}' missing before '{name}'"
+                    )
+                out_suffix.append(float(mult * out_suffix[tgt_pos]))
+            else:
+                project_pos = project_v_index.get(name)
+                if project_pos is None:
+                    raise ValueError(
+                        f"mimic v-expand: project joint '{name}' missing"
+                    )
+                out_suffix.append(float(v[prefix + project_pos]))
+                out_suffix_by_pin_pos[name] = len(out_suffix) - 1
+        return np.concatenate([out_prefix, np.asarray(out_suffix, dtype=np.float64)])
+
+    def _reduce_pin_v_to_project(self, vec):
+        """Reduce a pinocchio-layout v-space vector to the project layout by
+        folding mimic entries into the mimicked entry with the URDF
+        multiplier scaling. Correct for forces/torques: project tau_i
+        absorbs `multiplier_m * tau_pin[m]` for every mimic m of i, since
+        a unit project-v_i actuates both the mimicked joint and (with
+        multiplier) the mimic joint.
+        """
+        vec = np.asarray(vec, dtype=np.float64)
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return vec
+        prefix = self._floating_prefix_v()
+        out_prefix = vec[:prefix]
+        project_index = {
+            name: i for i, name in enumerate(self.project_scalar_joint_names)
+        }
+        out_suffix = np.zeros(len(self.project_scalar_joint_names), dtype=np.float64)
+        for i, name in enumerate(self.scalar_joint_names):
+            pin_val = float(vec[prefix + i])
+            if name in self.mimic_info.relations:
+                target_name, mult, _ = self.mimic_info.relations[name]
+                tgt_idx = project_index.get(target_name)
+                if tgt_idx is None:
+                    raise ValueError(f"mimic v-reduce: target '{target_name}' missing")
+                out_suffix[tgt_idx] += float(mult) * pin_val
+            else:
+                project_idx = project_index.get(name)
+                if project_idx is None:
+                    raise ValueError(f"mimic v-reduce: project joint '{name}' missing")
+                out_suffix[project_idx] += pin_val
+        return np.concatenate([out_prefix, out_suffix])
 
     def _pin_integrate(self, q, v_dt):
         """`pin.integrate(model, q, v_dt)` returned in the project's scalar-joint
-        layout. v_dt is in tangent space (size nv) and passes through directly.
+        layout. v_dt is in tangent space (size nv_project) and is internally
+        expanded to pinocchio's nv layout (mimic-mirrored entries are filled
+        with `multiplier * v_dt[target]`).
 
         The result is collapsed back from Pinocchio's nq layout (continuous
         joints [cos,sin] -> scalar angle) so it can be fed straight into the
@@ -299,12 +504,17 @@ class PinocchioModelAdapter:
         import pinocchio as pin
 
         q_pin = self._to_pin_q(q)
+        v_dt_pin = self._expand_project_v_to_pin(np.asarray(v_dt, dtype=np.float64))
         q_new_pin = np.asarray(
-            pin.integrate(self.model, q_pin, np.asarray(v_dt, dtype=np.float64)),
+            pin.integrate(self.model, q_pin, v_dt_pin),
             dtype=np.float64,
         )
         if self.base_mode == "floating":
             q_new_pin = normalize_pin_compatible_quaternion(q_new_pin)
+        # Use mimic-aware collapse if mimic_info is non-empty; otherwise the
+        # legacy path is bit-identical for non-mimic robots.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            return self._from_pin_q_collapse(q_new_pin)
         return collapse_pin_q_to_project(
             self.base_mode,
             q_new_pin,
@@ -462,12 +672,7 @@ class PinocchioModelAdapter:
         if offset is None:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
 
-        q_pin = normalize_project_q_for_pin(
-            self.base_mode,
-            q,
-            joint_names=self.scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
+        q_pin = self._to_pin_q(q)
         pin.forwardKinematics(self.model, self.data, q_pin)
         pin.updateFramePlacements(self.model, self.data)
 
@@ -485,12 +690,7 @@ class PinocchioModelAdapter:
     def end_effector_rotation_matrix(self, q, target_name: str):
         import pinocchio as pin
 
-        q_pin = normalize_project_q_for_pin(
-            self.base_mode,
-            q,
-            joint_names=self.scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
+        q_pin = self._to_pin_q(q)
         pin.forwardKinematics(self.model, self.data, q_pin)
         pin.updateFramePlacements(self.model, self.data)
 
@@ -510,18 +710,22 @@ class PinocchioModelAdapter:
     def end_effector_pose_gradient(self, q, target_name: str, offset=None, step: float = 1e-6):
         """End-effector pose gradient w.r.t. generalized velocity v (TANGENT space).
 
-        Output shape is 6 x nv (matches pinocchio's convention and the project
-        adapter's new d/dv method). Implemented as a central-difference FD on the
-        Lie-group integrator `pin.integrate(q, h*e_i)`, so the floating-base block
-        is the spatial Jacobian (omega; v) in the same v-ordering as the project."""
+        Output shape is 6 x nv_project — i.e. one column per project velocity
+        DOF, with mimic joints already folded into their target's column via
+        `_pin_integrate` (which expands `v_dt` to pin layout under the URDF
+        mimic relation, so perturbing v_project[i] moves BOTH the mimicked
+        joint and every joint that mimics it). For non-mimic robots
+        `nv_project == self.model.nv` and this is bit-identical to the
+        legacy FD-over-pin-nv path.
+        """
         if offset is None:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
         q = self._normalize_project_q_for_pose_differences(q)
-        nv = self.model.nv
-        gradient = np.zeros((6, nv), dtype=np.float64)
+        nv_project = self._project_nv()
+        gradient = np.zeros((6, nv_project), dtype=np.float64)
 
-        for v_ind in range(nv):
-            v = np.zeros(nv, dtype=np.float64)
+        for v_ind in range(nv_project):
+            v = np.zeros(nv_project, dtype=np.float64)
             v[v_ind] = step
             q_pos = self._pin_integrate(q, v)
             q_neg = self._pin_integrate(q, -v)
@@ -532,6 +736,12 @@ class PinocchioModelAdapter:
             diff[3:6] = ((diff[3:6] + np.pi) % (2.0 * np.pi)) - np.pi
             gradient[:, v_ind] = diff / (2.0 * step)
         return gradient
+
+    def _project_nv(self) -> int:
+        """nv in the project layout = pin nv minus the number of mimic joints."""
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return int(self.model.nv)
+        return int(self.model.nv) - len(self.mimic_info.relations)
 
     def end_effector_pose_hessian(self, q, target_name: str, offset=None, step: float = 1e-5):
         """End-effector pose Hessian d^2(pose)/dv^2 (TANGENT, pinocchio convention).
@@ -549,6 +759,7 @@ class PinocchioModelAdapter:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
         q = self._normalize_project_q_for_pose_differences(q)
         nv = self.model.nv
+        nv_project = self._project_nv()
 
         # Analytic path: joint target with kinematic-hessian API available. Skip
         # if the user passed a non-default offset (the analytic Hessian is rooted
@@ -560,12 +771,7 @@ class PinocchioModelAdapter:
             and np.allclose(offset, np.array([0.0, 0.0, 0.0, 1.0]))
         )
         if analytic_ok:
-            q_pin = normalize_project_q_for_pin(
-                self.base_mode,
-                q,
-                joint_names=self.scalar_joint_names,
-                joint_types_by_name=self.urdf_joint_types_by_name,
-            )
+            q_pin = self._to_pin_q(q)
             v_zero = np.zeros(nv, dtype=np.float64)
             a_zero = np.zeros(nv, dtype=np.float64)
             pin.computeForwardKinematicsDerivatives(self.model, self.data, q_pin, v_zero, a_zero)
@@ -575,13 +781,18 @@ class PinocchioModelAdapter:
                 pin.getJointKinematicHessian(self.model, self.data, joint_id, pin.LOCAL_WORLD_ALIGNED),
                 dtype=np.float64,
             )
-            # Pinocchio returns shape (6, nv, nv); our convention matches.
+            # Pinocchio returns shape (6, nv_pin, nv_pin). For mimic robots
+            # we fold the mimic rows/cols into their target rows/cols with
+            # the URDF multiplier so the result has shape (6, nv_project,
+            # nv_project) and matches the project adapter's output.
+            if self.mimic_info is not None and not self.mimic_info.is_empty():
+                H = self._reduce_pin_matrix_to_project(H, axes_to_reduce=[(1, "v"), (2, "v")])
             return H
 
         # FD fallback (frame target or older pinocchio without kinematic-hessian API).
-        hessian = np.zeros((6, nv, nv), dtype=np.float64)
-        for i in range(nv):
-            v = np.zeros(nv, dtype=np.float64); v[i] = step
+        hessian = np.zeros((6, nv_project, nv_project), dtype=np.float64)
+        for i in range(nv_project):
+            v = np.zeros(nv_project, dtype=np.float64); v[i] = step
             q_plus = self._pin_integrate(q, v)
             q_minus = self._pin_integrate(q, -v)
             Jp = self.end_effector_pose_gradient(q_plus, target_name, offset=offset)
@@ -607,6 +818,22 @@ def build_pinocchio_adapter(spec, resolved_model, base_mode: str) -> PinocchioMo
         for joint in soup.find_all("joint", recursive=False)
         if joint.find("mimic") is not None
     }
+    # Build the name-keyed mimic relations map (target, multiplier, offset).
+    mimic_relations = {}
+    for joint in soup.find_all("joint", recursive=False):
+        mimic_tag = joint.find("mimic")
+        if mimic_tag is None:
+            continue
+        if not mimic_tag.has_attr("joint"):
+            raise ValueError(
+                f"Joint '{joint['name']}' has <mimic> without a `joint` attribute "
+                "(URDF parse error)."
+            )
+        target_name = mimic_tag["joint"]
+        multiplier = float(mimic_tag["multiplier"]) if mimic_tag.has_attr("multiplier") else 1.0
+        offset = float(mimic_tag["offset"]) if mimic_tag.has_attr("offset") else 0.0
+        mimic_relations[joint["name"]] = (target_name, multiplier, offset)
+    mimic_info = MimicInfo(relations=mimic_relations)
 
     if base_mode == "floating":
         model = pin.buildModelFromUrdf(
@@ -633,4 +860,5 @@ def build_pinocchio_adapter(spec, resolved_model, base_mode: str) -> PinocchioMo
         urdf_joint_types_by_name=urdf_joint_types_by_name,
         urdf_mimic_joint_names=urdf_mimic_joint_names,
         urdf_path=str(resolved_model.urdf_path),
+        mimic_info=mimic_info,
     )

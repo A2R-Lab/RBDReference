@@ -1,7 +1,30 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
+
+
+@dataclass(frozen=True)
+class MimicInfo:
+    """URDF `<mimic>` metadata, name-keyed and frame-independent.
+
+    `relations[name]` is a `(target_name, multiplier, offset)` triple describing
+    `q[name] = multiplier * q[target_name] + offset` (and analogous for v/a),
+    matching the URDF convention. Used by the pinocchio backend to:
+
+    * EXPAND a project-layout (mimic-collapsed) q to a pinocchio-layout q,
+      injecting the mimic-mirrored values; and
+    * REDUCE a pinocchio-layout v/q-space derivative back to project-layout
+      by folding mimic columns into the mimicked column with the multiplier.
+    """
+
+    relations: Mapping[str, tuple] = field(default_factory=dict)
+
+    def is_empty(self) -> bool:
+        return not self.relations
+
+    def mimic_names(self) -> tuple:
+        return tuple(self.relations.keys())
 
 
 @dataclass(frozen=True)
@@ -232,3 +255,133 @@ def movable_joint_names_excluding_floating_root(
             if name not in {"floating_base_joint", "root_joint"}
         ]
     return joint_names
+
+
+def expand_q_for_mimic(
+    q: Sequence[float],
+    project_joint_names: Sequence[str],
+    pinocchio_joint_names: Sequence[str],
+    mimic: "MimicInfo",
+    floating_prefix_len: int,
+) -> np.ndarray:
+    """Expand a project-layout q (mimic-collapsed) into a pinocchio-layout q.
+
+    For each pinocchio joint name in `pinocchio_joint_names`:
+      - if the name is a mimic joint, write `multiplier * q_target + offset`,
+        where `q_target` is read from the already-expanded array at the
+        target's slot;
+      - otherwise, copy the project slot for that joint.
+
+    Both `project_joint_names` and `pinocchio_joint_names` are the SCALAR
+    actuated joint name lists (i.e. excluding the floating-base root).
+    `floating_prefix_len` is the number of leading entries reserved for the
+    free-flyer (7 for quaternion, 0 for fixed-base).
+    """
+    q = np.asarray(q, dtype=np.float64)
+    if mimic.is_empty():
+        return q
+    project_index = {name: i for i, name in enumerate(project_joint_names)}
+    out_prefix = q[:floating_prefix_len].tolist()
+    out_suffix = []
+    pin_index = {name: i for i, name in enumerate(pinocchio_joint_names)}
+    target_pin_pos = {}
+    cursor = 0
+    for name in pinocchio_joint_names:
+        if name in mimic.relations:
+            target_name, mult, offset = mimic.relations[name]
+            tgt_pin_pos = target_pin_pos.get(target_name)
+            if tgt_pin_pos is None:
+                raise ValueError(
+                    f"mimic joint '{name}' references '{target_name}' which is "
+                    "not yet expanded; expansion expects target to appear "
+                    "earlier in the pinocchio joint order."
+                )
+            value = mult * out_suffix[tgt_pin_pos] + offset
+            out_suffix.append(value)
+        else:
+            project_pos = project_index.get(name)
+            if project_pos is None:
+                raise ValueError(
+                    f"non-mimic pinocchio joint '{name}' is missing from "
+                    "project joint list; mimic expansion cannot proceed."
+                )
+            out_suffix.append(float(q[floating_prefix_len + project_pos]))
+            target_pin_pos[name] = cursor
+        cursor += 1
+    return np.asarray(out_prefix + out_suffix, dtype=np.float64)
+
+
+def reduce_matrix_for_mimic(
+    matrix,
+    project_joint_names: Sequence[str],
+    pinocchio_joint_names: Sequence[str],
+    mimic: "MimicInfo",
+    floating_prefix_len_q: int,
+    floating_prefix_len_v: int,
+    axes_to_reduce: Sequence[tuple],
+) -> np.ndarray:
+    """Reduce a pinocchio-layout (q or v) matrix to project layout by folding
+    mimic columns/rows into the mimicked column/row with the multiplier.
+
+    `axes_to_reduce` is a list of `(axis, space)` tuples, where `space` is
+    either `"q"` or `"v"`. For each tuple we collapse the named axis from
+    pinocchio's joint-space to project's joint-space.
+    """
+    arr = np.asarray(matrix, dtype=np.float64)
+    if mimic.is_empty():
+        return arr
+    for axis, space in axes_to_reduce:
+        if space == "q":
+            prefix = floating_prefix_len_q
+        elif space == "v":
+            prefix = floating_prefix_len_v
+        else:
+            raise ValueError(f"unknown reduction space: {space}")
+        # Build index mapping from pinocchio slot -> project slot (or None if
+        # the slot is a mimic — its column folds into the target's column).
+        pin_to_project = [None] * (prefix + len(pinocchio_joint_names))
+        for i in range(prefix):
+            pin_to_project[i] = i
+        project_index = {name: i for i, name in enumerate(project_joint_names)}
+        pin_index = {name: i for i, name in enumerate(pinocchio_joint_names)}
+        # First non-mimic joints get a slot.
+        for i, name in enumerate(pinocchio_joint_names):
+            if name in mimic.relations:
+                continue
+            project_pos = project_index.get(name)
+            if project_pos is None:
+                raise ValueError(
+                    f"non-mimic pinocchio joint '{name}' missing from project list"
+                )
+            pin_to_project[prefix + i] = prefix + project_pos
+        # Build the reduced matrix by accumulating columns.
+        new_shape = list(arr.shape)
+        new_shape[axis] = prefix + len(project_joint_names)
+        reduced = np.zeros(tuple(new_shape), dtype=np.float64)
+        for pin_slot in range(prefix + len(pinocchio_joint_names)):
+            if pin_slot < prefix:
+                tgt = pin_slot
+                scale = 1.0
+            else:
+                pin_joint_index = pin_slot - prefix
+                pin_name = pinocchio_joint_names[pin_joint_index]
+                if pin_name in mimic.relations:
+                    target_name, mult, _ = mimic.relations[pin_name]
+                    target_project_pos = project_index.get(target_name)
+                    if target_project_pos is None:
+                        raise ValueError(
+                            f"mimic '{pin_name}' targets unknown project joint '{target_name}'"
+                        )
+                    tgt = prefix + target_project_pos
+                    scale = float(mult)
+                else:
+                    tgt = pin_to_project[pin_slot]
+                    scale = 1.0
+            # Slice src column from arr and accumulate into reduced[tgt] along axis.
+            src_idx = [slice(None)] * arr.ndim
+            src_idx[axis] = pin_slot
+            tgt_idx = [slice(None)] * reduced.ndim
+            tgt_idx[axis] = tgt
+            reduced[tuple(tgt_idx)] = reduced[tuple(tgt_idx)] + scale * arr[tuple(src_idx)]
+        arr = reduced
+    return arr
