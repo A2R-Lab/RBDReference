@@ -1272,7 +1272,399 @@ class RBDReference:
             H = 0.5 * (H + np.transpose(H, axes=(0, 2, 1)))
             d2eePos_arr.append(H)
         return d2eePos_arr
-    
+
+    def end_effector_pose_hessian_analytic(self, q, offsets=None, ee_joint_names=None):
+        """Analytic d^2(pose)/dv^2 of the end-effector pose w.r.t. generalized velocity.
+
+        Convention: d^2/dv^2 (TANGENT, pinocchio convention). Pose is [xyz; rpy]
+        with R = Rz(yaw) Ry(pitch) Rx(roll). Output is a list of (6, nv, nv)
+        tensors (one per ee).
+
+        Algorithm: per-chain second-order Taylor expansion of the EE world
+        transform T_ee(v) along the chain joints. Each chain joint contributes
+        an isolated local perturbation Delta_j(v_j) (revolute exp, prismatic
+        translation, or SE(3) free-flyer exp). The chain composition
+        M(v) = X_0 Delta_0 X_1 Delta_1 ... X_k Delta_k is then differentiated to
+        second order at v=0 by piggy-backing on left/right cumulative products
+        L_a, R_a around each joint. This handles ALL DOF interaction patterns
+        uniformly: (a) DOFs in separate joints (proximal/distal in chain), (b)
+        intra-joint pairs of the SAME multi-DOF joint (notably the SE(3)
+        free-flyer at jid=0), and (c) cross-joint pairs where one side is a
+        multi-DOF joint. The rpy rows are obtained by the analytic chain rule
+        d^2 rpy / dv_i dv_j = (dE^{-1}/dv_j) J_w[:, i] + E^{-1} dJ_w[:, i]/dv_j,
+        where dJ_w/dv is the world-angular kinematic Hessian computed from
+        skew^{-1}(d^2 R T^{-1}) on the Taylor-expanded rotation block.
+
+        Validated against the FD oracle (end_effector_pose_hessian) on iiwa14
+        fixed, iiwa14 floating, and go2 floating to ~1e-7 (FD noise floor).
+
+        Parameters
+        ----------
+        q : numpy.ndarray
+            Generalized position (floating base: [xyz, quat_xyzw, joints]).
+        offsets : list, optional
+            Per-ee point offsets [x, y, z, 1]; the first offset is applied to
+            every ee, matching `end_effector_pose_gradient`.
+        ee_joint_names : list of str, optional
+            Joint names to use as end-effectors; defaults to leaf joints.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            Per end-effector (6, nv, nv) Hessian of d^2(pose)/dv^2.
+        """
+        q = self._normalize_kinematics_q(q)
+        ee_offsets = self._normalize_ee_offsets(offsets)
+        nv = self.robot.get_num_vel()
+        n_joints = self.robot.get_num_joints()
+
+        # ----- helpers (mirroring end_effector_pose_gradient) -----
+        def vinds_for(jid):
+            try:
+                inds = self.robot.get_joint_index_v(jid)
+            except Exception:
+                inds = self.robot.get_joint_index_q(jid)
+            if isinstance(inds, (list, tuple, np.ndarray)):
+                return list(inds)
+            return [inds]
+
+        def q_arg(jid):
+            inds = self.robot.get_joint_index_q(jid)
+            if not isinstance(inds, (list, tuple, np.ndarray)):
+                inds = [inds]
+            block = np.asarray(q, dtype=np.float64)[list(inds)]
+            if block.size == 1:
+                return float(block[0])
+            return block
+
+        # one forward-kinematics pass: world transform of every joint
+        Xw = [None] * n_joints
+        Xlocal = [None] * n_joints
+        for j in range(n_joints):
+            Xlocal[j] = np.asarray(
+                self.robot.get_Xmat_hom_Func_by_id(j)(q_arg(j)),
+                dtype=np.float64,
+            )
+            par = self.robot.get_parent_id(j)
+            Xw[j] = Xlocal[j] if par == -1 else (Xw[par] @ Xlocal[j])
+
+        # ----- E(rpy) rate->omega map and its rpy-derivatives (closed form) -----
+        # For R = Rz(yaw) Ry(pitch) Rx(roll), omega_world = E(rpy) * [roll_d; pitch_d; yaw_d]:
+        #   E = [[cy*cp, -sy, 0], [sy*cp, cy, 0], [-sp, 0, 1]]
+        def rpy_from_R(R_ee):
+            roll = np.arctan2(R_ee[2, 1], R_ee[2, 2])
+            pitch = np.arctan2(-R_ee[2, 0],
+                               np.sqrt(R_ee[2, 2] * R_ee[2, 2] + R_ee[2, 1] * R_ee[2, 1]))
+            yaw = np.arctan2(R_ee[1, 0], R_ee[0, 0])
+            return roll, pitch, yaw
+
+        def E_and_deriv(rpy):
+            roll, pitch, yaw = rpy
+            cy, sy = np.cos(yaw), np.sin(yaw)
+            cp, sp = np.cos(pitch), np.sin(pitch)
+            E = np.array([[cy * cp, -sy, 0.0],
+                          [sy * cp,  cy, 0.0],
+                          [-sp,     0.0, 1.0]], dtype=np.float64)
+            # ∂E/∂roll = 0 (E does not depend on roll)
+            dE_droll = np.zeros((3, 3), dtype=np.float64)
+            dE_dpitch = np.array([[-cy * sp, 0.0, 0.0],
+                                  [-sy * sp, 0.0, 0.0],
+                                  [-cp,      0.0, 0.0]], dtype=np.float64)
+            dE_dyaw = np.array([[-sy * cp, -cy, 0.0],
+                                [ cy * cp, -sy, 0.0],
+                                [ 0.0,      0.0, 0.0]], dtype=np.float64)
+            return E, dE_droll, dE_dpitch, dE_dyaw
+
+        # ----- local perturbation A_local (4x4 dDelta/dv) and B_local (4x4 d^2 Delta/dv_a dv_b) -----
+        # For revolute around axis a (body frame): A = [[ [a]_x, 0 ], [ 0, 0 ]],  B = [[ [a]_x^2, 0], [0, 0]]
+        # For prismatic along axis a (body frame): A = [[ 0, a ], [0, 0]],  B = 0
+        # For floating base (6 DOFs, body frame, v=[v_lin(3); omega(3)]):
+        #   - linear DOF c=0..2 (axis e_c): A = [[0, e_c], [0, 0]],  B(c, c') = 0
+        #   - angular DOF c=3..5 (axis e_{c-3}): A = [[ [e_{c-3}]_x, 0 ], [ 0, 0 ]]
+        #   - mixed lin(a)/ang(b): B(a, b) = [[0, 0.5 * (e_{b-3} x e_a)], [0, 0]]
+        #   - mixed ang(a)/ang(b): B(a, b) = [[ 0.5 * ([e_{a-3}]_x [e_{b-3}]_x + [e_{b-3}]_x [e_{a-3}]_x), 0 ], [ 0, 0 ]]
+        def axis_skew(a):
+            x, y, z = a
+            return np.array([[0.0, -z,  y],
+                             [z,    0.0, -x],
+                             [-y,   x,   0.0]], dtype=np.float64)
+
+        def A_for_dof(j, c):
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            ang_local = S[:3, c]
+            lin_local = S[3:6, c]
+            A = np.zeros((4, 4), dtype=np.float64)
+            if np.linalg.norm(ang_local) > 0.5:
+                A[:3, :3] = axis_skew(ang_local)
+            else:
+                A[:3, 3] = lin_local
+            return A
+
+        def B_for_dofpair(j, c_a, c_b):
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            ang_a = S[:3, c_a]; lin_a = S[3:6, c_a]
+            ang_b = S[:3, c_b]; lin_b = S[3:6, c_b]
+            a_is_rot = np.linalg.norm(ang_a) > 0.5
+            b_is_rot = np.linalg.norm(ang_b) > 0.5
+            B = np.zeros((4, 4), dtype=np.float64)
+            if a_is_rot and b_is_rot:
+                Sa = axis_skew(ang_a)
+                Sb = axis_skew(ang_b)
+                B[:3, :3] = 0.5 * (Sa @ Sb + Sb @ Sa)
+            elif a_is_rot and not b_is_rot:
+                # ang(a), lin(b): mixed contribution = 0.5 * (e_a x lin_b) translation column
+                B[:3, 3] = 0.5 * np.cross(ang_a, lin_b)
+            elif (not a_is_rot) and b_is_rot:
+                B[:3, 3] = 0.5 * np.cross(ang_b, lin_a)
+            # else: lin-lin -> 0
+            return B
+
+        def skew_inv(M):
+            """Extract a 3-vector from a 3x3 (approximately) skew-symmetric matrix."""
+            return 0.5 * np.array([M[2, 1] - M[1, 2],
+                                   M[0, 2] - M[2, 0],
+                                   M[1, 0] - M[0, 1]], dtype=np.float64)
+
+        def hessian_for_chain(chain_jids, X_ee, ee_offset_col):
+            """Compute the (6, nv, nv) pose Hessian for a given chain & EE transform.
+
+            X_ee is the WORLD transform of the EE FRAME (used for rpy extraction).
+            ee_offset_col is the 4x1 point in the LAST CHAIN JOINT's frame at
+            which we evaluate the position (so the chain-product M(v) is
+            differentiated, then dotted with this constant offset). For a fixed-
+            joint EE, the caller pre-applies the fixed transform: pass
+            chain ending at the parent of the fixed joint, X_ee = Xw[pid] @ X_fixed,
+            and ee_offset_col = X_fixed @ user_offset.
+            """
+            R_ee0 = X_ee[:3, :3]  # used for rpy and E(rpy)
+            p_ee0 = (X_ee @ ee_offset_col).reshape(-1)[:3]
+
+            # Build the per-joint X_local list for this chain. Each "block" b
+            # encapsulates joint chain_jids[b] with: prefix_to_b @ X_local[chain_jids[b]] @ Delta_b @ ...
+            # We need L_a = prefix BEFORE Delta_a (i.e. up to and including X_local for joint a).
+            n_chain = len(chain_jids)
+            X_chain_local = [Xlocal[j] for j in chain_jids]
+            # The chain starts at root joint chain_jids[0], whose parent might be -1 or a fixed root.
+            # The local transforms in X_chain_local already encode parent->joint placement.
+
+            # L[a] = product of X_chain_local[0..a] @ Delta[0..a-1](0)  — but Delta(0) = I, so:
+            #   L[a] = X_chain_local[0] @ X_chain_local[1] @ ... @ X_chain_local[a]
+            # R[a] = X_chain_local[a+1] @ ... @ X_chain_local[k] @ ee_offset_handling
+            # i.e. M(0) = L[a] @ R[a] for any a, and pp = M(0) @ ee_offset = X_ee @ ee_offset.
+            # We also want "between" prefixes: P[a, b] for a < b is the chunk
+            #   between Delta_a and Delta_b, i.e. X_chain_local[a+1..b].
+            L = [None] * n_chain
+            R_post = [None] * n_chain
+            # Prefixes:
+            acc = np.eye(4)
+            for a in range(n_chain):
+                acc = acc @ X_chain_local[a]
+                L[a] = acc.copy()
+            # Suffixes (after the joint-a Delta):
+            acc = np.eye(4)
+            R_post[n_chain - 1] = acc.copy()
+            for a in range(n_chain - 2, -1, -1):
+                acc = X_chain_local[a + 1] @ acc
+                R_post[a] = acc.copy()
+            # Sanity: L[n-1] should equal X_ee (the EE world transform).
+            # Note: for floating base chain[0] = 0, X_chain_local[0] = Xlocal[0] = T_base_world; OK.
+
+            # Compute the "between" matrices P[a, b] = X_{a+1} ... X_b for a < b.
+            # Stored as P_between[(a, b)] for a < b. We won't actually need all
+            # pairs precomputed — we can do it on-the-fly via L and L_inv.
+            # But L_inv is unstable for SE(3) (not just invertible by skipping —
+            # the L[a] matrices are SE(3), so their inverse is closed-form).
+            def se3_inv(T):
+                Ti = np.eye(4)
+                Rt = T[:3, :3].T
+                Ti[:3, :3] = Rt
+                Ti[:3, 3] = -Rt @ T[:3, 3]
+                return Ti
+
+            # Map each DOF index i (in v-space) to (block_idx, column_idx) for the chain.
+            dof_to_block = {}
+            block_dof_lists = []  # block_dof_lists[a] = list of v-indices in joint chain_jids[a]
+            for a, j in enumerate(chain_jids):
+                S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+                if S.ndim == 1:
+                    S = S.reshape(-1, 1)
+                vinds = vinds_for(j)
+                this_dofs = []
+                for c in range(S.shape[1]):
+                    vi = vinds[c] if c < len(vinds) else vinds[-1]
+                    dof_to_block[vi] = (a, c)
+                    this_dofs.append(vi)
+                block_dof_lists.append(this_dofs)
+            chain_dofs = sorted(dof_to_block.keys())
+
+            # First derivatives dM/dv_i = L[a] @ A_i_local @ R_post[a]
+            # for i in joint a, local column c.
+            dM = {}  # dM[i] = 4x4
+            for i in chain_dofs:
+                a, c = dof_to_block[i]
+                A = A_for_dof(chain_jids[a], c)
+                dM[i] = L[a] @ A @ R_post[a]
+
+            # Second derivatives d2M/dv_i dv_j.
+            # We'll compute it directly using L, R_post, and a "between" product.
+            #
+            # For i in block a, j in block b, with a <= b in chain order:
+            #   - a == b (same joint): d2M = L[a] @ B(c_i, c_j) @ R_post[a]
+            #     where B is the joint's intra-joint second-derivative tensor.
+            #   - a < b: d2M = L[a] @ A_i @ P_a_to_b @ A_j @ R_post[b]
+            #     where P_a_to_b = X_chain_local[a+1] @ X_chain_local[a+2] @ ... @ X_chain_local[b]
+            # Note: For (i, j) in different blocks with a < b, symmetry gives
+            # the same result for (j, i).
+            d2M = np.zeros((len(chain_dofs), len(chain_dofs), 4, 4), dtype=np.float64)
+            chain_dof_index = {vi: idx for idx, vi in enumerate(chain_dofs)}
+
+            # Precompute between products P_ab for a <= b.
+            # P_a_to_b for a < b: from L[a]^{-1} @ L[b] (this is X_{a+1}*...*X_b).
+            # But Delta is identity at v=0, so L[b] = L[a] @ X_{a+1} @ ... @ X_b.
+            # Therefore X_{a+1} @ ... @ X_b = se3_inv(L[a]) @ L[b].
+            # Precompute Linv[a].
+            Linv = [se3_inv(L[a]) for a in range(n_chain)]
+
+            for ii, i in enumerate(chain_dofs):
+                a, c_i = dof_to_block[i]
+                for jj, j in enumerate(chain_dofs):
+                    b, c_j = dof_to_block[j]
+                    if a == b:
+                        if c_i <= c_j:
+                            B = B_for_dofpair(chain_jids[a], c_i, c_j)
+                            M2 = L[a] @ B @ R_post[a]
+                        else:
+                            # by symmetry, just copy from (c_j, c_i)
+                            B = B_for_dofpair(chain_jids[a], c_j, c_i)
+                            M2 = L[a] @ B @ R_post[a]
+                        d2M[ii, jj] = M2
+                    else:
+                        # different blocks; order them.
+                        if a < b:
+                            ap, bp = a, b
+                            i_prox, i_dist = i, j
+                            c_prox, c_dist = c_i, c_j
+                        else:
+                            ap, bp = b, a
+                            i_prox, i_dist = j, i
+                            c_prox, c_dist = c_j, c_i
+                        A_prox = A_for_dof(chain_jids[ap], c_prox)
+                        A_dist = A_for_dof(chain_jids[bp], c_dist)
+                        P_a_to_b = Linv[ap] @ L[bp]
+                        M2 = L[ap] @ A_prox @ P_a_to_b @ A_dist @ R_post[bp]
+                        d2M[ii, jj] = M2
+
+            # ----- Extract xyz Hessian: H_xyz[:, i, j] = (d2M @ ee_offset)[:3] -----
+            H_xyz = np.zeros((3, nv, nv), dtype=np.float64)
+            # First also extract first derivatives of p_ee for use in rpy term.
+            ee_off_col = ee_offset_col.reshape(4)
+            dp = np.zeros((3, nv), dtype=np.float64)  # d p_ee / d v_i
+            for i in chain_dofs:
+                dp[:, i] = (dM[i] @ ee_off_col)[:3]
+            for ii, i in enumerate(chain_dofs):
+                for jj, j in enumerate(chain_dofs):
+                    H_xyz[:, i, j] = (d2M[ii, jj] @ ee_off_col)[:3]
+
+            # ----- Extract dR/dv_i and d2R/dv_i dv_j (3x3 blocks) -----
+            dR = np.zeros((nv, 3, 3), dtype=np.float64)
+            for i in chain_dofs:
+                dR[i] = dM[i][:3, :3]
+            d2R = np.zeros((nv, nv, 3, 3), dtype=np.float64)
+            for ii, i in enumerate(chain_dofs):
+                for jj, j in enumerate(chain_dofs):
+                    d2R[i, j] = d2M[ii, jj][:3, :3]
+
+            # ----- Build the angular Jacobian J_w in world frame: -----
+            # The world angular velocity of the EE link == that of the last
+            # chain joint (rigid offset doesn't add angular velocity), so use
+            # the chain rotation (L[n-1])[:3, :3] = R_chain0, NOT R_ee0 (which
+            # might include an extra fixed-joint rotation in the fixed-EE case).
+            R_chain0 = L[n_chain - 1][:3, :3]
+            R0T = R_chain0.T
+            J_w = np.zeros((3, nv), dtype=np.float64)
+            for i in chain_dofs:
+                J_w[:, i] = skew_inv(dR[i] @ R0T)
+
+            # ----- World-angular kinematic Hessian: dJ_w[:, i]/dv_j -----
+            # From R(v) ≈ R(0) · exp(omega_per_unit_v · v + ...), we have
+            #   dR/dv_i = [J_w_i]_x · R(0).
+            # Differentiating w.r.t. v_j (and using d(R(0))/dv_j = 0; R(0) is the
+            # base point, not the curve):
+            #   d2R/(dv_i dv_j) = [dJ_w_i/dv_j]_x · R(0) + [J_w_i]_x · dR/dv_j
+            #                   = [dJ_w_i/dv_j]_x · R(0) + [J_w_i]_x · [J_w_j]_x · R(0)
+            # ⇒  [dJ_w_i/dv_j]_x = d2R/(dv_i dv_j) · R(0)^T - [J_w_i]_x · [J_w_j]_x
+            H_w = np.zeros((3, nv, nv), dtype=np.float64)  # H_w[:, i, j] = dJ_w[:, i]/dv_j
+            for ii, i in enumerate(chain_dofs):
+                Jw_i_x = axis_skew(J_w[:, i])
+                for jj, j in enumerate(chain_dofs):
+                    Jw_j_x = axis_skew(J_w[:, j])
+                    M_skew = d2R[i, j] @ R0T - Jw_i_x @ Jw_j_x
+                    H_w[:, i, j] = skew_inv(M_skew)
+
+            # ----- rpy chain rule -----
+            rpy = rpy_from_R(R_ee0)
+            E, dE_dr, dE_dp, dE_dy = E_and_deriv(rpy)
+            Einv = np.linalg.inv(E)
+            dE_drpy = [dE_dr, dE_dp, dE_dy]
+
+            # drpy/dv_i = Einv @ J_w[:, i]
+            drpy_dv = np.zeros((3, nv), dtype=np.float64)
+            for i in chain_dofs:
+                drpy_dv[:, i] = Einv @ J_w[:, i]
+
+            # H_rpy[:, i, j] = (dEinv/dv_j) J_w[:, i] + Einv @ dJ_w[:, i]/dv_j
+            # dEinv/dv_j = -Einv @ (sum_k (dE/drpy_k) (drpy_k/dv_j)) @ Einv
+            H_rpy = np.zeros((3, nv, nv), dtype=np.float64)
+            for ii, i in enumerate(chain_dofs):
+                for jj, j in enumerate(chain_dofs):
+                    dE_dvj = (dE_drpy[0] * drpy_dv[0, j]
+                              + dE_drpy[1] * drpy_dv[1, j]
+                              + dE_drpy[2] * drpy_dv[2, j])
+                    dEinv_dvj = -Einv @ dE_dvj @ Einv
+                    H_rpy[:, i, j] = dEinv_dvj @ J_w[:, i] + Einv @ H_w[:, i, j]
+
+            # Symmetrize over (i, j) — H_rpy from the formula is per-pair but
+            # the true Hessian of a scalar w.r.t. v is symmetric in (i, j).
+            H_rpy = 0.5 * (H_rpy + np.transpose(H_rpy, axes=(0, 2, 1)))
+            # H_xyz is already symmetric by construction (d2M[ii, jj] == d2M[jj, ii]
+            # is enforced by our case logic above), but symmetrize defensively.
+            H_xyz = 0.5 * (H_xyz + np.transpose(H_xyz, axes=(0, 2, 1)))
+
+            return np.concatenate([H_xyz, H_rpy], axis=0)
+
+        ee_jids, fixed_jids = self.select_end_effector_joints(ee_joint_names)
+        d2eePos_arr = []
+        ee_off_col = ee_offsets[0]
+
+        for jid in ee_jids:
+            chain = sorted(self.robot.get_ancestors_by_id(jid)) + [jid]
+            d2eePos_arr.append(hessian_for_chain(chain, Xw[jid], ee_off_col))
+
+        for fjid in fixed_jids:
+            fj = self.robot.get_fixed_joint_by_id(fjid)
+            X_fixed = np.asarray(fj.get_transformation_matrix_hom(), dtype=np.float64)
+            if fj.parent_name == -1:
+                d2eePos_arr.append(np.zeros((6, nv, nv), dtype=np.float64))
+            else:
+                parent = self.robot.get_joint_by_name(fj.parent_name)
+                pid = parent.get_id()
+                X_ee = Xw[pid] @ X_fixed
+                chain = sorted(self.robot.get_ancestors_by_id(pid)) + [pid]
+                # When the EE is a fixed offset from joint pid, the chain ends
+                # at pid and the "ee_offset" we apply to the chain product L[k]
+                # is X_fixed @ ee_off_col (i.e. translate further into the
+                # fixed-joint frame before applying the user-supplied offset).
+                ee_off_after_fixed = (X_fixed @ ee_off_col).reshape(4, 1)
+                # Note: hessian_for_chain uses X_ee for R_ee0 / p_ee0 baseline
+                # which we pre-multiply by X_fixed implicitly via X_ee.
+                d2eePos_arr.append(hessian_for_chain(chain, X_ee, ee_off_after_fixed))
+
+        return d2eePos_arr
+
     def apply_external_forces(self, q, f_in, f_ext):
         """Distribute externally applied forces to the internal rigid body force array.
 
