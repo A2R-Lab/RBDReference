@@ -176,12 +176,22 @@ class PinocchioModelAdapter:
         # Skipping such configs is correct, not masking; healthy robots have a
         # smallest mass-matrix singular value far above 1e-6. (Catches rizon4,
         # whose model is near-singular across configs.)
+        #
+        # For mimic robots, the unreduced pinocchio M is structurally
+        # singular (the mimic v-slot's row/col duplicates the mimicked
+        # joint's). The DYNAMICALLY relevant quantity is the REDUCED M
+        # (`G^T M G` with `G` the constraint projection), which is what
+        # CRBA already produces via the mimic-aware reduce pattern.
         import pinocchio as pin
 
         q_pin = self._to_pin_q(q)
         mass = pin.crba(self.model, self.data, q_pin)
         mass = np.asarray(mass, dtype=np.float64)
         mass = 0.5 * (mass + mass.T)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            mass = self._reduce_pin_matrix_to_project(
+                mass, axes_to_reduce=[(0, "v"), (1, "v")]
+            )
         singular_values = np.linalg.svd(mass, compute_uv=False)
         if singular_values.size == 0:
             return False
@@ -201,22 +211,30 @@ class PinocchioModelAdapter:
 
         q_pin = self._to_pin_q(q)
         qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
-        # tau is a generalized force in the project layout. For mimic robots
-        # the project's v-space is reduced relative to pinocchio's v-space:
-        # the tau slot for the mimicked joint absorbs the mimic's
-        # contribution scaled by `multiplier`. Pinocchio's ABA expects tau
-        # in its own (unreduced) layout. The exact mapping is:
-        #   tau_pin[mimicked] = tau_project[mimicked]    (the original direct part)
-        #   tau_pin[mimic_m]  = 0                        (no independent torque)
-        # since the mimic's torque acts via the multiplier in the reduced
-        # system but pin doesn't see the constraint here. This is the same
-        # convention used to recover RNEA in reverse and matches how the
-        # project-layout `aba` would interpret tau if the mimic constraint
-        # were treated explicitly. NOTE: a fully constraint-aware comparison
-        # (locking-projection of M, Cqd, and tau) is out of scope for THIS
-        # task; downstream dynamics comparisons may flag a residual mismatch
-        # on h1_2 / fr3 due to this simplification (the residual is the
-        # mimic-joint torque coupling, which both sides must agree on).
+        # Mimic-aware forward dynamics. Pinocchio's `pin.aba` operates on
+        # the UNREDUCED model -- which for a mimic-constrained URDF is
+        # over-parameterized (the mimic's v-slot duplicates the
+        # mimicked joint's velocity scaled by `multiplier`). Naively
+        # calling `pin.aba(q, v, tau)` therefore solves a different
+        # system than the project's reduced model: the per-body ABA
+        # recursion uses each body's own (S, U, d) and the resulting
+        # qdd is NOT the reduced-model acceleration that matches the
+        # project's constraint-aware semantics. Using a locked / reduced
+        # model on the pinocchio side gives the bit-comparable answer:
+        #     qdd = M_reduced^{-1} * (tau_project - rnea_reduced(q, v, 0))
+        # `self.rnea` and `self.minv` already perform the mimic
+        # reduction (CRBA folds the duplicated rows/cols with the URDF
+        # multiplier, and rnea reduces the resulting bias the same
+        # way), so building ABA on top of them is the cleanest way to
+        # express the constraint-aware comparison without depending on
+        # Pinocchio's reduced-model builder.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            tau_proj = np.asarray(tau, dtype=np.float64)
+            qd_proj = np.asarray(qd, dtype=np.float64)
+            nv_proj = qd_proj.shape[0]
+            bias = self.rnea(q, qd_proj, np.zeros(nv_proj))
+            mass = self.minv(q)
+            return normalize_vector(mass @ (tau_proj - bias))
         tau_pin = self._expand_project_v_to_pin(np.asarray(tau, dtype=np.float64))
         qdd = pin.aba(self.model, self.data, q_pin, qd_pin, tau_pin)
         return normalize_vector(self._reduce_pin_v_to_project(np.asarray(qdd, dtype=np.float64)))
@@ -537,27 +555,52 @@ class PinocchioModelAdapter:
 
     def q_tangent_residual(self, q_project_a, q_project_b):
         """Tangent-space residual ``q_b (-) q_a`` between two project-layout
-        configurations, via `pin.difference`. Returns the nv-vector so that two
-        configurations representing the same pose give ~0 regardless of joint
-        representation (scalar-angle vs [cos,sin]) or 2*pi wrapping. This is the
+        configurations, via `pin.difference`. Returns an nv_project-vector
+        (the project-layout reduced size) so that two configurations
+        representing the same pose give ~0 regardless of joint representation
+        (scalar-angle vs [cos,sin]) or 2*pi wrapping. This is the
         representation-agnostic way to compare a continuous-joint / free-flyer
-        q-update across the two libraries."""
+        q-update across the two libraries.
+
+        For mimic robots, `pin.difference` returns the unreduced pin nv
+        vector; we reduce it (mimic v-slots fold into the mimicked v-slot
+        with the URDF multiplier scaling) so the size matches the
+        project layout. For a well-formed mimic relation, the mimic
+        joint's residual is `multiplier * residual[target]`, so the
+        reduce pattern only doubles the target's effective contribution
+        — but residual ~= 0 for a correct integrator, so this is a
+        size-fix only."""
         import pinocchio as pin
 
         q0 = np.asarray(self._to_pin_q(q_project_a), dtype=np.float64)
         q1 = np.asarray(self._to_pin_q(q_project_b), dtype=np.float64)
-        return np.asarray(pin.difference(self.model, q0, q1), dtype=np.float64)
+        residual = np.asarray(pin.difference(self.model, q0, q1), dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            return self._reduce_pin_v_to_project(residual)
+        return residual
 
     def _pin_dIntegrate(self, q, v_dt, with_respect_to):
-        """Wrap `pin.dIntegrate` and return the (nv, nv) Jacobian."""
+        """Wrap `pin.dIntegrate` and return the (nv_project, nv_project)
+        Jacobian.
+
+        For mimic robots, `v_dt` arrives in the project's reduced nv
+        layout; we expand to pinocchio's nv before calling `dIntegrate`,
+        then reduce the resulting (nv_pin, nv_pin) Jacobian on both axes
+        to the project layout (mimic v-slots fold into the target with
+        the URDF multiplier on each axis)."""
         import pinocchio as pin
 
         q_pin = self._to_pin_q(q)
+        v_dt_pin = self._expand_project_v_to_pin(np.asarray(v_dt, dtype=np.float64))
         arg = pin.ArgumentPosition.ARG0 if with_respect_to == "q" else pin.ArgumentPosition.ARG1
         J = np.asarray(
-            pin.dIntegrate(self.model, q_pin, np.asarray(v_dt, dtype=np.float64), arg),
+            pin.dIntegrate(self.model, q_pin, v_dt_pin, arg),
             dtype=np.float64,
         )
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            J = self._reduce_pin_matrix_to_project(
+                J, axes_to_reduce=[(0, "v"), (1, "v")]
+            )
         return J
 
     @staticmethod

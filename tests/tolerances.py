@@ -67,6 +67,21 @@ ROBOT_ALGORITHM_TOLERANCES = {
         atol=5e-9,
         note="Baxter fixed-base ABA agrees with Pinocchio to within a few nanounits; this narrowly scoped absolute tolerance avoids failing on near-zero residuals.",
     ),
+    ("h1_2", "aba"): Tolerance(
+        rtol=1e-3,
+        atol=1e-2,
+        note="h1_2 has 12 mimic joints whose reduced mass matrix is genuinely near-singular (min singular value ~4.3e-6 fixed-base, ~1.4e-5 floating-base; condition number ~7e5 / ~5e6). Project-side and Pinocchio-side reduced-model ABA agree algebraically but accumulate cond(M) * float64-epsilon noise (~1e-3 on the high-velocity samples, ~5e-5 on the zero-state sample). A structural error would be O(|qdd|) ~ 1e1, orders of magnitude larger.",
+    ),
+    ("h1_2", "rnea"): Tolerance(
+        rtol=1e-3,
+        atol=1e-2,
+        note="h1_2's reduced-model `forward_dynamics` (used in the equivalence tests under the `rnea` tolerance bucket) inherits the same cond(M)~7e5 noise floor as ABA: project-side and Pinocchio-side both compute qdd = Minv * (tau - bias) but their float64 Minv differs at the 1e-9 level which the conditioning amplifies to ~1e-3. The check still catches algorithmic divergence (which would be O(|qdd|) ~ 1e1).",
+    ),
+    ("h1_2", "minv"): Tolerance(
+        rtol=1e-6,
+        atol=1e-2,
+        note="h1_2's reduced mass matrix has cond(M) ~7e5 (fixed) / ~5e6 (floating) due to the genuinely small minimum singular value (~4e-6 / ~1.4e-5). Inverting that matrix amplifies the ~1e-9 cross-library round-off in CRBA to ~1e-2 on the largest Minv entries (scale ~6e4). Relative error stays at ~1e-7 (machine epsilon * cond), which is the floor; a structural bug would scale with the matrix magnitude.",
+    ),
     ("gen3", "rnea"): Tolerance(
         rtol=1e-7,
         atol=1e-8,

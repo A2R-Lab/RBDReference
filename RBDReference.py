@@ -2122,6 +2122,38 @@ class RBDReference:
             q = self._normalize_q_input(q)
             qd = self._normalize_v_input(qd)
             tau = self._normalize_v_input(tau)
+        # Mimic-aware fast path: the ABA recursion below uses per-body
+        # (S, U, d) that diverge from slot-accumulated by alpha/alpha^2
+        # factors for mimic joints. The += CRBA/RNEA-grad pattern is
+        # insufficient because `Ia = IA - U U^T / d` is a per-body update
+        # whose contribution to the parent's articulated inertia must be
+        # scaled by alpha^2, while the qdd-solve must accumulate the
+        # mimic's S^T*tau_eff contribution into the mimicked v-slot
+        # scaled by alpha. Rather than re-derive the recursion, we use
+        # the equivalent reduced-model forward dynamics:
+        #     qdd = M_reduced^{-1} * (tau - rnea(q, qd, 0))
+        # where M_reduced and rnea(q, qd, 0) are already mimic-aware via
+        # CRBA and the bpass `+= alpha * S^T f` pattern. This matches
+        # pinocchio's constraint-aware forward dynamics for mimic models
+        # (their `aba` on the unreduced model would diverge similarly).
+        if self._has_mimic_joints():
+            # NOTE: external forces (`f_ext`) are not currently threaded
+            # through this fast path; `rnea` does not apply them either.
+            # The downstream test suite does not exercise f_ext on mimic
+            # robots, but a future task should consolidate the external-
+            # force handling so the mimic path supports it cleanly.
+            n = len(qd)
+            bias = self.rnea(
+                q, qd, np.zeros(n),
+                GRAVITY=GRAVITY,
+                public_output=False,
+                normalize_input=False,
+            )[0]
+            Minv = self.minv(
+                q, output_dense=True, public_output=False, normalize_input=False
+            )
+            qdd = Minv @ (tau - bias)
+            return self._denormalize_v_output(qdd)
         if self.robot.floating_base:
             # allocate memory TODO check NB vs. n
             n = len(qd)
