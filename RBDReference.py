@@ -1215,7 +1215,9 @@ class RBDReference:
         Jacobian on the Lie-group integrator `self.integrate(q, h*e_i)`. This
         reuses the geometric-Jacobian gradient (machine-precision vs the proven
         prototype + pinocchio backend) and SYMMETRIZES the result. FD is fine
-        for a reference oracle; the (separate) GPU codegen path is analytic.
+        for a reference oracle; the (separate) GPU codegen path is the same
+        FD-on-Jacobian (the analytic d/dv Hessian on GPU is on the backlog --
+        see HANDOFF.md A.1 + docs/d2ee_analytic_derivation.md).
 
         Parameters
         ----------
