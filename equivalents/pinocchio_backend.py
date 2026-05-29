@@ -536,15 +536,50 @@ class PinocchioModelAdapter:
     def end_effector_pose_hessian(self, q, target_name: str, offset=None, step: float = 1e-5):
         """End-effector pose Hessian d^2(pose)/dv^2 (TANGENT, pinocchio convention).
 
-        Output shape is 6 x nv x nv. Computed as a central-difference FD of the
-        d/dv Jacobian on the Lie-group integrator `pin.integrate(q, h*e_i)`,
-        matching the project adapter's new d/dv Hessian method."""
+        Output shape is 6 x nv x nv. For joint targets uses pinocchio's analytic
+        flow (`computeForwardKinematicsDerivatives` + `computeJointKinematicHessians`
+        + `getJointKinematicHessian(LOCAL_WORLD_ALIGNED)`), which matches the d/dv
+        convention and runs in O(N) instead of O(nv) Jacobian FD calls. Frame
+        targets (and the back-compat path) fall back to central-difference FD on
+        the d/dv Jacobian via `pin.integrate(q, h*e_i)`. The analytic path mirrors
+        the bench harness in `test/benchmarks/baselines/pinocchio/timePinocchio.cpp`."""
+        import pinocchio as pin
+
         if offset is None:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
         q = self._normalize_project_q_for_pose_differences(q)
         nv = self.model.nv
-        hessian = np.zeros((6, nv, nv), dtype=np.float64)
 
+        # Analytic path: joint target with kinematic-hessian API available. Skip
+        # if the user passed a non-default offset (the analytic Hessian is rooted
+        # at the joint placement and ignores the EE offset that FD applies).
+        analytic_ok = (
+            target_name in self.joint_names
+            and hasattr(pin, "computeJointKinematicHessians")
+            and hasattr(pin, "getJointKinematicHessian")
+            and np.allclose(offset, np.array([0.0, 0.0, 0.0, 1.0]))
+        )
+        if analytic_ok:
+            q_pin = normalize_project_q_for_pin(
+                self.base_mode,
+                q,
+                joint_names=self.scalar_joint_names,
+                joint_types_by_name=self.urdf_joint_types_by_name,
+            )
+            v_zero = np.zeros(nv, dtype=np.float64)
+            a_zero = np.zeros(nv, dtype=np.float64)
+            pin.computeForwardKinematicsDerivatives(self.model, self.data, q_pin, v_zero, a_zero)
+            pin.computeJointKinematicHessians(self.model, self.data)
+            joint_id = self.model.getJointId(target_name)
+            H = np.asarray(
+                pin.getJointKinematicHessian(self.model, self.data, joint_id, pin.LOCAL_WORLD_ALIGNED),
+                dtype=np.float64,
+            )
+            # Pinocchio returns shape (6, nv, nv); our convention matches.
+            return H
+
+        # FD fallback (frame target or older pinocchio without kinematic-hessian API).
+        hessian = np.zeros((6, nv, nv), dtype=np.float64)
         for i in range(nv):
             v = np.zeros(nv, dtype=np.float64); v[i] = step
             q_plus = self._pin_integrate(q, v)
