@@ -107,6 +107,11 @@ ROBOT_ALGORITHM_TOLERANCES = {
         atol=1e-2,
         note="G1's mass matrix has entries up to ~1e4, which amplifies the ~1e-7 idsva_so residual to ~1e-3 when composing fdsva via Minv multiplication. Relative norm stays at ~1e-7 (8 significant digits).",
     ),
+    ("h1_2", "second_order_fdsva"): Tolerance(
+        rtol=1e-4,
+        atol=1e-1,
+        note="H1-2 (51 DoF, 12 mimic joints, mass matrix entries up to ~1e5) has the same Minv-amplification issue as G1, exacerbated by higher dimensionality. The reduced CRBA from the project analytic path vs pinocchio's C++ CRBA diverge at ~1e-7 relative (float64 round-off through 51x51 inversion); composing fdsva via Minv@..@Minv compounds this to ~1e-4 relative max in the tensor entries we care about. Relative residual norms stay at ~1e-7 (7-8 significant digits).",
+    ),
 }
 
 def get_tolerance(algorithm: str, robot_id: str | None = None) -> Tolerance:

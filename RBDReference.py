@@ -2994,6 +2994,15 @@ class RBDReference:
         propagated `a[i] = X[i] @ a[parent]` down the tree (rooted at
         `inv(X[0]) @ g`), carrying first- and second-order q-derivatives, then
         `f = I @ a` is back-propagated and projected onto each joint's S.
+
+        Mimic-aware: when any actuated joint is a URDF <mimic> joint, multiple
+        bodies share the same project v-slot. We allocate per-body UNIQUE
+        internal slots for the n-axis (so the dX / d2X / d2tau bookkeeping
+        doesn't overwrite a mimicked-joint slot with the mimic's contribution
+        and vice versa), then fold all three axes to the project layout with
+        the URDF mimic multiplier on each axis. Also use `q_for_joint` so a
+        mimic joint sees the scaled+offset slice of the target's q in its
+        transform.
         """
         if not self.robot.floating_base:
             raise ValueError("_floating_gravity_d2tau_dq_lie_direct requires a floating-base robot.")
@@ -3004,18 +3013,37 @@ class RBDReference:
             q[3:7] = self._normalize_xyzw_quaternion(q[3:7])
 
         NB, n = self.robot.get_num_bodies(), self.robot.get_num_vel()
+
+        # Build the per-body internal-vs-true slot mapping for the n-axis. For
+        # non-mimic robots the internal and true slots coincide (R below
+        # reduces to the identity and the fold is a no-op).
+        true_v_inds = [self._as_index_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
+        has_mimic = self._has_mimic_joints()
+        if has_mimic:
+            body_v_inds = []
+            offs = 0
+            for i in range(NB):
+                width = len(true_v_inds[i])
+                body_v_inds.append(list(range(offs, offs + width)))
+                offs += width
+            n_int = offs
+        else:
+            body_v_inds = true_v_inds
+            n_int = n
+        body_alpha = [self._mimic_multiplier(i) for i in range(NB)]
+
         gravity_vec = np.zeros(6); gravity_vec[5] = -GRAVITY
         X = np.zeros((NB, 6, 6))
-        dX = np.zeros((NB, n, 6, 6))
-        d2X = np.zeros((NB, n, n, 6, 6))
+        dX = np.zeros((NB, n_int, 6, 6))
+        d2X = np.zeros((NB, n_int, n_int, 6, 6))
         Imats = np.stack([np.asarray(self.robot.get_Imat_by_id(jid)) for jid in range(NB)])  # (NB, 6, 6)
 
         for jid in range(NB):
-            q_arg = q[self.robot.get_joint_index_q(jid)]
+            q_arg = self.robot.q_for_joint(jid, q)
             X[jid] = np.asarray(self.robot.get_Xmat_Func_by_id(jid)(q_arg)).reshape(6, 6)
             if not self.robot.get_joint_by_id(jid).position_symbols:
                 continue
-            vinds = self._as_index_list(self.robot.get_joint_index_v(jid))
+            vinds = body_v_inds[jid]
             if jid == 0:
                 # Root joint: Lie generators with Featherstone xlt translation-sign flip.
                 S_root = np.asarray(self.robot.get_S_by_id(0))
@@ -3025,6 +3053,12 @@ class RBDReference:
                     for lj, vj in enumerate(vinds):
                         d2X[jid, vi, vj] = X[jid] @ B[lj] @ B[li]
             else:
+                # In the internal (unreduced) layout, slot body_v_inds[jid]
+                # represents body jid's OWN q (one slot per body). The
+                # local q-derivative is therefore taken without an alpha
+                # factor; the final R-fold below propagates the alpha for
+                # mimic joints when collapsing the internal axes into the
+                # project layout.
                 for li, vi in enumerate(vinds):
                     dX[jid, vi] = np.asarray(self._spatial_xmat_derivative_func(jid, li)(q_arg)).reshape(6, 6)
                     for lj, vj in enumerate(vinds):
@@ -3035,38 +3069,41 @@ class RBDReference:
         # Forward sweep. Per-body work is per-body sequential (parent dependency)
         # but expressed as batched matmuls/broadcasts over the n direction axis.
         a = np.zeros((NB, 6))
-        da = np.zeros((NB, n, 6))
-        d2a = np.zeros((NB, n, n, 6))
+        da = np.zeros((NB, n_int, 6))
+        d2a = np.zeros((NB, n_int, n_int, 6))
         for jid in range(NB):
             pid = self.robot.get_parent_id(jid)
             if pid == -1:
                 inv_X = np.linalg.inv(X[jid])
                 a[jid] = inv_X @ gravity_vec
-                dX_inv = dX[jid] @ inv_X                                                      # (n, 6, 6)
-                inv_dX_inv = inv_X @ dX_inv                                                   # (n, 6, 6)
-                da[jid] = (-inv_dX_inv) @ gravity_vec                                         # (n, 6)
-                cross = inv_dX_inv[:, None] @ dX_inv[None, :]                                 # (n, n, 6, 6)
+                dX_inv = dX[jid] @ inv_X                                                      # (n_int, 6, 6)
+                inv_dX_inv = inv_X @ dX_inv                                                   # (n_int, 6, 6)
+                da[jid] = (-inv_dX_inv) @ gravity_vec                                         # (n_int, 6)
+                cross = inv_dX_inv[:, None] @ dX_inv[None, :]                                 # (n_int, n_int, 6, 6)
                 d2a[jid] = (cross + cross.transpose(1, 0, 2, 3) - inv_X @ d2X[jid] @ inv_X) @ gravity_vec
             else:
                 a[jid] = X[jid] @ a[pid]
                 da[jid] = dX[jid] @ a[pid] + da[pid] @ X[jid].T
-                cross = (dX[jid] @ da[pid].T).transpose(0, 2, 1)                              # (n, n, 6) with axes (k, l, a)
+                cross = (dX[jid] @ da[pid].T).transpose(0, 2, 1)                              # (n_int, n_int, 6)
                 d2a[jid] = d2X[jid] @ a[pid] + cross + cross.transpose(1, 0, 2) + d2a[pid] @ X[jid].T
 
         # f = Imat @ a as a batched GEMM. Reshape d2a's (k, l) dirs into a single
         # flat axis so the contraction is a clean (NB, *, 6) @ (NB, 6, 6) matmul.
-        Imats_T = np.transpose(Imats, (0, 2, 1))                               # (NB, 6, 6)
-        f = (Imats @ a[..., None]).squeeze(-1)                                 # (NB, 6)
-        df = da @ Imats_T                                                      # (NB, n, 6)
-        d2f = (d2a.reshape(NB, n * n, 6) @ Imats_T).reshape(NB, n, n, 6)        # (NB, n, n, 6)
+        Imats_T = np.transpose(Imats, (0, 2, 1))                                              # (NB, 6, 6)
+        f = (Imats @ a[..., None]).squeeze(-1)                                                # (NB, 6)
+        df = da @ Imats_T                                                                     # (NB, n_int, 6)
+        d2f = (d2a.reshape(NB, n_int * n_int, 6) @ Imats_T).reshape(NB, n_int, n_int, 6)      # (NB, n_int, n_int, 6)
 
         # Backward sweep: project onto S, then accumulate parent f-derivatives.
-        d2tau_dq = np.zeros((n, n, n))
+        d2tau_dq = np.zeros((n_int, n_int, n_int))
         for jid in range(NB - 1, -1, -1):
             S = np.asarray(self.robot.get_S_by_id(jid))
             if S.ndim == 1:
                 S = S.reshape(6, 1)
-            d2tau_dq[self._as_index_list(self.robot.get_joint_index_f(jid)), :, :] = (d2f[jid] @ S).transpose(2, 0, 1)
+            # Use the internal per-body slot for the output (axis 0) row so
+            # mimic / target body contributions live in distinct slots; the
+            # final fold below collapses them with the URDF multiplier.
+            d2tau_dq[body_v_inds[jid], :, :] = (d2f[jid] @ S).transpose(2, 0, 1)
             pid = self.robot.get_parent_id(jid)
             if pid == -1:
                 continue
@@ -3075,8 +3112,20 @@ class RBDReference:
             d2Xt = np.transpose(d2X[jid], (0, 1, 3, 2))
             f[pid] += Xt @ f[jid]
             df[pid] += dXt @ f[jid] + df[jid] @ Xt.T
-            cross_f = (dXt @ df[jid].T).transpose(0, 2, 1)                                    # (n, n, 6)
+            cross_f = (dXt @ df[jid].T).transpose(0, 2, 1)                                    # (n_int, n_int, 6)
             d2f[pid] += d2Xt @ f[jid] + cross_f + cross_f.transpose(1, 0, 2) + d2f[jid] @ Xt.T
+
+        if has_mimic:
+            # Fold each axis (output torque + two q-derivative axes) from the
+            # per-body unique slot layout to the project's reduced (nv) layout
+            # with the URDF mimic multiplier on each axis.
+            R = np.zeros((n_int, n))
+            for b in range(NB):
+                a_b = body_alpha[b]
+                for local_idx, int_slot in enumerate(body_v_inds[b]):
+                    true_slot = true_v_inds[b][local_idx]
+                    R[int_slot, true_slot] += a_b
+            d2tau_dq = np.einsum('ia,ijk,jb,kc->abc', R, d2tau_dq, R, R, optimize=True)
 
         return d2tau_dq
 
@@ -3118,18 +3167,50 @@ class RBDReference:
         gravity_vec = np.zeros(6)
         gravity_vec[5] = -idsva_gravity # a_base is gravity vec
 
-        body_v_inds = [self._as_index_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
+        # Mimic-aware indexing strategy: when ANY actuated joint is a URDF
+        # <mimic> joint, multiple bodies share the same project-layout v-slot.
+        # The triple-nested algorithm below writes into per-(jid, jid, jid)
+        # output cells; folding the writes inline with the proper alpha
+        # multipliers requires tracking three independent axes and converting
+        # every `=` to a `+= alpha_a * alpha_b * alpha_c` accumulation, with
+        # special care for the row-axis `st_j_inds` fancy-index assignments
+        # (which would otherwise silently lose contributions when the index
+        # list contains repeats from mimic siblings). Cleaner is to run the
+        # algorithm with a UNIQUE per-body internal slot allocation, then fold
+        # each axis of the (n_int, n_int, n_int) output to the (nv, nv, nv)
+        # project layout with alpha weights at the very end.
+        true_v_inds = [self._as_index_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
+        has_mimic = self._has_mimic_joints()
+        if has_mimic:
+            # Allocate a unique block of slots per body: body 0 keeps its
+            # native v-width (6 for floating-base, 1 for fixed-base 1-DoF
+            # root), each subsequent body gets its own single slot. This
+            # makes every internal index list collision-free regardless of
+            # mimic relations.
+            body_v_inds = []
+            offs = 0
+            for i in range(NB):
+                width = len(true_v_inds[i])
+                body_v_inds.append(list(range(offs, offs + width)))
+                offs += width
+            n_int = offs
+        else:
+            body_v_inds = true_v_inds
+            n_int = n
+        body_alpha = [self._mimic_multiplier(i) for i in range(NB)]
 
         def subtree_vel_inds(subtree):
             return [vi for body_id in subtree for vi in body_v_inds[body_id]]
 
         # forward pass
         modelNB = NB
-        modelNV = n
+        modelNV = n_int
         for i in range(modelNB):
             parent_i = self.robot.get_parent_id(i)
-            inds_q = self.robot.get_joint_index_q(i)
-            _q = q[inds_q]
+            # Mimic-aware: use `q_for_joint` so a mimic joint sees the
+            # scaled+offset slice of the mimicked joint's q (which is what
+            # determines its body transform).
+            _q = self.robot.q_for_joint(i, q)
             Xmat = self.robot.get_Xmat_Func_by_id(i)(_q)
           # compute X, v and a
             if parent_i == -1: # parent is base
@@ -3143,14 +3224,18 @@ class RBDReference:
                 v[:,i] = v[:,parent_i]
                 a[:,i] = a[:,parent_i]
 
-            Xdown0[i] = np.linalg.inv(Xup0[i]) 
+            Xdown0[i] = np.linalg.inv(Xup0[i])
             S[i] = self.robot.get_S_by_id(i)
             if len(S[i].shape) == 1:
                 S[i] = np.reshape(S[i], (6,1))
             S[i] = Xdown0[i] @ S[i]
-            inds_v = self.robot.get_joint_index_v(i)
-            _qd = np.atleast_1d(qd[inds_v])
-            _qdd = np.atleast_1d(qdd[inds_v])
+            # Mimic-aware joint velocity: the body's spatial joint velocity is
+            # `alpha_i * qd[v_target]` for a mimic; the multiplier scales the
+            # qd / qdd read from the (shared) project v-slot.
+            inds_v_true = true_v_inds[i]
+            alpha_i = body_alpha[i]
+            _qd = alpha_i * np.atleast_1d(qd[inds_v_true])
+            _qdd = alpha_i * np.atleast_1d(qdd[inds_v_true])
             vJ[:,i] = np.reshape(np.matmul(S[i], _qd), (6,))
             aJ[:,i] = self.cross_operator(v[:,i])@vJ[:,i] + np.reshape(np.matmul(S[i], _qdd), (6,))
             psid[i] = self.cross_operator(v[:,i])@S[i]
@@ -3172,16 +3257,16 @@ class RBDReference:
                     f[:, pi] = f[:, pi] + f[:, i]
 
 
-        T1 = np.zeros((6,n))
-        T2 = np.zeros((6,n))
-        T3 = np.zeros((6,n))
-        T4 = np.zeros((6,n))
-        D1 = np.zeros((36,n))
-        D2 = np.zeros((36,n))
-        D3 = np.zeros((36,n))
-        D4 = np.zeros((36,n))
-        
-        for j in range(modelNB-1,-1,-1):      
+        T1 = np.zeros((6,n_int))
+        T2 = np.zeros((6,n_int))
+        T3 = np.zeros((6,n_int))
+        T4 = np.zeros((6,n_int))
+        D1 = np.zeros((36,n_int))
+        D2 = np.zeros((36,n_int))
+        D3 = np.zeros((36,n_int))
+        D4 = np.zeros((36,n_int))
+
+        for j in range(modelNB-1,-1,-1):
             for d in range(S[j].shape[1]):
                 S_d = S[j][:, d]
                 Sd_d = Sd[j][:, d]
@@ -3189,26 +3274,26 @@ class RBDReference:
                 psidd_d = psidd[j][:, d]
 
 
-                Bic_phii1 =  self.dual_cross_operator(S_d)@IC[j] 
+                Bic_phii1 =  self.dual_cross_operator(S_d)@IC[j]
                 Bic_phii2 = self.icrf(IC[j] @ S_d)
                 Bic_phii3 = -IC[j] @ self.cross_operator(S_d)
-                
+
                 Bic_phii = Bic_phii1+Bic_phii2+Bic_phii3 # almost complete
-               
+
                 Bic_psii_dot = 2 * 0.5 * (self.dual_cross_operator(psid_d) @ IC[j] + self.icrf(IC[j] @ psid_d) - IC[j] @ self.cross_operator(psid_d))
-                
+
                 dd = body_v_inds[j][d]
                 A1 = self.dot_matrix(IC[j], S_d) # crf(S_d) @ IC[j] - (IC @ crm(S_d))
                 A2 = Bic_psii_dot + self.dot_matrix(BC[j], S_d) # crf(S_d) @ BC[j] - (BC[j] @ crm(S_d))
                 A3 = self.icrf(IC[j].T @ S_d)
-        
+
 
                 T1[:, dd] = IC[j] @ S_d
                 T2[:, dd] = -BC[j].T @ S_d
                 T3[:, dd] = BC[j] @ psid_d + IC[j] @ psidd_d + self.icrf(f[:, j]) @ S_d
                 T4[:, dd] = BC[j] @ S_d + IC[j] @ (psid_d + Sd_d)
 
-                
+
 
                 D1[:, dd] = A1.flatten()
                 D2[:, dd] = A2.flatten(order='F')
@@ -3219,8 +3304,8 @@ class RBDReference:
         d2tau_dq = np.zeros((modelNV,modelNV,modelNV))
         d2tau_dqd = np.zeros((modelNV,modelNV,modelNV))
         d2tau_dvdq = np.zeros((modelNV,modelNV,modelNV))
-        
-        #backward pass: Can be parallelized over all j,d,k,c 
+
+        #backward pass: Can be parallelized over all j,d,k,c
         for j in range(modelNB-1,-1,-1):
             st_j = self.robot.get_subtree_by_id(j) # Subtree of j
             st_j_inds = subtree_vel_inds(st_j)
@@ -3319,6 +3404,28 @@ class RBDReference:
                         if k == j:
                             d2tau_dqd[st_j_inds, dd, cc] = -np.dot(t2, D1[:, st_j_inds])
 
+        if has_mimic:
+            # Fold each axis of the (n_int, n_int, n_int) unreduced output to
+            # the (n, n, n) project layout. The reduction matrix `R` has
+            # shape (n_int, n) with R[int_slot, true_slot] = alpha_b for the
+            # body b that owns that internal slot. Applying R along each
+            # axis collapses bodies that share a true v-slot (mimic+target)
+            # into the same project-layout cell, with the URDF multiplier
+            # scaling on every axis the cell appears on.
+            R = np.zeros((n_int, n))
+            for b in range(NB):
+                a_b = body_alpha[b]
+                for local_idx, int_slot in enumerate(body_v_inds[b]):
+                    true_slot = true_v_inds[b][local_idx]
+                    # Root in floating-base has alpha=1 and a 1:1 internal->true
+                    # mapping; mimic bodies are 1-DoF with alpha=multiplier and
+                    # their true slot equals the target's true slot.
+                    R[int_slot, true_slot] += a_b
+            d2tau_dq = np.einsum('ia,ijk,jb,kc->abc', R, d2tau_dq, R, R, optimize=True)
+            d2tau_dqd = np.einsum('ia,ijk,jb,kc->abc', R, d2tau_dqd, R, R, optimize=True)
+            d2tau_dvdq = np.einsum('ia,ijk,jb,kc->abc', R, d2tau_dvdq, R, R, optimize=True)
+            dM_dq = np.einsum('ia,ijk,jb,kc->abc', R, dM_dq, R, R, optimize=True)
+
         if self.robot.floating_base:
             d2tau_dq = d2tau_dq + self._floating_gravity_d2tau_dq_lie_direct(q, GRAVITY)
 
@@ -3376,12 +3483,33 @@ class RBDReference:
         a = np.zeros((6, NB))
         f = np.zeros((6, NB))
 
-        body_v_inds = [self._as_index_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
+        # Mimic-aware indexing: when any actuated joint is a URDF <mimic>, the
+        # native v-slot per body is shared with the target's, so the assigning
+        # writes below would silently overwrite contributions. Use per-body
+        # UNIQUE internal slots for the inner algorithm and fold each axis to
+        # the project layout (alpha-weighted) at the end. (See
+        # idsva_so_body_frame for the same idiom.)
+        true_v_inds = [self._as_index_list(self.robot.get_joint_index_v(i)) for i in range(NB)]
+        has_mimic = self._has_mimic_joints()
+        if has_mimic:
+            body_v_inds = []
+            offs = 0
+            for i in range(NB):
+                width = len(true_v_inds[i])
+                body_v_inds.append(list(range(offs, offs + width)))
+                offs += width
+            n_int = offs
+        else:
+            body_v_inds = true_v_inds
+            n_int = n
+        body_alpha = [self._mimic_multiplier(i) for i in range(NB)]
 
         # Forward sweep: kinematic & dynamic per-body quantities in world frame.
         for i in range(NB):
             parent = self.robot.get_parent_id(i)
-            Xmat = np.asarray(self.robot.get_Xmat_Func_by_id(i)(q[self.robot.get_joint_index_q(i)])).reshape(6, 6)
+            # Mimic-aware: `q_for_joint` gives the body its scaled+offset q
+            # slice when it's a mimic of another joint.
+            Xmat = np.asarray(self.robot.get_Xmat_Func_by_id(i)(self.robot.q_for_joint(i, q))).reshape(6, 6)
             if parent == -1:
                 # Floating-base root: the codebase's get_Xmat_Func_by_id(0) returns the
                 # body-to-world spatial transform, but the algorithm expects Xup (world-to-body)
@@ -3400,8 +3528,14 @@ class RBDReference:
                 S_local = S_local.reshape(6, 1)
             S[i] = Xdown0[i] @ S_local
 
-            _qd = np.atleast_1d(qd[body_v_inds[i]])
-            _qdd = np.atleast_1d(qdd[body_v_inds[i]])
+            # Mimic-aware joint velocity: read from the true (shared) project
+            # v-slot and scale by the joint's mimic multiplier (1.0 for
+            # non-mimic). The S[i] @ _qd / S[i] @ _qdd product is then the
+            # body's actual spatial velocity / acceleration contribution.
+            inds_v_true = true_v_inds[i]
+            alpha_i = body_alpha[i]
+            _qd = alpha_i * np.atleast_1d(qd[inds_v_true])
+            _qdd = alpha_i * np.atleast_1d(qdd[inds_v_true])
             vJ = (S[i] @ _qd).reshape(6)
             aJ = self.cross_operator(v[:, i]) @ vJ + (S[i] @ _qdd).reshape(6)
             psid[i] = self.cross_operator(v[:, i]) @ S[i]
@@ -3417,10 +3551,10 @@ class RBDReference:
                      - IC[i] @ self.cross_operator(v[:, i]))
             f[:, i] = IC[i] @ a[:, i] + self.dual_cross_operator(v[:, i]) @ IC[i] @ v[:, i]
 
-        d2tau_dq = np.zeros((n, n, n))
-        d2tau_dqd = np.zeros((n, n, n))
-        d2tau_dvdq = np.zeros((n, n, n))
-        dM_dq = np.zeros((n, n, n))
+        d2tau_dq = np.zeros((n_int, n_int, n_int))
+        d2tau_dqd = np.zeros((n_int, n_int, n_int))
+        d2tau_dvdq = np.zeros((n_int, n_int, n_int))
+        dM_dq = np.zeros((n_int, n_int, n_int))
 
         # Triple ancestor walk: i = body, j = ancestor-or-self of i, k = ancestor-or-self of j.
         # IC/BC/f are aggregated up to the parent at the end of each i-iteration so that
@@ -3526,6 +3660,22 @@ class RBDReference:
         # MATLAB's `d2tau_cross` stores [τ, q, qd]; our convention is [τ, qd, q].
         # Swap the trailing axes so the output matches `idsva_so`.
         d2tau_dvdq = d2tau_dvdq.transpose(0, 2, 1)
+
+        if has_mimic:
+            # Fold each axis of the (n_int, n_int, n_int) unreduced output to
+            # (n, n, n) project layout with the URDF mimic multiplier scaling
+            # per axis. See idsva_so_body_frame for the same idiom.
+            R = np.zeros((n_int, n))
+            for b in range(NB):
+                a_b = body_alpha[b]
+                for local_idx, int_slot in enumerate(body_v_inds[b]):
+                    true_slot = true_v_inds[b][local_idx]
+                    R[int_slot, true_slot] += a_b
+            d2tau_dq = np.einsum('ia,ijk,jb,kc->abc', R, d2tau_dq, R, R, optimize=True)
+            d2tau_dqd = np.einsum('ia,ijk,jb,kc->abc', R, d2tau_dqd, R, R, optimize=True)
+            d2tau_dvdq = np.einsum('ia,ijk,jb,kc->abc', R, d2tau_dvdq, R, R, optimize=True)
+            dM_dq = np.einsum('ia,ijk,jb,kc->abc', R, dM_dq, R, R, optimize=True)
+
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
 
     def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):

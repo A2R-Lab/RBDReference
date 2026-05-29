@@ -311,32 +311,54 @@ class PinocchioModelAdapter:
 
         Pinocchio's mixed tensor `d2tau_dqdv[i,j,k] = d2tau_i/(dq_j dv_k)` is
         transposed on axes (1,2) to match our `d2tau_dvdq[i,j,k] = d2tau_i/(dv_j dq_k)`.
+
+        For mimic robots the pin_so_ext extension builds an UNREDUCED pin
+        model, so its tensors are sized (nv_pin, nv_pin, nv_pin). After the
+        C++ call we fold all three axes (output torque axis + two derivative
+        axes) into the project layout by accumulating mimic v-slots into
+        the target's v-slot with the URDF multiplier scaling. This matches
+        the reduced-model tensors that the project's mimic-aware
+        `idsva_so_body_frame` produces.
         """
         from .pin_so_ext import load as _load_so
 
         ext = _load_so()
-        q_pin = normalize_project_q_for_pin(
-            self.base_mode,
-            q,
-            joint_names=self.scalar_joint_names,
-            joint_types_by_name=self.urdf_joint_types_by_name,
-        )
-        qd_arr = np.asarray(qd, dtype=np.float64)
-        qdd_arr = np.asarray(qdd, dtype=np.float64)
+        # Expand the project q to the FULL pin layout (mimic-mirrored entries
+        # injected). The C++ extension expects pin nq.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            q_pin = self._expand_project_q_to_pin_full(q)
+            qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+            qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
+        else:
+            q_pin = normalize_project_q_for_pin(
+                self.base_mode,
+                q,
+                joint_names=self.scalar_joint_names,
+                joint_types_by_name=self.urdf_joint_types_by_name,
+            )
+            qd_pin = np.asarray(qd, dtype=np.float64)
+            qdd_pin = np.asarray(qdd, dtype=np.float64)
         d2tau_dqdq, d2tau_dvdv, d2tau_dqdv, d2tau_dadq = ext.compute_rnea_second_order(
             self.urdf_path,
             self.base_mode == "floating",
             np.asarray(q_pin, dtype=np.float64),
-            qd_arr,
-            qdd_arr,
+            np.asarray(qd_pin, dtype=np.float64),
+            np.asarray(qdd_pin, dtype=np.float64),
         )
+        d2tau_dq = np.asarray(d2tau_dqdq, dtype=np.float64)
+        d2tau_dqd = np.asarray(d2tau_dvdv, dtype=np.float64)
         d2tau_dvdq = np.asarray(d2tau_dqdv, dtype=np.float64).transpose(0, 2, 1)
-        return (
-            np.asarray(d2tau_dqdq, dtype=np.float64),
-            np.asarray(d2tau_dvdv, dtype=np.float64),
-            d2tau_dvdq,
-            np.asarray(d2tau_dadq, dtype=np.float64),
-        )
+        dM_dq = np.asarray(d2tau_dadq, dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            # Pin SO tensors are (nv_pin, nv_pin, nv_pin) on all three axes
+            # in v-space. Fold each axis with the mimic multiplier so the
+            # result matches the project's reduced (nv, nv, nv) layout.
+            reduce_axes = [(0, "v"), (1, "v"), (2, "v")]
+            d2tau_dq = self._reduce_pin_matrix_to_project(d2tau_dq, axes_to_reduce=reduce_axes)
+            d2tau_dqd = self._reduce_pin_matrix_to_project(d2tau_dqd, axes_to_reduce=reduce_axes)
+            d2tau_dvdq = self._reduce_pin_matrix_to_project(d2tau_dvdq, axes_to_reduce=reduce_axes)
+            dM_dq = self._reduce_pin_matrix_to_project(dM_dq, axes_to_reduce=reduce_axes)
+        return (d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq)
 
     def fdsva_so(self, q, qd, u):
         """Return (daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq) composed from
@@ -345,7 +367,44 @@ class PinocchioModelAdapter:
         Uses the same composition formula as `RBDReference.fdsva_so`, but with
         every input grounded in Pinocchio's bound C++ implementations so the
         result is independent of our analytic code path.
+
+        Mimic-aware: for robots with URDF <mimic> joints the unreduced
+        `pin.aba` / `pin.computeMinverse` would operate on the un-reduced
+        model whose mass matrix is structurally singular (a duplicated
+        row/col per mimic). Instead we ground `qdd` in `self.aba` (which
+        already does the reduced-model M^{-1}(tau - bias) composition) and
+        `Minv` in `self.minv` (which inverts the reduced CRBA mass matrix);
+        the second-order RNEA and forward-dynamics gradient inputs are taken
+        from the now-mimic-aware `self.idsva_so_body_frame` /
+        `self.forward_dynamics_grad`. The composition formula is unchanged
+        — only the source of each input shifts to the reduced model.
         """
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            qdd = self.aba(q, qd, u)
+            qdd = np.asarray(qdd, dtype=np.float64)
+            d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq = self.idsva_so_body_frame(q, qd, qdd)
+            Minv = self.minv(q)
+            fd_dq, fd_dqd = self.forward_dynamics_grad(q, qd, u)
+            daba_dqdq = -np.einsum(
+                "il,ljk->ijk",
+                Minv,
+                d2tau_dq
+                + np.einsum("ilk,lj->ijk", dM_dq, fd_dq)
+                + np.einsum("ilk,lj->ikj", dM_dq, fd_dq),
+            )
+            daba_dvdq = -np.einsum(
+                "il,ljk->ijk",
+                Minv,
+                d2tau_dvdq + np.einsum("ilk,lj->ijk", dM_dq, fd_dqd),
+            )
+            daba_dvdv = -np.einsum("il,ljk->ijk", Minv, d2tau_dqd)
+            daba_dtdq = -np.einsum(
+                "il,ljk->ijk",
+                Minv,
+                np.einsum("ilk,lj->ijk", dM_dq, Minv),
+            )
+            return daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq
+
         import pinocchio as pin
 
         q_pin = normalize_project_q_for_pin(
