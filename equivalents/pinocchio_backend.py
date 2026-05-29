@@ -385,32 +385,28 @@ class PinocchioModelAdapter:
     def forward_dynamics_grad(self, q, qd, u):
         import pinocchio as pin
 
+        # Mimic: pin.computeABADerivatives' per-body recursion doesn't commute
+        # with the `+= alpha *` fold (same root cause as the ABA mimic gap).
+        # Use the implicit-fn identity instead: dqdd/dq = -M^{-1} drnea/dq, all
+        # three components are already mimic-aware.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            qdd = self.forward_dynamics(q, qd, u)
+            minv = self.minv(q)
+            dc_dq, dc_dqd = self.rnea_grad(q, qd, qdd)
+            return (-minv @ dc_dq, -minv @ dc_dqd)
+
         q_pin = self._to_pin_q(q)
         qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
         u_pin = self._expand_project_v_to_pin(np.asarray(u, dtype=np.float64))
         pin.computeABADerivatives(self.model, self.data, q_pin, qd_pin, u_pin)
-        # For mimic robots fold both axes (mimic columns into target cols,
-        # mimic rows into target rows) BEFORE the q-Jacobian chain reduction;
-        # otherwise the matrix carries pinocchio-full v-width which doesn't
-        # match the project nq layout expected by reduce_pinocchio_q_jacobian.
-        if self.mimic_info is not None and not self.mimic_info.is_empty():
-            ddq_dq = self._reduce_pin_matrix_to_project(
-                np.asarray(self.data.ddq_dq, dtype=np.float64),
-                axes_to_reduce=[(0, "v"), (1, "v")],
-            )
-            ddq_dv = self._reduce_pin_matrix_to_project(
-                np.asarray(self.data.ddq_dv, dtype=np.float64),
-                axes_to_reduce=[(0, "v"), (1, "v")],
-            )
-        else:
-            ddq_dq = reduce_pinocchio_q_jacobian_to_project(
-                np.asarray(self.data.ddq_dq, dtype=np.float64),
-                self.base_mode,
-                q,
-                joint_names=self.project_scalar_joint_names,
-                joint_types_by_name=self.urdf_joint_types_by_name,
-            )
-            ddq_dv = normalize_matrix(np.asarray(self.data.ddq_dv, dtype=np.float64))
+        ddq_dq = reduce_pinocchio_q_jacobian_to_project(
+            np.asarray(self.data.ddq_dq, dtype=np.float64),
+            self.base_mode,
+            q,
+            joint_names=self.project_scalar_joint_names,
+            joint_types_by_name=self.urdf_joint_types_by_name,
+        )
+        ddq_dv = normalize_matrix(np.asarray(self.data.ddq_dv, dtype=np.float64))
         return (ddq_dq, ddq_dv)
 
     # ----- Time integrators (canonical via pinocchio.integrate / dIntegrate) -----
