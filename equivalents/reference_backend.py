@@ -77,6 +77,56 @@ class ProjectModelAdapter:
     def crba(self, q):
         return normalize_matrix(self.reference.crba(q))
 
+    # ----- Energy / generalized gravity / Coriolis (R1) -----
+
+    def generalized_gravity(self, q):
+        return normalize_vector(self.reference.generalized_gravity(q))
+
+    def nonlinear_effects(self, q, qd):
+        return normalize_vector(self.reference.nonlinear_effects(q, qd))
+
+    def kinetic_energy(self, q, qd):
+        return float(self.reference.kinetic_energy(q, qd))
+
+    def potential_energy(self, q):
+        return float(self.reference.potential_energy(q))
+
+    def mechanical_energy(self, q, qd):
+        return float(self.reference.mechanical_energy(q, qd))
+
+    def coriolis_matrix(self, q, qd):
+        return normalize_matrix(self.reference.coriolis_matrix(q, qd))
+
+    # ----- CoM / centroidal (R2/R3) -----
+
+    def com(self, q):
+        return normalize_vector(self.reference.com(q))
+
+    def jacobian_com(self, q):
+        return normalize_matrix(self.reference.jacobian_com(q))
+
+    def ccrba(self, q, qd):
+        A, h = self.reference.ccrba(q, qd)
+        return normalize_matrix(A), normalize_vector(h)
+
+    def centroidal_momentum(self, q, qd):
+        return normalize_vector(self.reference.centroidal_momentum(q, qd))
+
+    # ----- Joint-torque regressor (sysID) -----
+
+    @property
+    def body_joint_names(self):
+        """Ordered project joint name per body id (for the regressor column map)."""
+        nb = self.robot.get_num_bodies()
+        names = []
+        for b in range(nb):
+            joint = self.robot.get_joint_by_id(b)
+            names.append(joint.get_name() if joint is not None else None)
+        return names
+
+    def joint_torque_regressor(self, q, qd, qdd):
+        return normalize_matrix(self.reference.joint_torque_regressor(q, qd, qdd))
+
     def rnea_grad(self, q, qd, qdd, f_ext=None):
         dc_du = normalize_matrix(self.reference.rnea_grad(q, qd, qdd, f_ext=f_ext))
         return dc_du[:, : self.nv], dc_du[:, self.nv :]

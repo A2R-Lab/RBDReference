@@ -1,9 +1,26 @@
 import numpy as np
 import copy
 import sympy as sp
+
+from ._plant import _PlantMixin
+from ._energy import _EnergyMixin
+from ._centroidal import _CentroidalMixin
+from ._regressor import _RegressorMixin
+
 np.set_printoptions(precision=4, suppress=True, linewidth=100)
 
-class RBDReference:
+# Additive reference-oracle mixins (plant/cost/barrier, energy/gravity/Coriolis,
+# CoM/centroidal, sysID regressor). Composed onto the existing single-class
+# RBDReference; `_HelpersMixin`-style shared state (`self.robot`,
+# `_normalize_*`, cross operators, EE pose) lives on the concrete class, so the
+# mixins call into it via MRO. This anticipates the D.5 file split without
+# performing it (see docs/open-tasks/rbdreference_split_plan.md).
+class RBDReference(
+    _PlantMixin,
+    _EnergyMixin,
+    _CentroidalMixin,
+    _RegressorMixin,
+):
     def __init__(self, robotObj):
         """Initialize RBDReference with a robot object.
 
