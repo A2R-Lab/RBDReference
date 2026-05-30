@@ -30,8 +30,8 @@ outputs = rbd.ALGORITHM(inputs)
 | ABA (forward dynamics, articulated body) | `qdd = rbd.aba(q, qd, tau, f_ext=[], GRAVITY=-9.81)` |
 | CRBA (composite-rigid-body mass matrix) | `M = rbd.crba(q)` |
 | Minv (direct mass-matrix inverse) | `Minv = rbd.minv(q, output_dense=True)` |
-| Forward dynamics (Minv·(τ−c)) | `qdd = rbd.forward_dynamics(q, qd, u)` |
-| Apply external forces (spatial xforms) | `f_out = rbd.apply_external_forces(q, f_in, f_ext)` |
+| Forward dynamics (Minv·(τ−c)) | `qdd = rbd.forward_dynamics(q, qd, u, f_ext=None)` |
+| Apply external forces (local-frame subtract) | `f_out = rbd.apply_external_forces(f_in, f_ext)` |
 
 ### Gradients
 

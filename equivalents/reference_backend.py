@@ -61,15 +61,15 @@ class ProjectModelAdapter:
     def joint_types_by_name(self):
         return self.robot.get_joint_types_by_name()
 
-    def rnea(self, q, qd, qdd):
-        c, _v, _a, _f = self.reference.rnea(q, qd, qdd)
+    def rnea(self, q, qd, qdd, f_ext=None):
+        c, _v, _a, _f = self.reference.rnea(q, qd, qdd, f_ext=f_ext)
         return normalize_vector(c)
 
-    def aba(self, q, qd, tau):
-        return normalize_vector(self.reference.aba(q, qd, tau))
+    def aba(self, q, qd, tau, f_ext=None):
+        return normalize_vector(self.reference.aba(q, qd, tau, f_ext=f_ext))
 
-    def forward_dynamics(self, q, qd, u):
-        return normalize_vector(self.reference.forward_dynamics(q, qd, u))
+    def forward_dynamics(self, q, qd, u, f_ext=None):
+        return normalize_vector(self.reference.forward_dynamics(q, qd, u, f_ext=f_ext))
 
     def minv(self, q):
         return normalize_matrix(self.reference.minv(q))
@@ -77,12 +77,12 @@ class ProjectModelAdapter:
     def crba(self, q):
         return normalize_matrix(self.reference.crba(q))
 
-    def rnea_grad(self, q, qd, qdd):
-        dc_du = normalize_matrix(self.reference.rnea_grad(q, qd, qdd))
+    def rnea_grad(self, q, qd, qdd, f_ext=None):
+        dc_du = normalize_matrix(self.reference.rnea_grad(q, qd, qdd, f_ext=f_ext))
         return dc_du[:, : self.nv], dc_du[:, self.nv :]
 
-    def forward_dynamics_grad(self, q, qd, u):
-        dqdd_dq, dqdd_dqd = self.reference.forward_dynamics_grad(q, qd, u)
+    def forward_dynamics_grad(self, q, qd, u, f_ext=None):
+        dqdd_dq, dqdd_dqd = self.reference.forward_dynamics_grad(q, qd, u, f_ext=f_ext)
         return normalize_matrix(dqdd_dq), normalize_matrix(dqdd_dqd)
 
     def idsva_so_body_frame(self, q, qd, qdd):

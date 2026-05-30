@@ -1656,32 +1656,44 @@ class RBDReference:
 
         return d2eePos_arr
 
-    def apply_external_forces(self, q, f_in, f_ext):
-        """Distribute externally applied forces to the internal rigid body force array.
+    def apply_external_forces(self, f_in, f_ext):
+        """Subtract per-body external forces from the internal force array.
+
+        Convention (matches GATO `*_fext.cuh` and pinocchio `fext`): `f_ext`
+        is a per-body spatial force expressed in each link's LOCAL frame,
+        ordered [angular(n); linear(f)] (same layout as the rows of `f`),
+        and it is SUBTRACTED from the per-body force:
+
+            f[:, i] -= f_ext[i]
+
+        No coordinate transform is applied: the external force is already
+        given in the body's local frame, which is the frame the RNEA force
+        recursion / ABA bias accumulates in.
 
         Parameters
         ----------
-        f_ext_total : numpy.ndarray
-            Array of external forces applied to the robot.
+        f_in : numpy.ndarray
+            (6, NB) per-body spatial forces to be corrected in place.
+        f_ext : sequence
+            Per-body external spatial forces (each a length-6 local-frame
+            vector). An empty `f_ext` is a no-op (byte-identical no-fext path).
 
         Returns
         -------
-        f_ext : numpy.ndarray
-            6N-element array of spatial forces per link.
+        numpy.ndarray
+            The corrected `(6, NB)` force array.
         """
         f_out = f_in
+        if f_ext is None or len(f_ext) == 0:
+            return f_out
         NB = self.robot.get_num_bodies()
-        if len(f_ext) > 0:
-            for curr_id in range(NB):
-                parent_id = self.robot.get_parent_id(curr_id)
-                inds_q = self.robot.get_joint_index_q(curr_id)
-                _q = q[inds_q]
-                if parent_id == -1:
-                    Xa = self.robot.get_Xmat_Func_by_id(curr_id)(_q)
-                else:
-                    Xa = np.matmul(self.robot.get_Xmat_Func_by_id(curr_id)(curr_id),Xa) 
-                if len(f_ext[curr_id]) > 1:
-                    f_out[curr_id] -= np.matmul(np.linalg.inv(Xa.T), f_ext[curr_id])
+        for curr_id in range(NB):
+            fe = f_ext[curr_id]
+            if fe is None:
+                continue
+            fe = np.asarray(fe, dtype=np.float64).reshape(-1)
+            if fe.shape[0] == 6:
+                f_out[:, curr_id] -= fe
         return f_out
 
     def _mimic_multiplier(self, jid):
@@ -1706,7 +1718,7 @@ class RBDReference:
             return float(joint.get_mimic_offset())
         return 0.0
 
-    def rnea_fpass(self, q, qd, qdd=None, GRAVITY=-9.81):
+    def rnea_fpass(self, q, qd, qdd=None, GRAVITY=-9.81, f_ext=None):
         """Perform the forward pass of the Recursive Newton-Euler Algorithm.
 
         Parameters
@@ -1768,6 +1780,10 @@ class RBDReference:
             # compute f
             Imat = self.robot.get_Imat_by_id(curr_id)
             f[:, curr_id] = np.matmul(Imat, a[:, curr_id]) + self.vxIv(v[:, curr_id], Imat)
+
+        # subtract local-frame external forces from the per-body force
+        # (single subtract site, mirrors the GATO/CUDA `f -= f_ext` convention)
+        f = self.apply_external_forces(f, f_ext)
 
         return (v, a, f)
 
@@ -1844,8 +1860,8 @@ class RBDReference:
             qd = self._normalize_v_input(qd)
             if qdd is not None:
                 qdd = self._normalize_v_input(qdd)
-        # forward pass
-        (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY)
+        # forward pass (external forces are subtracted from f inside fpass)
+        (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY, f_ext=f_ext)
         # backward pass
         (c, f) = self.rnea_bpass(q, f)
         if public_output:
@@ -2125,12 +2141,17 @@ class RBDReference:
         # pinocchio's constraint-aware forward dynamics for mimic models
         # (their `aba` on the unreduced model would diverge similarly).
         if self._has_mimic_joints():
-            # f_ext not threaded through this mimic fast path (T4 owns the fix).
-            # see docs/open-tasks/notes.md (RBDReference.py:2140-2144)
+            # Mimic reduced-model forward dynamics:
+            #   qdd = M_reduced^{-1} * (tau - rnea(q, qd, 0; f_ext))
+            # External forces enter purely through the rnea bias (which
+            # subtracts the local-frame f_ext from the per-body force); the
+            # reduced mass matrix is unaffected by f_ext. T3 owns the mimic
+            # ABA recursion fallback; here f_ext only flows into the bias.
             n = len(qd)
             bias = self.rnea(
                 q, qd, np.zeros(n),
                 GRAVITY=GRAVITY,
+                f_ext=f_ext,
                 public_output=False,
                 normalize_input=False,
             )[0]
@@ -2195,8 +2216,8 @@ class RBDReference:
 
                 pA[:, ind] = np.matmul(temp, v[:, ind])
 
-            # apply external forces
-            pA = self.apply_external_forces(q, pA, f_ext)
+            # apply external forces (subtract local-frame f_ext from the bias)
+            pA = self.apply_external_forces(pA, f_ext)
 
             # Backward Pass
             for ind in range(NB-1, -1, -1): # ind != ind for bpass
@@ -2303,7 +2324,10 @@ class RBDReference:
                 temp=np.matmul(crf,Imat)
 
                 pA[:,ind] = np.matmul(temp, v[:,ind])
-            
+
+            # apply external forces (subtract local-frame f_ext from the bias)
+            pA = self.apply_external_forces(pA, f_ext)
+
             for ind in range(n-1,-1,-1):
                 S = self.robot.get_S_by_id(ind)
                 parent_ind = self.robot.get_parent_id(ind)
@@ -2732,6 +2756,7 @@ class RBDReference:
         qdd = None,
         GRAVITY = -9.81,
         USE_VELOCITY_DAMPING = False,
+        f_ext=None,
         public_output=True,
         normalize_input=True,
     ):
@@ -2757,11 +2782,19 @@ class RBDReference:
             qd = self._normalize_v_input(qd)
             if qdd is not None:
                 qdd = self._normalize_v_input(qdd)
+        # Key physics: for a CONSTANT local-frame f_ext there is NO new
+        # gradient term. f_ext enters only as a constant offset to the
+        # per-body force f (f[:,i] -= f_ext[i]); since it is q/qd-independent
+        # its derivative is zero, so df_dq/df_dqd from the grad forward passes
+        # are unchanged. The gradient inherits f_ext purely through the
+        # f_ext-corrected `f` that `rnea_grad_bpass_dq` consumes in its
+        # `X^T * fxS(S, f[:,ind])` term. (FD-verified against pinocchio.)
         (c, v, a, f) = self.rnea(
             q,
             qd,
             qdd,
             GRAVITY,
+            f_ext=f_ext,
             public_output=False,
             normalize_input=False,
         )
@@ -2783,7 +2816,7 @@ class RBDReference:
         return np.hstack((dc_dq, dc_dqd))
 
 
-    def forward_dynamics(self, q, qd, u, public_output=True, normalize_input=True):
+    def forward_dynamics(self, q, qd, u, f_ext=None, public_output=True, normalize_input=True):
         """Compute the joint accelerations for the given state and torques.
 
         Parameters
@@ -2804,14 +2837,14 @@ class RBDReference:
             q = self._normalize_q_input(q)
             qd = self._normalize_v_input(qd)
             u = self._normalize_v_input(u)
-        (c,v,a,f) = self.rnea(q, qd, public_output=False, normalize_input=False)
+        (c,v,a,f) = self.rnea(q, qd, f_ext=f_ext, public_output=False, normalize_input=False)
         minv = self.minv(q, public_output=False, normalize_input=False)
         qdd = np.matmul(minv, u - c)
         if public_output:
             return self._denormalize_v_output(qdd)
         return qdd
     
-    def forward_dynamics_grad(self, q, qd, u, normalize_input=True):
+    def forward_dynamics_grad(self, q, qd, u, f_ext=None, normalize_input=True):
         """Compute the gradients of the forward dynamics.
 
         Parameters
@@ -2832,8 +2865,13 @@ class RBDReference:
             q = self._normalize_q_input(q)
             qd = self._normalize_v_input(qd)
             u = self._normalize_v_input(u)
-        qdd = self.forward_dynamics(q, qd, u, public_output=False, normalize_input=False)
-        dc_du = self.rnea_grad(q, qd, qdd, public_output=False, normalize_input=False)
+        # f_ext flows into qdd (via forward_dynamics) and into dc_du (via
+        # rnea_grad's f_ext-corrected f). For a constant local-frame f_ext
+        # there is no additional fd-gradient term: minv is f_ext-independent
+        # and the only f_ext dependence is through the qdd/dc_du arguments
+        # already threaded here.
+        qdd = self.forward_dynamics(q, qd, u, f_ext=f_ext, public_output=False, normalize_input=False)
+        dc_du = self.rnea_grad(q, qd, qdd, f_ext=f_ext, public_output=False, normalize_input=False)
         dc_dq, dc_dqd = np.hsplit(dc_du, [len(qd)])
 
         minv = self.minv(q, public_output=False, normalize_input=False)
