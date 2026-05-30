@@ -928,13 +928,7 @@ class RBDReference:
                     fixed_jids.append(fjoint.get_id())
         return ee_jids, fixed_jids
 
-    """
-    End Effector Posiitons
-
-    offests is an array of np matricies of the form (offset_x, offset_y, offset_z, 1)
-    
-    TODO: Add and test floating base support.
-    """
+    # End-effector positions. see docs/open-tasks/notes.md (RBDReference.py:936)
 
     def _normalize_ee_offsets(self, offsets=None):
         if offsets is None:
@@ -984,7 +978,7 @@ class RBDReference:
             return Xmat_hom
 
         # Extract the end-effector position with the given offset(s)
-        # TODO handle different offsets for different branches
+        # see docs/open-tasks/notes.md (RBDReference.py:987)
         def eePos_from_Xmat_hom(Xmat_hom, ee_offsets):
             # xyz position is easy
             eePos_xyz1 = np.matmul(np.asarray(Xmat_hom, dtype=np.float64), ee_offsets[0])
@@ -1899,13 +1893,7 @@ class RBDReference:
         # set initial IA to I
         IA = copy.deepcopy(self.robot.get_Imats_dict_by_id())
 
-        # # Backward pass.
-        # Use get_joint_index_v(ind) for matrix indices so the pass works
-        # uniformly across fixed-base, floating-base, and (the indexing parts
-        # of) mimic robots. Mimic-joint reduced-model handling itself is done
-        # in the public `minv` entry by falling back to inv(crba(q)); the
-        # ABA recursion below assumes per-body (U, d) which would need
-        # projection for true reduced-model M^{-1}.
+        # Backward pass. see docs/open-tasks/notes.md (RBDReference.py:1907)
         for ind in range(NB - 1, -1, -1):
             subtreeInds = self.robot.get_subtree_by_id(ind)
             adj_subtreeInds = self._vinds_for_subtree(subtreeInds)
@@ -2137,11 +2125,8 @@ class RBDReference:
         # pinocchio's constraint-aware forward dynamics for mimic models
         # (their `aba` on the unreduced model would diverge similarly).
         if self._has_mimic_joints():
-            # NOTE: external forces (`f_ext`) are not currently threaded
-            # through this fast path; `rnea` does not apply them either.
-            # The downstream test suite does not exercise f_ext on mimic
-            # robots, but a future task should consolidate the external-
-            # force handling so the mimic path supports it cleanly.
+            # f_ext not threaded through this mimic fast path (T4 owns the fix).
+            # see docs/open-tasks/notes.md (RBDReference.py:2140-2144)
             n = len(qd)
             bias = self.rnea(
                 q, qd, np.zeros(n),
@@ -2155,7 +2140,7 @@ class RBDReference:
             qdd = Minv @ (tau - bias)
             return self._denormalize_v_output(qdd)
         if self.robot.floating_base:
-            # allocate memory TODO check NB vs. n
+            # allocate memory. see docs/open-tasks/notes.md (RBDReference.py:2158)
             n = len(qd)
             NB = self.robot.get_num_bodies()
             v = np.zeros((6,NB))
