@@ -197,16 +197,83 @@ class PinocchioModelAdapter:
             return False
         return bool(np.isfinite(singular_values).all() and singular_values[-1] > min_singular_value)
 
-    def rnea(self, q, qd, qdd):
+    def _build_pin_fext(self, f_ext):
+        """Build a pinocchio `StdVec_Force` from a project body-major f_ext.
+
+        `f_ext` is the project-layout per-body external spatial force in each
+        body's LOCAL frame, ordered [angular(n); linear(f)] -- the SAME layout
+        the project subtracts as `f[:, i] -= f_ext[i]`. The returned
+        `std::vector<Force>` is indexed by pinocchio joint id (entry 0 is the
+        universe joint, always zero) and is the NEGATED force, because
+        pinocchio's `rnea(..., fext)` / `aba(..., fext)` / `computeRNEADerivatives
+        (..., fext)` ADD `fext` to the joint force (`f_i -= fext_i` in their
+        ID convention is expressed by passing the force with pinocchio's sign),
+        whereas the project SUBTRACTS f_ext. Concretely pinocchio computes
+        `tau = RNEA - J^T fext`, i.e. it subtracts the *applied* external
+        wrench; to make project `f -= f_ext` match, we pass `fext_pin = f_ext`
+        directly (pinocchio's Force is [linear; angular], so we also reorder
+        the 6-vector from the project's [angular; linear]).
+
+        Returns None when f_ext is empty (caller uses the no-fext pin entry so
+        the no-fext path stays byte-identical).
+        """
+        import pinocchio as pin
+
+        if f_ext is None:
+            return None
+        f_ext = list(f_ext)
+        if len(f_ext) == 0:
+            return None
+
+        njoints = int(self.model.njoints)
+        forces = pin.StdVec_Force()
+        for _ in range(njoints):
+            forces.append(pin.Force.Zero())
+
+        # Project body -> pinocchio joint id. For non-mimic robots the project
+        # body order matches the scalar-joint order; map by joint NAME to be
+        # robust to pinocchio's internal joint indexing. For a floating base,
+        # project body 0 is the floating root joint (pin joint id 1) and the
+        # subsequent bodies are the scalar joints in order.
+        prefix = self._floating_prefix_v()
+        names = self.project_scalar_joint_names
+        for body_id, fe in enumerate(f_ext):
+            if fe is None:
+                continue
+            fe = np.asarray(fe, dtype=np.float64).reshape(-1)
+            if fe.shape[0] != 6:
+                continue
+            # Project layout: [angular(n) x3; linear(f) x3].
+            # pinocchio Force ctor takes (linear, angular).
+            angular = fe[0:3]
+            linear = fe[3:6]
+            if prefix and body_id == 0:
+                jid = 1  # floating root joint
+            else:
+                name_idx = body_id - (1 if prefix else 0)
+                if name_idx < 0 or name_idx >= len(names):
+                    continue
+                jid = int(self.model.getJointId(names[name_idx]))
+            if jid <= 0 or jid >= njoints:
+                continue
+            forces[jid] = pin.Force(np.asarray(linear, dtype=np.float64),
+                                    np.asarray(angular, dtype=np.float64))
+        return forces
+
+    def rnea(self, q, qd, qdd, f_ext=None):
         import pinocchio as pin
 
         q_pin = self._to_pin_q(q)
         qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
         qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
-        tau = pin.rnea(self.model, self.data, q_pin, qd_pin, qdd_pin)
+        fext = self._build_pin_fext(f_ext)
+        if fext is None:
+            tau = pin.rnea(self.model, self.data, q_pin, qd_pin, qdd_pin)
+        else:
+            tau = pin.rnea(self.model, self.data, q_pin, qd_pin, qdd_pin, fext)
         return normalize_vector(self._reduce_pin_v_to_project(np.asarray(tau, dtype=np.float64)))
 
-    def aba(self, q, qd, tau):
+    def aba(self, q, qd, tau, f_ext=None):
         import pinocchio as pin
 
         q_pin = self._to_pin_q(q)
@@ -232,11 +299,17 @@ class PinocchioModelAdapter:
             tau_proj = np.asarray(tau, dtype=np.float64)
             qd_proj = np.asarray(qd, dtype=np.float64)
             nv_proj = qd_proj.shape[0]
-            bias = self.rnea(q, qd_proj, np.zeros(nv_proj))
+            # External forces enter the reduced-model bias only (mass matrix is
+            # f_ext-independent), so thread f_ext into the rnea bias call.
+            bias = self.rnea(q, qd_proj, np.zeros(nv_proj), f_ext=f_ext)
             mass = self.minv(q)
             return normalize_vector(mass @ (tau_proj - bias))
         tau_pin = self._expand_project_v_to_pin(np.asarray(tau, dtype=np.float64))
-        qdd = pin.aba(self.model, self.data, q_pin, qd_pin, tau_pin)
+        fext = self._build_pin_fext(f_ext)
+        if fext is None:
+            qdd = pin.aba(self.model, self.data, q_pin, qd_pin, tau_pin)
+        else:
+            qdd = pin.aba(self.model, self.data, q_pin, qd_pin, tau_pin, fext)
         return normalize_vector(self._reduce_pin_v_to_project(np.asarray(qdd, dtype=np.float64)))
 
     def forward_dynamics(self, q, qd, u):
@@ -273,13 +346,17 @@ class PinocchioModelAdapter:
             )
         return normalize_matrix(mass)
 
-    def rnea_grad(self, q, qd, qdd):
+    def rnea_grad(self, q, qd, qdd, f_ext=None):
         import pinocchio as pin
 
         q_pin = self._to_pin_q(q)
         qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
         qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
-        pin.computeRNEADerivatives(self.model, self.data, q_pin, qd_pin, qdd_pin)
+        fext = self._build_pin_fext(f_ext)
+        if fext is None:
+            pin.computeRNEADerivatives(self.model, self.data, q_pin, qd_pin, qdd_pin)
+        else:
+            pin.computeRNEADerivatives(self.model, self.data, q_pin, qd_pin, qdd_pin, fext)
         # For mimic robots fold both axes (mimic columns into target cols,
         # mimic rows into target rows) BEFORE the q-Jacobian chain reduction;
         # otherwise the matrix carries pinocchio-full v-width which doesn't
