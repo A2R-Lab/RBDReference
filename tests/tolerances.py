@@ -34,6 +34,21 @@ ALGORITHM_TOLERANCES = {
         atol=1e-5,
         note="Second-order inverse-dynamics tensors are validated against finite differences of already-verified first-order quantities, so they use a wider tolerance than the primary first-order dynamics checks.",
     ),
+    "energy": Tolerance(
+        rtol=1e-6,
+        atol=1e-7,
+        note="Energy / generalized-gravity / Coriolis reference oracles compose the project RNEA / CRBA and are compared against Pinocchio's C++ implementations; cross-library float64 round-off in the velocity-product terms is slightly larger than the primary RNEA bucket, so the absolute floor is one decade wider.",
+    ),
+    "centroidal": Tolerance(
+        rtol=1e-6,
+        atol=1e-7,
+        note="CoM / CMM / centroidal-momentum reference oracles compose the project kinematics + spatial inertias and are compared against Pinocchio's ccrba / centerOfMass; the mass-weighted world-frame accumulation carries cross-library round-off a decade above the primary RNEA bucket.",
+    ),
+    "regressor": Tolerance(
+        rtol=1e-6,
+        atol=1e-7,
+        note="The joint-torque regressor reproduces Pinocchio's computeJointTorqueRegressor after the per-link basis permutation; residuals are float64 round-off scaled by the (large) inertia-parameter magnitudes.",
+    ),
     "second_order_fdsva": Tolerance(
         rtol=1e-4,
         atol=1e-5,
@@ -101,6 +116,51 @@ ROBOT_ALGORITHM_TOLERANCES = {
         rtol=1e-7,
         atol=2e-9,
         note="Rizon4 fixed-base pose and dynamics checks stay at nanounit residual scale; this narrow absolute tolerance covers tiny frame-placement differences.",
+    ),
+    ("gen3", "energy"): Tolerance(
+        rtol=1e-4,
+        atol=1e-3,
+        note="Gen3's nonlinear-effects / gravity composition diverges from Pinocchio at ~1.7e-5 relative on the high-energy samples (cross-library float64 round-off in the velocity-product terms, scaling with |qd|^2); the small zero-state gravity scale (~1.5e-3) also leaves a ~1.3e-8 residual above the default 1e-8 floor. A structural error would be O(|tau|), orders of magnitude larger.",
+    ),
+    ("gen3", "centroidal"): Tolerance(
+        rtol=1e-4,
+        atol=1e-4,
+        note="Gen3 centroidal quantities inherit the same ~1.7e-5 relative cross-library round-off as its dynamics (the project world-frame accumulation vs Pinocchio's ccrba); a structural error would be O(scale), orders of magnitude larger.",
+    ),
+    ("gen3", "regressor"): Tolerance(
+        rtol=1e-4,
+        atol=1e-2,
+        note="Gen3's joint-torque regressor matches Pinocchio at ~1.1e-5 relative; the absolute residual reaches ~4e-3 because the regressor entries carry the (large) inertia x acceleration magnitudes, so the absolute floor is set to the matching scale. A structural basis/permutation error would be O(scale).",
+    ),
+    ("g1", "energy"): Tolerance(
+        rtol=1e-5,
+        atol=1e-3,
+        note="G1's mass matrix has entries up to ~1e4; the kinetic-energy quadratic form and the Coriolis/gravity terms inherit that scale, so cross-library round-off reaches ~1e-4 absolute. Relative residual stays at ~1e-7.",
+    ),
+    ("g1", "centroidal"): Tolerance(
+        rtol=1e-5,
+        atol=1e-4,
+        note="G1's world-frame centroidal accumulation over a 35-DoF humanoid reaches ~1e-7..1e-8 residuals scaled by the large inertia magnitudes; a slightly wider absolute floor covers the high-energy samples.",
+    ),
+    ("g1", "regressor"): Tolerance(
+        rtol=1e-5,
+        atol=1e-4,
+        note="G1's regressor columns carry the link inertia magnitudes (up to ~1e2..1e3) times the velocity-product terms, so cross-library round-off reaches ~1e-4 absolute on the high-velocity samples. Relative residual stays at ~1e-7.",
+    ),
+    ("h1_2", "energy"): Tolerance(
+        rtol=1e-3,
+        atol=1e-2,
+        note="h1_2 (51 DoF, 12 mimic joints, near-singular reduced mass matrix) inherits the same cond(M)~7e5 noise floor as its ABA/RNEA buckets for the kinetic-energy / Coriolis composition.",
+    ),
+    ("h1_2", "centroidal"): Tolerance(
+        rtol=1e-4,
+        atol=1e-3,
+        note="h1_2's mimic-folded centroidal map carries the reduced-model round-off (folded mimic columns scaled by the URDF multiplier) at the same scale as its CRBA bucket.",
+    ),
+    ("h1_2", "regressor"): Tolerance(
+        rtol=1e-4,
+        atol=1e-2,
+        note="h1_2's regressor rows fold mimic v-slots into their target with the URDF multiplier; the reduced-row regressor inherits the cond(M)~7e5 amplified round-off of its dynamics buckets.",
     ),
     ("g1", "second_order_fdsva"): Tolerance(
         rtol=1e-4,

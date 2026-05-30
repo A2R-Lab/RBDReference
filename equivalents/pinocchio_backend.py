@@ -273,6 +273,142 @@ class PinocchioModelAdapter:
             )
         return normalize_matrix(mass)
 
+    # ----- Energy / generalized gravity / Coriolis -----
+
+    def generalized_gravity(self, q):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        g = pin.computeGeneralizedGravity(self.model, self.data, q_pin)
+        return normalize_vector(self._reduce_pin_v_to_project(np.asarray(g, dtype=np.float64)))
+
+    def nonlinear_effects(self, q, qd):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        c = pin.nonLinearEffects(self.model, self.data, q_pin, qd_pin)
+        return normalize_vector(self._reduce_pin_v_to_project(np.asarray(c, dtype=np.float64)))
+
+    def kinetic_energy(self, q, qd):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        return float(pin.computeKineticEnergy(self.model, self.data, q_pin, qd_pin))
+
+    def potential_energy(self, q):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        return float(pin.computePotentialEnergy(self.model, self.data, q_pin))
+
+    def mechanical_energy(self, q, qd):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        return float(pin.computeMechanicalEnergy(self.model, self.data, q_pin, qd_pin))
+
+    def coriolis_matrix(self, q, qd):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        C = pin.computeCoriolisMatrix(self.model, self.data, q_pin, qd_pin)
+        C = np.asarray(C, dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            C = self._reduce_pin_matrix_to_project(C, axes_to_reduce=[(0, "v"), (1, "v")])
+        return normalize_matrix(C)
+
+    # ----- CoM / centroidal -----
+
+    def com(self, q):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        c = pin.centerOfMass(self.model, self.data, q_pin)
+        return normalize_vector(np.asarray(c, dtype=np.float64))
+
+    def jacobian_com(self, q):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        J = pin.jacobianCenterOfMass(self.model, self.data, q_pin)
+        J = np.asarray(J, dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            J = self._reduce_pin_matrix_to_project(J, axes_to_reduce=[(1, "v")])
+        return normalize_matrix(J)
+
+    def ccrba(self, q, qd):
+        """Centroidal momentum matrix A (= data.Ag) and momentum h (= data.hg),
+        ordered [linear; angular] at the CoM in a world-aligned frame."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        pin.ccrba(self.model, self.data, q_pin, qd_pin)
+        A = np.asarray(self.data.Ag, dtype=np.float64)
+        h = np.asarray(self.data.hg.vector, dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            A = self._reduce_pin_matrix_to_project(A, axes_to_reduce=[(1, "v")])
+        return normalize_matrix(A), normalize_vector(h)
+
+    def centroidal_momentum(self, q, qd):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        h = pin.computeCentroidalMomentum(self.model, self.data, q_pin, qd_pin)
+        return normalize_vector(np.asarray(h.vector, dtype=np.float64))
+
+    # ----- Joint-torque regressor (sysID) -----
+
+    # Within-link param permutation: GRiD/URDF basis
+    #   [m, hx, hy, hz, Ixx, Ixy, Ixz, Iyy, Iyz, Izz]
+    # vs pinocchio's toDynamicParameters basis
+    #   [m, hx, hy, hz, Ixx, Ixy, Iyy, Ixz, Iyz, Izz].
+    # `grid_block = pin_block[_PARAM_PERM]` (only the inertia 6-block swaps
+    # Ixz<->Iyy). Identity on mass + first-moment.
+    _PARAM_PERM = [0, 1, 2, 3, 4, 5, 7, 6, 8, 9]
+
+    def joint_torque_regressor(self, q, qd, qdd, project_body_joint_names=None):
+        """Joint-torque regressor in the PROJECT layout (nv x 10*NB), with the
+        per-link 10-param blocks ordered to match the project body ids and the
+        GRiD/URDF inertia-entry basis.
+
+        `project_body_joint_names` is the ordered list of the project's joint
+        names by body id (the floating root maps to pin's `root_joint`). When
+        omitted, the natural pin ordering is returned (joint ids 1..njoints-1).
+        """
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
+        Y = np.asarray(
+            pin.computeJointTorqueRegressor(self.model, self.data, q_pin, qd_pin, qdd_pin),
+            dtype=np.float64,
+        )
+        # Reduce torque (row) axis to project layout for mimic robots.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            Y = self._reduce_pin_matrix_to_project(Y, axes_to_reduce=[(0, "v")])
+        if project_body_joint_names is None:
+            return normalize_matrix(Y)
+        # Remap column blocks to the project body order + GRiD param basis.
+        name2pinjid = {str(self.model.names[i]): i for i in range(self.model.njoints)}
+        # The floating root carries pin joint id 1 regardless of its URDF name.
+        nb = len(project_body_joint_names)
+        Y_out = np.zeros((Y.shape[0], 10 * nb), dtype=np.float64)
+        for b, jname in enumerate(project_body_joint_names):
+            pjid = name2pinjid.get(jname)
+            if pjid is None:
+                # project floating-root body -> pin root_joint (id 1)
+                pjid = 1
+            block = Y[:, 10 * (pjid - 1):10 * (pjid - 1) + 10]
+            Y_out[:, 10 * b:10 * b + 10] = block[:, self._PARAM_PERM]
+        return normalize_matrix(Y_out)
+
     def rnea_grad(self, q, qd, qdd):
         import pinocchio as pin
 
