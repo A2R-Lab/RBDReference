@@ -92,6 +92,11 @@ ROBOT_ALGORITHM_TOLERANCES = {
         atol=2e-5,
         note="G1 ABA is a round-trip check (tau=rnea(qdd) then aba(tau)). The GRiD reference inverts its own RNEA to ~1e-12; the residual is entirely Pinocchio-side cross-library round-off in the velocity-product terms, which scales with |qd|^2 and reaches ~1.7e-5 on the high-velocity samples (qd up to 10) where the qdd magnitude is too small for the comparator's scale-floor to cover. A structural error would be O(|qdd|), orders of magnitude larger.",
     ),
+    ("g1", "fd"): Tolerance(
+        rtol=1e-6,
+        atol=5e-1,
+        note="G1 floating-base FD-parameter-gradient (dqdd/dpi = -Minv . Y(q,qd,qdd_actual)) float32-CUDA equivalence. qdd_actual = Minv.(u-c) and |Minv| reaches ~3.2e3 at the zero/static sample, so the float32 round-off in that inner mass-matrix product is ~eps_f32*|Minv|*|c| ~ 0.1; that perturbed qdd then flows through Y(qdd) and the final -Minv.Y contraction, leaving an ABSOLUTE residual ~0.2 at the static sample (where the float64 reference cancels to ~0 and the output-scale headroom is therefore blind to it). This is a float32 conditioning floor identical on the in-smem PERF path and the g1 spilled-s_Y path (the high-energy samples agree to ~1e-6 RELATIVE, confirming the spilled placement is numerically identical). A genuine structural error would be O(|dqdd/dpi|) ~ 3e5, six orders of magnitude larger. Same cond(M) rationale as the h1_2-minv bucket; the atol floor is only consulted via the comparator's atol+5e-3*scale formula, so the high-magnitude entries stay governed by the relative headroom.",
+    ),
     ("baxter", "aba"): Tolerance(
         rtol=1e-7,
         atol=5e-9,
