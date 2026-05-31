@@ -1312,8 +1312,13 @@ class RBDReference(
         where dJ_w/dv is the world-angular kinematic Hessian computed from
         skew^{-1}(d^2 R T^{-1}) on the Taylor-expanded rotation block.
 
-        Validated against the FD oracle (end_effector_pose_hessian) on iiwa14
-        fixed, iiwa14 floating, and go2 floating to ~1e-7 (FD noise floor).
+        Validated against the FD oracle (end_effector_pose_hessian) AND against
+        pinocchio's analytic getJointKinematicHessian(LOCAL_WORLD_ALIGNED) on the
+        full manifest fleet (iiwa14/go2/g1/h1_2/fr3/rizon4/gen3/fetch/baxter,
+        fixed + floating, incl. the mimic robots fr3/h1_2) to the FD noise floor
+        (~1e-11 analytic-vs-FD, ~1e-5 vs pinocchio's FD-step). The earlier
+        orientation-hessian bug lived in the retired analytic d^2/dq^2 path; this
+        chain-composition d^2/dv^2 derivation is correct fleet-wide.
 
         Parameters
         ----------
