@@ -151,3 +151,24 @@ class _RegressorMixin:
                 Fblk[parent_id] = Fblk[parent_id] + Xmat.T @ Fblk[curr_id]
 
         return self._denormalize_reduced_q_matrix_output(Y, row_space="v")
+
+    def fd_parameter_gradient(self, q, qd, u, GRAVITY=-9.81):
+        """Forward-dynamics gradient w.r.t. the inertial params: ∂q̈/∂π.
+
+        From `M(π)·q̈ + c(q,q̇,π) = u` with `u` fixed, differentiating in π gives
+        `∂q̈/∂π = − M⁻¹ · Y(q, q̇, q̈_actual)` because `ID(q,q̇,q̈,π) = M q̈ + c`
+        is affine in π with Jacobian `Y` at the *actual* acceleration. So:
+
+          1. q̈_actual = forward_dynamics(q, q̇, u)
+          2. Y = joint_torque_regressor(q, q̇, q̈_actual)   (nv x 10*NB)
+          3. ∂q̈/∂π = − minv(q) · Y                          (nv x 10*NB)
+
+        reuses the existing minv + regressor; no new factorization (mirrors the
+        CUDA emit `fd_parameter_gradient` = −Minv·Y). Result is nv x 10*NB.
+        """
+        qdd = self.forward_dynamics(q, qd, u)
+        Y = np.asarray(
+            self.joint_torque_regressor(q, qd, qdd, GRAVITY=GRAVITY), dtype=np.float64
+        )
+        Minv = np.asarray(self.minv(q), dtype=np.float64)
+        return -(Minv @ Y)
