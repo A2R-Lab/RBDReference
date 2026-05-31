@@ -31,7 +31,7 @@ def build_case_params(base_mode: str):
     return params
 
 
-def _check_energy(spec, project_model, pinocchio_model, coriolis: bool):
+def _check_energy(spec, project_model, pinocchio_model, coriolis: bool = True):
     for sample in build_dynamics_samples(project_model):
         q, qd = sample.q, sample.qd
         if not pinocchio_model.has_invertible_mass_matrix(q):
@@ -74,11 +74,15 @@ def _check_energy(spec, project_model, pinocchio_model, coriolis: bool):
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params("fixed"))
 def test_fixed_base_energy_matches_pinocchio(spec, base_mode, project_model, pinocchio_model):
-    # Coriolis matrix reference is implemented for fixed-base.
-    _check_energy(spec, project_model, pinocchio_model, coriolis=True)
+    # The Coriolis matrix reference matches Pinocchio's computeCoriolisMatrix
+    # (spatial Bcrb recursion) for both the symmetric and skew parts.
+    _check_energy(spec, project_model, pinocchio_model)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params("floating"))
 def test_floating_base_energy_matches_pinocchio(spec, base_mode, project_model, pinocchio_model):
-    # Skip the Coriolis matrix on floating-base (reference is fixed-base only).
-    _check_energy(spec, project_model, pinocchio_model, coriolis=False)
+    # Floating-base Coriolis is now ported (was previously skipped): the
+    # _energy.py world-frame recursion reproduces Pinocchio's algorithm-specific
+    # convention entrywise for the floating base, so the Coriolis check is no
+    # longer skipped here.
+    _check_energy(spec, project_model, pinocchio_model)
