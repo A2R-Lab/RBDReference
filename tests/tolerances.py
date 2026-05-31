@@ -44,6 +44,11 @@ ALGORITHM_TOLERANCES = {
         atol=1e-7,
         note="CoM / CMM / centroidal-momentum reference oracles compose the project kinematics + spatial inertias and are compared against Pinocchio's ccrba / centerOfMass; the mass-weighted world-frame accumulation carries cross-library round-off a decade above the primary RNEA bucket.",
     ),
+    "centroidal_grad": Tolerance(
+        rtol=1e-3,
+        atol=1e-4,
+        note="The C2 centroidal dynamics derivatives (dh_dq / dhdot_dq / dhdot_dv) are central finite differences of the exact value layer against Pinocchio's analytic getCentroidalDynamicsDerivatives. dh_dq is a single FD (~1e-8); dhdot_dq / dhdot_dv compose a second nested FD for the Adot-qd bias, so they carry ~1e-4 absolute FD truncation/round-off, a few decades above the exact value-layer bucket. dhdot_da == A is exact and is checked under the tight 'centroidal' bucket.",
+    ),
     "regressor": Tolerance(
         rtol=1e-6,
         atol=1e-7,
@@ -165,7 +170,12 @@ ROBOT_ALGORITHM_TOLERANCES = {
     ("h1_2", "centroidal"): Tolerance(
         rtol=1e-4,
         atol=1e-3,
-        note="h1_2's mimic-folded centroidal map carries the reduced-model round-off (folded mimic columns scaled by the URDF multiplier) at the same scale as its CRBA bucket.",
+        note="h1_2's mimic-folded centroidal map carries the reduced-model round-off (folded mimic columns scaled by the URDF multiplier) at the same scale as its CRBA bucket. The C2 centroidal-derivative blocks (dh_dq / dhdot_dq / dhdot_dv) are central finite differences of the exact value layer, adding ~1e-6 FD noise on top.",
+    ),
+    ("fr3", "centroidal"): Tolerance(
+        rtol=1e-3,
+        atol=1e-4,
+        note="fr3 (mimic joints) C2 centroidal-derivative blocks (dh_dq / dhdot_dq / dhdot_dv) are central finite differences of the exact value layer; the FD carries ~1e-6 absolute noise that, on the near-zero derivative entries (mimic-folded columns), exceeds the primary 1e-6/1e-7 bucket's relative floor. The value layer (com/Jcom/A/h) still matches to the primary bucket; this override only covers the FD-sourced derivative blocks.",
     ),
     ("h1_2", "regressor"): Tolerance(
         rtol=1e-4,

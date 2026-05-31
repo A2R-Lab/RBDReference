@@ -112,6 +112,22 @@ class ProjectModelAdapter:
     def centroidal_momentum(self, q, qd):
         return normalize_vector(self.reference.centroidal_momentum(q, qd))
 
+    def centroidal_momentum_time_variation(self, q, qd, qdd):
+        return normalize_vector(
+            self.reference.centroidal_momentum_time_variation(q, qd, qdd)
+        )
+
+    def centroidal_dynamics_derivatives(self, q, qd, qdd):
+        dh_dq, dhdot_dq, dhdot_dv, dhdot_da = self.reference.centroidal_dynamics_derivatives(
+            q, qd, qdd
+        )
+        return (
+            normalize_matrix(dh_dq),
+            normalize_matrix(dhdot_dq),
+            normalize_matrix(dhdot_dv),
+            normalize_matrix(dhdot_da),
+        )
+
     # ----- Joint-torque regressor (sysID) -----
 
     @property
