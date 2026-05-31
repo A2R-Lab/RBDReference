@@ -135,6 +135,18 @@ class ProjectModelAdapter:
         dqdd_dq, dqdd_dqd = self.reference.forward_dynamics_grad(q, qd, u, f_ext=f_ext)
         return normalize_matrix(dqdd_dq), normalize_matrix(dqdd_dqd)
 
+    def f_ext_gradient(self, q):
+        """Project numpy oracle for the f_ext gradient column (section A).
+
+        Returns (dtau_dfext, dqdd_dfext, did_du_dfext_dq) matching the
+        pinocchio backend's `f_ext_gradient`."""
+        g = self.reference.f_ext_gradient(q)
+        return (
+            normalize_matrix(g["dtau_dfext"]),
+            normalize_matrix(g["dqdd_dfext"]),
+            np.asarray(g["did_du_dfext_dq"], dtype=np.float64),
+        )
+
     def idsva_so_body_frame(self, q, qd, qdd):
         d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq = self.reference.idsva_so_body_frame(q, qd, qdd)
         return (

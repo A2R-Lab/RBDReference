@@ -346,6 +346,70 @@ class PinocchioModelAdapter:
             )
         return normalize_matrix(mass)
 
+    def f_ext_gradient(self, q):
+        """Exact pinocchio oracle for the f_ext gradient column.
+
+        Returns (dtau_dfext, dqdd_dfext, did_du_dfext_dq) in the PROJECT layout:
+          dtau_dfext      = -J^T          (nv x 6*NB)
+          dqdd_dfext      =  M^{-1} J^T   (nv x 6*NB)
+          did_du_dfext_dq = -dJ^T/dq      (nv x 6*NB x nv)  (central FD of -J^T)
+
+        ``-J^T`` is built column-by-column by perturbing a single body's local
+        wrench and reading pinocchio's ``tau`` change: because pinocchio computes
+        ``tau = RNEA(q, v, a) - <pin fext>`` with the project's ``f -= f_ext``
+        convention threaded through ``_build_pin_fext``, the response of ``tau``
+        to a unit local wrench on body ``i`` is exactly column block ``i`` of
+        ``-J^T``. This reuses the SAME body-order / sign / frame remap the forward
+        f_ext path validates against, so no separate joint-Jacobian reindexing is
+        needed. ``M^{-1}`` is pinocchio's ``computeMinverse``-derived inverse.
+        """
+        import pinocchio as pin
+
+        nv = self.nv
+        # number of project bodies = scalar joints (+1 for floating root)
+        nb = len(self.project_scalar_joint_names) + (1 if self._floating_prefix_v() else 0)
+        qd0_pin = np.zeros(self.model.nv, dtype=np.float64)
+        qdd0_pin = np.zeros(self.model.nv, dtype=np.float64)
+
+        def _build_pin_unit_fext(body_i, comp_k):
+            fe = [np.zeros(6) for _ in range(nb)]
+            fe[body_i][comp_k] = 1.0
+            return self._build_pin_fext(fe)
+
+        def neg_JT_at(q_pin):
+            tau0 = self._reduce_pin_v_to_project(
+                np.asarray(pin.rnea(self.model, self.data, q_pin, qd0_pin, qdd0_pin),
+                           dtype=np.float64))
+            JT = np.zeros((nv, 6 * nb), dtype=np.float64)
+            for i in range(nb):
+                for k in range(6):
+                    fext = _build_pin_unit_fext(i, k)
+                    tau1 = self._reduce_pin_v_to_project(
+                        np.asarray(pin.rnea(self.model, self.data, q_pin, qd0_pin,
+                                            qdd0_pin, fext), dtype=np.float64))
+                    # dtau/dfext column = (tau1 - tau0) (linear in f_ext, so exact)
+                    JT[:, 6 * i + k] = tau1 - tau0
+            return JT  # this is already -J^T (dtau/dfext)
+
+        q_pin = self._to_pin_q(q)
+        neg_JT = neg_JT_at(q_pin)
+        Minv = self.minv(q)
+        dtau_dfext = normalize_matrix(neg_JT)
+        dqdd_dfext = normalize_matrix(-(Minv @ neg_JT))  # M^{-1} J^T = -M^{-1}(-J^T)
+
+        # dJ^T/dq via central FD of the exact pin -J^T, perturbing each project v
+        # coordinate through pin.integrate on the pin q (correct quaternion step
+        # for floating base; ordinary q[i]+=h for fixed base).
+        h = 1e-6
+        did_du = np.zeros((nv, 6 * nb, nv), dtype=np.float64)
+        for i in range(nv):
+            dv_proj = np.zeros(nv, dtype=np.float64); dv_proj[i] = 1.0
+            dv = self._expand_project_v_to_pin(dv_proj) * h
+            q_plus = pin.integrate(self.model, q_pin, dv)
+            q_minus = pin.integrate(self.model, q_pin, -dv)
+            did_du[:, :, i] = (neg_JT_at(q_plus) - neg_JT_at(q_minus)) / (2.0 * h)
+        return (dtau_dfext, dqdd_dfext, did_du)
+
     # ----- Energy / generalized gravity / Coriolis -----
 
     def generalized_gravity(self, q):

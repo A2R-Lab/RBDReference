@@ -54,6 +54,16 @@ ALGORITHM_TOLERANCES = {
         atol=1e-5,
         note="Second-order forward-dynamics tensors are validated against finite differences of already-verified first-order quantities, so they use a wider tolerance than the primary first-order dynamics checks.",
     ),
+    "f_ext_grad": Tolerance(
+        rtol=1e-6,
+        atol=1e-7,
+        note="First-order f_ext gradients (-J^T, M^-1 J^T) are exact against pinocchio's RNEA-with-unit-fext response, so they use the primary first-order bucket.",
+    ),
+    "f_ext_grad_so": Tolerance(
+        rtol=1e-4,
+        atol=1e-5,
+        note="The mixed second-order f_ext gradient -dJ^T/dq is validated against finite differences of the exact first-order -J^T, so it uses a wider tolerance like the other FD-of-first-order second-order checks.",
+    ),
 }
 
 ROBOT_ALGORITHM_TOLERANCES = {

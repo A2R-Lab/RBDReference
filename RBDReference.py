@@ -1885,6 +1885,89 @@ class RBDReference(
             c = self._denormalize_v_output(c)
         return (c, v, a, f)
 
+    def f_ext_jacobian_transpose(self, q, normalize_input=True):
+        """Stacked body-Jacobian transpose ``J^T`` (nv x 6*NB) for the f_ext column.
+
+        Column block ``i`` (6 columns) is the joint-torque produced by a UNIT
+        local-frame spatial wrench applied to body ``i`` and back-propagated by
+        the RNEA backward sweep. By construction this is exactly the geometric
+        mapping ``J^T[:, 6*i:6*i+6][:, k] = (S_j^T X_{i->j}^T) e_k`` summed over
+        ``j`` on the path root->i (zero off-path), i.e. the transpose of the
+        stacked spatial body Jacobian in each link's LOCAL frame.
+
+        The forward convention (apply_external_forces / rnea_fpass) SUBTRACTS the
+        local wrench: ``f[:, i] -= f_ext[i]``. Therefore the gradient of the RNEA
+        output ``tau`` w.r.t. ``f_ext`` is ``d(tau)/d(f_ext) = -J^T`` (see
+        ``f_ext_gradient``). This method returns the (un-signed) ``J^T`` so both
+        ``-J^T`` (tau) and ``+M^{-1} J^T`` (qdd) consumers can apply their own sign.
+        """
+        if normalize_input:
+            q = self._normalize_q_input(q)
+        NB = self.robot.get_num_bodies()
+        nv = self.robot.get_num_vel()
+        JT = np.zeros((nv, 6 * NB), dtype=np.float64)
+        # For each body i and each of the 6 local-wrench basis vectors, seed the
+        # internal force array and run the RNEA backward sweep (S^T f projection +
+        # X^T f parent propagation). The resulting c is column (6*i + k) of J^T.
+        for i in range(NB):
+            for k in range(6):
+                f = np.zeros((6, NB), dtype=np.float64)
+                f[k, i] = 1.0
+                (c, _f) = self.rnea_bpass(q, f)
+                JT[:, 6 * i + k] = c
+        return JT
+
+    def f_ext_gradient(self, q, normalize_input=True):
+        """Gradients of dynamics w.r.t. external forces ``f_ext`` (the f_ext column).
+
+        ``f_ext`` is a per-body spatial wrench in each link's LOCAL frame
+        (layout [angular(3); linear(3)] per body, body-major 6*NB), SUBTRACTED
+        from the RNEA per-body force (see ``apply_external_forces``). Because it
+        enters RNEA additively and linearly, the dynamics are affine in f_ext
+        with a q-only Jacobian. Returns a dict of the three exact analytic blocks:
+
+          ``dtau_dfext``  = -J^T            (nv x 6*NB)   [section A.1]
+          ``dqdd_dfext``  =  M^{-1} J^T     (nv x 6*NB)   [section A.2]
+          ``did_du_dfext_dq`` = -dJ^T/dq    (nv x 6*NB x nv)   [section A.3]
+          ``did_du_dfext_dqd`` = 0          (nv x 6*NB x nv)   (q-only -> zero)
+
+        ``J^T`` is the stacked spatial body-Jacobian transpose (local frame, all
+        bodies) from ``f_ext_jacobian_transpose``. ``M^{-1}`` is ``minv``. The
+        q-derivative ``dJ^T/dq`` is central finite differenced on the exact J^T
+        (an exact-first-order-FD oracle, far tighter than full forward FD).
+        """
+        if normalize_input:
+            q = self._normalize_q_input(q)
+        NB = self.robot.get_num_bodies()
+        nv = self.robot.get_num_vel()
+        JT = self.f_ext_jacobian_transpose(q, normalize_input=False)
+        Minv = self.minv(q, public_output=False, normalize_input=False)
+
+        dtau_dfext = -JT
+        dqdd_dfext = Minv @ JT
+
+        # dJ^T/dq via central FD of the exact J^T, perturbing each generalized
+        # velocity coordinate through the Lie-group integrator (handles the
+        # floating-base quaternion coordinate correctly; for fixed base this is
+        # an ordinary q[i] += h).
+        h = 1e-6
+        dJT_dq = np.zeros((nv, 6 * NB, nv), dtype=np.float64)
+        for i in range(nv):
+            dv = np.zeros(nv, dtype=np.float64)
+            dv[i] = h
+            q_plus = self.integrate(q, dv)
+            q_minus = self.integrate(q, -dv)
+            JT_plus = self.f_ext_jacobian_transpose(q_plus, normalize_input=False)
+            JT_minus = self.f_ext_jacobian_transpose(q_minus, normalize_input=False)
+            dJT_dq[:, :, i] = (JT_plus - JT_minus) / (2.0 * h)
+
+        return {
+            "dtau_dfext": dtau_dfext,
+            "dqdd_dfext": dqdd_dfext,
+            "did_du_dfext_dq": -dJT_dq,
+            "did_du_dfext_dqd": np.zeros((nv, 6 * NB, nv), dtype=np.float64),
+        }
+
     def _has_mimic_joints(self):
         """Return True if any actuated joint is a URDF <mimic> joint.
 
