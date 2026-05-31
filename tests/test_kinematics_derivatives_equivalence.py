@@ -84,33 +84,15 @@ def test_floating_base_pose_gradient_matches_pinocchio(
 
 
 def build_hessian_case_params():
-    # iiwa14 has been the canonical Hessian comparator since the analytic
-    # path landed; fr3 is added as the explicit mimic-joint coverage point
-    # (analytic d2ee on fr3 exposed a mimic-aware gap in URDFParser before
-    # mimic support landed -- see Joint.set_mimic + RBDReference's mimic
-    # multiplier handling in end_effector_pose_gradient /
-    # end_effector_pose_hessian_analytic).
-    hessian_robots = {"iiwa14", "fr3"}
-    params = []
-    for case in iter_robot_cases(MANIFEST_PATH):
-        spec = case["spec"]
-        base_mode = case["base_mode"]
-        if spec.robot_id not in hessian_robots:
-            continue
-        # Only fixed-base for fr3 (floating-base d2ee for fr3 brings in the
-        # base-rotation rpy branch noise on a manipulator + finger combo,
-        # which isn't the failure mode this case is meant to cover).
-        if spec.robot_id == "fr3" and base_mode != "fixed":
-            continue
-        marks = [
-            pytest.mark.pinocchio_equivalence,
-            pytest.mark.developer_only,
-            getattr(pytest.mark, f"robot_{spec.tier}"),
-        ]
-        if base_mode == "floating":
-            marks.append(pytest.mark.floating_base)
-        params.append(pytest.param(spec, base_mode, id=f"{spec.robot_id}-{base_mode}", marks=marks))
-    return params
+    # Full fleet coverage (matches the pose-gradient parity scope). The analytic
+    # d2ee chain-composition Hessian (`end_effector_pose_hessian_analytic`, the
+    # path `end_effector_pose_hessian` delegates to) agrees with pinocchio's
+    # analytic `getJointKinematicHessian(LOCAL_WORLD_ALIGNED)` to the FD-noise
+    # floor on EVERY manifest robot in both bases, including the mimic robots
+    # (fr3, h1_2) -- so the comparator is no longer scoped to {iiwa14, fr3}.
+    # (The earlier "orientation-hessian bug" was in the retired analytic d^2/dq^2
+    # path; the chain-composition d^2/dv^2 rewrite is correct fleet-wide.)
+    return build_case_params()
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_hessian_case_params())
