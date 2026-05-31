@@ -64,7 +64,7 @@ def _hand_barrier_value_hess(vals, lower, upper, mu):
     return val, hess
 
 
-def _run_plant_checks(spec, project_model):
+def _run_plant_checks(spec, project_model, base_mode="fixed"):
     ref = project_model.reference
     nq, nv = project_model.nq, project_model.nv
     nx = nq + nv
@@ -126,6 +126,72 @@ def _run_plant_checks(spec, project_model):
         assert np.allclose(hess_ee, hess_ee.T)
         assert np.allclose(hess_ee[nv:, :], 0.0) and np.allclose(hess_ee[:, nv:], 0.0)
 
+        # CoM-tracking cost (value/grad via central diff over q; GN hess
+        # structure: symmetric, only the top-left nv x nv q-block non-zero).
+        # GRiD-defined cost, so FD is the oracle (no pinocchio).
+        #
+        # Degenerate / zero-inertia models (e.g. rizon4's broken URDF) have
+        # M_total = 0, so the CoM and CoM-Jacobian are non-physical (NaN from the
+        # 1/M_total normalization) and the cost is not well-defined — skip the
+        # CoM / centroidal-momentum blocks there (same guard the energy/centroidal
+        # suites apply to this degenerate asset).
+        m_total, _com_chk = ref._total_mass_and_com(q)
+        if np.isfinite(m_total) and m_total != 0.0:
+            p_com = np.asarray(ref.com(q), dtype=np.float64).reshape(-1)
+            p_des_com = p_com + rng.uniform(-0.1, 0.1, 3)
+            Wc = rng.uniform(0.5, 2.0, 3)
+            val_com, grad_com, hess_com = ref.com_cost(q, p_des_com, Wc)
+            Jcom = np.asarray(ref.jacobian_com(q), dtype=np.float64)
+            rc = p_com - p_des_com
+            assert np.isclose(val_com, 0.5 * float(np.sum(Wc * rc * rc)))
+
+            def com_cost_q(qv):
+                return ref.com_cost(qv, p_des_com, Wc)[0]
+
+            # FD over the q tangent. For floating base the quaternion chart makes
+            # a naive q[i]+=h step ill-defined (same caution as ee_pos_cost
+            # above), so the q-block gradient-vs-FD comparison is fixed-base only;
+            # the structure (qd-block zero, hess GN-recompute) is checked for both
+            # base modes.
+            if base_mode == "fixed":
+                gfd_com = np.zeros(nv)
+                for i in range(nv):
+                    dq = np.zeros(nq); dq[i] = _FD
+                    gfd_com[i] = (com_cost_q(q + dq) - com_cost_q(q - dq)) / (2 * _FD)
+                assert_close(grad_com[:nv], gfd_com, algorithm="pose_gradient", robot_id=spec.robot_id)
+            assert np.allclose(grad_com[nv:], 0.0)          # qd-block exactly zero
+            assert np.allclose(hess_com, hess_com.T)
+            assert np.allclose(hess_com[nv:, :], 0.0) and np.allclose(hess_com[:, nv:], 0.0)
+            # GN-hessian recompute: J_com^T diag(Wc) J_com in the q-block
+            assert_close(hess_com[:nv, :nv], Jcom.T @ (Wc[:, None] * Jcom),
+                         algorithm="rnea", robot_id=spec.robot_id)
+
+            # Centroidal-momentum-tracking cost. h = A qd is LINEAR in qd, so the
+            # qd-block gradient/hessian are exact; FD over qd is the oracle. The
+            # q-block is dropped (Gauss-Newton on A), so grad's q-block is zero.
+            A_cmm, h_cmm = ref.ccrba(q, qd)
+            A_cmm = np.asarray(A_cmm, dtype=np.float64)
+            h_des_mom = np.asarray(h_cmm, dtype=np.float64).reshape(-1) + rng.uniform(-0.5, 0.5, 6)
+            Wm = rng.uniform(0.5, 2.0, 6)
+            val_mom, grad_mom, hess_mom = ref.momentum_cost(q, qd, h_des_mom, Wm)
+            rm = np.asarray(h_cmm).reshape(-1) - h_des_mom
+            assert np.isclose(val_mom, 0.5 * float(np.sum(Wm * rm * rm)))
+
+            def mom_cost_qd(qdv):
+                return ref.momentum_cost(q, qdv, h_des_mom, Wm)[0]
+
+            gfd_mom = np.zeros(nv)
+            for i in range(nv):
+                dv = np.zeros(nv); dv[i] = _FD
+                gfd_mom[i] = (mom_cost_qd(qd + dv) - mom_cost_qd(qd - dv)) / (2 * _FD)
+            assert_close(grad_mom[nq:], gfd_mom, algorithm="pose_gradient", robot_id=spec.robot_id)
+            assert np.allclose(grad_mom[:nq], 0.0)          # q-block dropped (GN)
+            assert np.allclose(hess_mom, hess_mom.T)
+            assert np.allclose(hess_mom[:nq, :], 0.0) and np.allclose(hess_mom[:, :nq], 0.0)
+            # GN-hessian recompute: A^T diag(Wm) A in the qd-block
+            assert_close(hess_mom[nq:, nq:], A_cmm.T @ (Wm[:, None] * A_cmm),
+                         algorithm="rnea", robot_id=spec.robot_id)
+
         # barriers: value/grad/hess vs hand-rolled, on each of the three slices
         for vals in (q, qd, u):
             n = vals.shape[0]
@@ -153,9 +219,9 @@ def _run_plant_checks(spec, project_model):
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params("fixed"))
 def test_fixed_base_plant_reference(spec, base_mode, project_model):
-    _run_plant_checks(spec, project_model)
+    _run_plant_checks(spec, project_model, base_mode)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params("floating"))
 def test_floating_base_plant_reference(spec, base_mode, project_model):
-    _run_plant_checks(spec, project_model)
+    _run_plant_checks(spec, project_model, base_mode)

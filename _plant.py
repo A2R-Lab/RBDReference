@@ -196,6 +196,84 @@ class _PlantMixin:
         hess_x[:nv, :nv] = Jp.T @ (W[:, None] * Jp)  # J_p^T diag(W) J_p
         return value, grad_x, hess_x
 
+    # ----- CoM-tracking cost (value, grad_x, GN hess_x) -----
+
+    def com_cost(self, q, p_des, W):
+        """Center-of-mass tracking cost over the 3 CoM axes.
+
+        Mirrors the CUDA `grid_plant::com_cost` verbatim (built on the CoM
+        position `self.com` and the CoM Jacobian `self.jacobian_com`, the two
+        sub-outputs of `grid::com_device`):
+          r       = p_com(q) - p_des                       (3-vector)
+          value   = 1/2 sum_r W[r] r[r]^2
+          grad_x  = [J_com^T (W .* r) ; 0]   (qd-block exactly zero)
+          GN hess = J_com^T diag(W) J_com in the top-left NUM_VEL x NUM_VEL
+                    q-block of the NX x NX x-hessian (everything else zero).
+
+        The Gauss-Newton hessian drops the W*r-weighted CoM-Hessian term, the
+        same ratified choice the CUDA emit documents (matches `ee_pos_cost`).
+
+        Returns (value, grad_x (nx,), hess_x (nx, nx)).
+        """
+        nq = self.robot.get_num_pos()
+        nv = self.robot.get_num_vel()
+        nx = nq + nv
+        W = np.asarray(W, dtype=np.float64).reshape(-1)
+        p_des = np.asarray(p_des, dtype=np.float64).reshape(-1)
+
+        p = np.asarray(self.com(q), dtype=np.float64).reshape(-1)
+        Jcom = np.asarray(self.jacobian_com(q), dtype=np.float64)  # (3, nv)
+
+        r = p - p_des
+        value = 0.5 * float(np.sum(W * r * r))
+
+        grad_x = np.zeros(nx, dtype=np.float64)
+        grad_x[:nv] = Jcom.T @ (W * r)  # (nv,)
+
+        hess_x = np.zeros((nx, nx), dtype=np.float64)
+        hess_x[:nv, :nv] = Jcom.T @ (W[:, None] * Jcom)  # J_com^T diag(W) J_com
+        return value, grad_x, hess_x
+
+    # ----- centroidal-momentum-tracking cost (value, grad_x, GN hess_x) -----
+
+    def momentum_cost(self, q, qd, h_des, W):
+        """Centroidal-momentum tracking cost over the 6 momentum components.
+
+        Mirrors the CUDA `grid_plant::momentum_cost` verbatim (built on the CMM
+        `A` and momentum `h = A qd`, the two sub-outputs of `grid::ccrba_device`
+        via `self.ccrba`):
+          r       = h(q,qd) - h_des                        (6-vector)
+          value   = 1/2 sum_r W[r] r[r]^2
+          grad_x  = [0 ; A^T (W .* r)]   (q-block dropped, GN on A; qd-block only)
+          GN hess = A^T diag(W) A in the bottom-right NUM_VEL x NUM_VEL qd-block
+                    of the NX x NX x-hessian (everything else zero).
+
+        h depends on qd linearly (J_h = A), so the qd-block gradient/hessian are
+        exact; the q-dependence of A is dropped Gauss-Newton style, matching the
+        ratified `ee_pos_cost`/`com_cost` choice the CUDA emit documents.
+
+        Returns (value, grad_x (nx,), hess_x (nx, nx)).
+        """
+        nq = self.robot.get_num_pos()
+        nv = self.robot.get_num_vel()
+        nx = nq + nv
+        W = np.asarray(W, dtype=np.float64).reshape(-1)
+        h_des = np.asarray(h_des, dtype=np.float64).reshape(-1)
+
+        A, h = self.ccrba(q, qd)  # A (6, nv), h (6,)
+        A = np.asarray(A, dtype=np.float64)
+        h = np.asarray(h, dtype=np.float64).reshape(-1)
+
+        r = h - h_des
+        value = 0.5 * float(np.sum(W * r * r))
+
+        grad_x = np.zeros(nx, dtype=np.float64)
+        grad_x[nq:] = A.T @ (W * r)  # (nv,) in the qd-block
+
+        hess_x = np.zeros((nx, nx), dtype=np.float64)
+        hess_x[nq:, nq:] = A.T @ (W[:, None] * A)  # A^T diag(W) A
+        return value, grad_x, hess_x
+
     # ----- log barriers (joint position / velocity / torque) -----
 
     @staticmethod
