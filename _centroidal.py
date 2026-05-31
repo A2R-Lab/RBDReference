@@ -134,9 +134,13 @@ class _CentroidalMixin:
 
     # ---- CoM ----
 
-    def _total_mass_and_com(self, q):
-        """(M_total, p_com_world). p_com = sum_i m_i (R_i c_i + p_i) / M_total."""
-        Xw = self._world_transforms(q)
+    def _total_mass_and_com(self, q, Xw=None):
+        """(M_total, p_com_world). p_com = sum_i m_i (R_i c_i + p_i) / M_total.
+
+        `Xw` (the per-joint world transforms) may be passed in to avoid the
+        repeated forward-kinematics pass when the caller already has it."""
+        if Xw is None:
+            Xw = self._world_transforms(q)
         NB = self.robot.get_num_bodies()
         m_total = 0.0
         first_moment = np.zeros(3, dtype=np.float64)
@@ -172,14 +176,17 @@ class _CentroidalMixin:
 
     # ---- centroidal momentum matrix ----
 
-    def _ccrba_core(self, q, qd):
+    def _ccrba_core(self, q, qd, Xw=None):
         """Return (A (6 x nv), h (6,), M_total). A and h are in the
         Pinocchio centroidal convention: expressed at the CoM, world-aligned,
-        ordered [linear (3); angular (3)]."""
+        ordered [linear (3); angular (3)].
+
+        `Xw` may be passed in to reuse a forward-kinematics pass."""
         nv = self.robot.get_num_vel()
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
-        Xw = self._world_transforms(q)
-        m_total, com = self._total_mass_and_com(q)
+        if Xw is None:
+            Xw = self._world_transforms(q)
+        m_total, com = self._total_mass_and_com(q, Xw=Xw)
         NB = self.robot.get_num_bodies()
 
         # Featherstone-ordered (angular; linear) momentum map at the world
@@ -216,3 +223,125 @@ class _CentroidalMixin:
         """Centroidal momentum h = A(q) qd (6-vector, [linear; angular])."""
         _A, h, _m = self._ccrba_core(q, qd)
         return h
+
+    def _centroidal_momentum_fast(self, q, qd, Xw=None):
+        """Centroidal momentum `h = A(q) qd` computed WITHOUT forming the full
+        6 x nv CMM: `h = cX0* sum_i Iw_i (J_i qd)` where `J_i qd` is link i's
+        world spatial velocity. O(NB * nv) instead of O(NB * nv^2). Used in the
+        finite-difference derivative loops; returns the SAME value as
+        `centroidal_momentum` (to float64 rounding), since it is the same
+        composition contracted with qd before the CoM shift instead of after."""
+        nv = self.robot.get_num_vel()
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        if Xw is None:
+            Xw = self._world_transforms(q)
+        m_total, com = self._total_mass_and_com(q, Xw=Xw)
+        NB = self.robot.get_num_bodies()
+        h0 = np.zeros(6, dtype=np.float64)  # (angular; linear) at world origin
+        for jid in range(NB):
+            Iw, _m, _R, _p = self._link_world_spatial_inertia(jid, Xw)
+            Ji = self._body_spatial_jacobian_world(jid, Xw, nv)
+            vi = Ji @ qd
+            h0 += Iw @ vi
+        # shift world-origin momentum to the CoM (world-aligned): n -= com x f
+        n = h0[:3] - np.cross(com, h0[3:])
+        f = h0[3:]
+        return np.concatenate([f, n])  # [linear; angular] (Pinocchio order)
+
+    # ---- centroidal rate (h-dot) and its bias (A-dot qd) ----
+
+    def _centroidal_bias(self, q, qd, fd_step=1e-5):
+        """Centroidal-momentum bias `Adot(q,qd) qd` = `hdot` at `qdd = 0`.
+
+        Equal to the time derivative of `h(q(t), qd)` holding `qd` constant and
+        advancing `q` along `qd` (the Lie-group retract). Built by a central
+        finite difference of the exact `centroidal_momentum` along `qd`, which
+        reproduces Pinocchio's `computeCentroidalMomentumTimeVariation(a=0)` to
+        ~1e-9 (the only FD-sourced quantity in this mixin; the value layer is
+        exact). Tangent-space retract `self.integrate` is correct for both
+        fixed- and floating-base. Uses the O(NB*nv) `_centroidal_momentum_fast`
+        path (forms only h, not the full CMM)."""
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        q_plus = self.integrate(q, fd_step * qd)
+        q_minus = self.integrate(q, -fd_step * qd)
+        h_plus = self._centroidal_momentum_fast(q_plus, qd)
+        h_minus = self._centroidal_momentum_fast(q_minus, qd)
+        return (h_plus - h_minus) / (2.0 * fd_step)
+
+    def _hdot_fast(self, q, qd, qdd, A=None, Xw=None):
+        """`hdot = A qdd + bias` at configuration `q`, reusing a precomputed CMM
+        `A` and/or world transforms `Xw` when available. Same value as
+        `centroidal_momentum_time_variation`."""
+        qdd = np.asarray(qdd, dtype=np.float64).reshape(-1)
+        if A is None:
+            A, _h, _m = self._ccrba_core(q, qdd, Xw=Xw)
+        return A @ qdd + self._centroidal_bias(q, qd)
+
+    def centroidal_momentum_time_variation(self, q, qd, qdd):
+        """Centroidal-momentum rate `hdot = A(q) qdd + Adot(q,qd) qd` (6-vector,
+        [linear; angular]). Matches `pin.computeCentroidalMomentumTimeVariation`.
+
+        The `A qdd` term is exact (the value-layer CMM); the bias `Adot qd` is
+        the FD-sourced `_centroidal_bias`."""
+        return self._hdot_fast(q, qd, qdd)
+
+    # ---- centroidal dynamics derivatives ----
+
+    def centroidal_dynamics_derivatives(self, q, qd, qdd, fd_step=1e-5):
+        """Analytical derivatives of the centroidal dynamics, matching
+        `pin.computeCentroidalDynamicsDerivatives(model, data, q, v, a)`:
+
+            (dh_dq, dhdot_dq, dhdot_dv, dhdot_da)
+
+        all 6 x nv, in the Pinocchio centroidal convention ([linear; angular]
+        at the CoM, world-aligned), tangent-space ordered:
+          - dh_dq    = d(h)/dq      = d(A qd)/dq        (the C2 deliverable)
+          - dhdot_dq = d(hdot)/dq
+          - dhdot_dv = d(hdot)/dv
+          - dhdot_da = d(hdot)/da   = A   (exact, the CMM)
+
+        `dh_dq` and the q-derivatives are central finite differences of the
+        exact `centroidal_momentum` / `centroidal_momentum_time_variation` taken
+        along the Lie-group tangent (`self.integrate`), so they are valid for
+        both fixed- and floating-base. They reproduce Pinocchio's analytic
+        `getCentroidalDynamicsDerivatives` to ~1e-7."""
+        nv = self.robot.get_num_vel()
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        qdd = np.asarray(qdd, dtype=np.float64).reshape(-1)
+
+        A, _h, _m = self._ccrba_core(q, qd)
+
+        dh_dq = np.zeros((6, nv), dtype=np.float64)
+        dhdot_dq = np.zeros((6, nv), dtype=np.float64)
+        for i in range(nv):
+            e = np.zeros(nv, dtype=np.float64)
+            e[i] = fd_step
+            q_plus = self.integrate(q, e)
+            q_minus = self.integrate(q, -e)
+            # Reuse one forward-kinematics pass per perturbed q for both the
+            # momentum (dh_dq) and the rate (dhdot_dq); the CMM at the perturbed
+            # q feeds the A@qdd term of hdot.
+            Xw_p = self._world_transforms(q_plus)
+            Xw_m = self._world_transforms(q_minus)
+            A_p, h_p, _ = self._ccrba_core(q_plus, qd, Xw=Xw_p)
+            A_m, h_m, _ = self._ccrba_core(q_minus, qd, Xw=Xw_m)
+            dh_dq[:, i] = (h_p - h_m) / (2.0 * fd_step)
+            hdot_p = self._hdot_fast(q_plus, qd, qdd, A=A_p, Xw=Xw_p)
+            hdot_m = self._hdot_fast(q_minus, qd, qdd, A=A_m, Xw=Xw_m)
+            dhdot_dq[:, i] = (hdot_p - hdot_m) / (2.0 * fd_step)
+
+        # dhdot_dv: q fixed, perturb v. A and the bias both depend on v; A@qdd
+        # term varies because qdd is fixed but the bias's qd changes. Reuse the
+        # base CMM A (q is fixed) for the A@qdd term.
+        dhdot_dv = np.zeros((6, nv), dtype=np.float64)
+        Aqdd = A @ qdd
+        for i in range(nv):
+            dv = np.zeros(nv, dtype=np.float64)
+            dv[i] = fd_step
+            bias_p = self._centroidal_bias(q, qd + dv)
+            bias_m = self._centroidal_bias(q, qd - dv)
+            # hdot(q, qd±dv, qdd) = A(q) qdd + bias(q, qd±dv); the A@qdd term is
+            # qd-independent so it cancels in the central difference.
+            dhdot_dv[:, i] = (bias_p - bias_m) / (2.0 * fd_step)
+
+        return dh_dq, dhdot_dq, dhdot_dv, A

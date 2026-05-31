@@ -66,8 +66,18 @@ class _EnergyMixin:
         """
         if self.robot.floating_base:
             raise NotImplementedError(
-                "coriolis_matrix reference is implemented for fixed-base only "
-                "(floating-base Christoffel needs a Lie-tangent q perturbation)."
+                "coriolis_matrix reference is implemented for fixed-base only. "
+                "Floating-base Coriolis is intentionally deferred: Pinocchio's "
+                "computeCoriolisMatrix returns an algorithm-specific matrix whose "
+                "symmetric part is exactly 1/2 d/dt M (reproducible by a "
+                "Lie-tangent CRBA finite difference) but whose SKEW part follows "
+                "Pinocchio's internal spatial Bcrb recursion and is NOT the "
+                "tangent-space Christoffel skew (verified: the naive Christoffel "
+                "construction mismatches by full magnitude on go2/iiwa14 floating). "
+                "A matching reference therefore requires porting Pinocchio's exact "
+                "body-frame Coriolis recursion, which is out of scope here; the "
+                "floating-base Coriolis equivalence test stays skipped (the pin "
+                "oracle is present for when the port lands)."
             )
         q = np.asarray(q, dtype=np.float64).reshape(-1)
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)

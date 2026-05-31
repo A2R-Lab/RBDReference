@@ -499,6 +499,41 @@ class PinocchioModelAdapter:
         h = pin.computeCentroidalMomentum(self.model, self.data, q_pin, qd_pin)
         return normalize_vector(np.asarray(h.vector, dtype=np.float64))
 
+    def centroidal_momentum_time_variation(self, q, qd, qdd):
+        """hdot = A qdd + Adot qd (= pin.computeCentroidalMomentumTimeVariation),
+        ordered [linear; angular] at the CoM in a world-aligned frame."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
+        hdot = pin.computeCentroidalMomentumTimeVariation(
+            self.model, self.data, q_pin, qd_pin, qdd_pin
+        )
+        return normalize_vector(np.asarray(hdot.vector, dtype=np.float64))
+
+    def centroidal_dynamics_derivatives(self, q, qd, qdd):
+        """(dh_dq, dhdot_dq, dhdot_dv, dhdot_da) from
+        `pin.computeCentroidalDynamicsDerivatives`, each 6 x nv in the project
+        layout ([linear; angular] at the CoM, world-aligned). `dhdot_da` is the
+        CMM A. For mimic robots the v-axis (column) of every block is folded
+        into the mimicked column with the URDF multiplier scaling."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
+        dh_dq, dhdot_dq, dhdot_dv, dhdot_da = pin.computeCentroidalDynamicsDerivatives(
+            self.model, self.data, q_pin, qd_pin, qdd_pin
+        )
+        out = []
+        for blk in (dh_dq, dhdot_dq, dhdot_dv, dhdot_da):
+            arr = np.asarray(blk, dtype=np.float64)
+            if self.mimic_info is not None and not self.mimic_info.is_empty():
+                arr = self._reduce_pin_matrix_to_project(arr, axes_to_reduce=[(1, "v")])
+            out.append(normalize_matrix(arr))
+        return tuple(out)
+
     # ----- Joint-torque regressor (sysID) -----
 
     # Within-link param permutation: GRiD/URDF basis
