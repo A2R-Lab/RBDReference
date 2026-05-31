@@ -29,14 +29,15 @@ from RBDReference.tests.conftest import MANIFEST_PATH
 from RBDReference.tests.model_sources import iter_robot_cases
 
 
-def _gen3_fixed_case():
-    for case in iter_robot_cases(MANIFEST_PATH, base_mode="fixed"):
+def _gen3_spec(base_mode):
+    for case in iter_robot_cases(MANIFEST_PATH, base_mode=base_mode):
         if case["spec"].robot_id == "gen3":
             return case["spec"]
     return None
 
 
-GEN3_SPEC = _gen3_fixed_case()
+GEN3_SPEC = _gen3_spec("fixed")
+GEN3_FLOATING_SPEC = _gen3_spec("floating")
 
 pytestmark = [
     pytest.mark.pinocchio_equivalence,
@@ -44,6 +45,16 @@ pytestmark = [
     pytest.mark.robot_smoke,
     pytest.mark.skipif(GEN3_SPEC is None, reason="gen3 (continuous-joint robot) not in manifest"),
 ]
+
+
+# Both fixed- and floating-base gen3 exercise the continuous-joint codegen. The
+# floating case additionally checks that the SE(3) free-flyer root composes
+# cleanly with the unbounded-revolute children at large wrapped angles.
+_CONTINUOUS_CASES = [pytest.param(GEN3_SPEC, "fixed", id="gen3-fixed")]
+if GEN3_FLOATING_SPEC is not None:
+    _CONTINUOUS_CASES.append(
+        pytest.param(GEN3_FLOATING_SPEC, "floating", id="gen3-floating")
+    )
 
 
 def _continuous_joint_ids(robot):
@@ -71,25 +82,37 @@ def test_gen3_has_continuous_joints_modeled_as_unbounded_revolute(
     assert project_model.nq == project_model.nv
 
 
-@pytest.mark.parametrize(("spec", "base_mode"), [pytest.param(GEN3_SPEC, "fixed", id="gen3-fixed")])
+@pytest.mark.parametrize(("spec", "base_mode"), _CONTINUOUS_CASES)
 def test_continuous_joint_dynamics_match_pinocchio_at_large_wrapped_angles(
     spec, base_mode, project_model, pinocchio_model
 ):
     """Dynamics OUTPUTS agree with Pinocchio even when continuous-joint angles
     are wrapped many turns past [-pi, pi] -- where the raw-q (GRiD) vs SO(2)
-    (Pinocchio) representations differ most, but the physics must not."""
+    (Pinocchio) representations differ most, but the physics must not.
+
+    Covers both fixed-base gen3 (NQ==NV raw angle) and floating-base gen3, where
+    the SE(3) free-flyer root ([pos(3), quat(4), joints]) must compose cleanly
+    with the unbounded-revolute children at large wrapped angles."""
     robot = project_model.robot
     cont_ids = set(_continuous_joint_ids(robot))
     rng = np.random.default_rng(11)
+    nq = project_model.nq
     nv = project_model.nv
+    floating = base_mode == "floating"
 
     for trial in range(4):
-        base = rng.uniform(-1.0, 1.0, size=nv)
+        # Build q in the project NQ layout. For floating the first 7 slots are
+        # the free-flyer [pos(3), quat(4)] with a NORMALIZED quaternion; the
+        # remaining slots are the joint coordinates.
+        q = rng.uniform(-1.0, 1.0, size=nq)
+        if floating:
+            q[0:3] = rng.uniform(-0.25, 0.25, size=3)
+            quat = rng.uniform(-1.0, 1.0, size=4)
+            q[3:7] = quat / np.linalg.norm(quat)
         # push the continuous-joint coordinates many full turns away
-        q = base.copy()
         for jid in cont_ids:
             iq = robot.get_joint_index_q(jid)
-            q[iq] = base[iq] + 2.0 * np.pi * rng.integers(-3, 4)
+            q[iq] = q[iq] + 2.0 * np.pi * rng.integers(-3, 4)
         qd = rng.uniform(-0.8, 0.8, size=nv)
         qdd = rng.uniform(-0.8, 0.8, size=nv)
 
