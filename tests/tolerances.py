@@ -142,6 +142,16 @@ ROBOT_ALGORITHM_TOLERANCES = {
         atol=1e-2,
         note="Gen3's joint-torque regressor matches Pinocchio at ~1.1e-5 relative; the absolute residual reaches ~4e-3 because the regressor entries carry the (large) inertia x acceleration magnitudes, so the absolute floor is set to the matching scale. A structural basis/permutation error would be O(scale).",
     ),
+    ("gen3", "f_ext_grad"): Tolerance(
+        rtol=1e-6,
+        atol=1e-5,
+        note="Gen3 has continuous joints, which Pinocchio encodes as RUBZ (cos/sin) 2-D q-slots. The -J^T unit-fext response leaks ~4e-6 cross-library round-off at the structurally-zero entries (project yields exact +/-0, pin's expanded model carries the round-off) — above the 1e-6 magnitude floor (scale ~1). One decade wider atol covers it; a structural error would be O(1).",
+    ),
+    ("gen3", "f_ext_grad_so"): Tolerance(
+        rtol=1e-4,
+        atol=1e-4,
+        note="Gen3's -dJ^T/dq (FD-of-exact-first-order) inherits both the FD step error and the continuous-joint cross-library round-off, so it uses a wider absolute floor than the default FD-of-first-order bucket.",
+    ),
     ("g1", "energy"): Tolerance(
         rtol=1e-5,
         atol=1e-3,
