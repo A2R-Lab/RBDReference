@@ -1118,6 +1118,80 @@ class PinocchioModelAdapter:
         frame_id = self.model.getFrameId(target_name)
         return normalize_matrix(np.asarray(self.data.oMf[frame_id].rotation, dtype=np.float64))
 
+    # ----- General-frame Jacobians + operational-space inertia (E2) -----
+
+    _REF_FRAME_NAMES = ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED")
+
+    def _pin_reference_frame(self, reference_frame):
+        import pinocchio as pin
+
+        reference_frame = str(reference_frame).upper()
+        return {
+            "LOCAL": pin.ReferenceFrame.LOCAL,
+            "WORLD": pin.ReferenceFrame.WORLD,
+            "LOCAL_WORLD_ALIGNED": pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+        }[reference_frame]
+
+    def frame_jacobian(self, q, frame_name, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """6 x nv frame Jacobian (rows [linear; angular]) from pinocchio's
+        `getFrameJacobian` (frame target) or `getJointJacobian` (joint target),
+        reduced to the project velocity layout for mimic robots."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        ref = self._pin_reference_frame(reference_frame)
+        pin.computeJointJacobians(self.model, self.data, q_pin)
+        pin.updateFramePlacements(self.model, self.data)
+        if frame_name in self.joint_names:
+            jid = self.model.getJointId(frame_name)
+            J = pin.getJointJacobian(self.model, self.data, jid, ref)
+        else:
+            fid = self.model.getFrameId(frame_name)
+            J = pin.getFrameJacobian(self.model, self.data, fid, ref)
+        J = np.asarray(J, dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            J = self._reduce_pin_matrix_to_project(J, axes_to_reduce=[(1, "v")])
+        return normalize_matrix(J)
+
+    def frame_jacobian_dot(self, q, qd, frame_name,
+                           reference_frame="LOCAL_WORLD_ALIGNED"):
+        """6 x nv frame Jacobian time variation from pinocchio's
+        `computeJointJacobiansTimeVariation` +
+        `getFrameJacobianTimeVariation` / `getJointJacobianTimeVariation`."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        ref = self._pin_reference_frame(reference_frame)
+        pin.computeJointJacobiansTimeVariation(self.model, self.data, q_pin, qd_pin)
+        pin.updateFramePlacements(self.model, self.data)
+        if frame_name in self.joint_names:
+            jid = self.model.getJointId(frame_name)
+            dJ = pin.getJointJacobianTimeVariation(self.model, self.data, jid, ref)
+        else:
+            fid = self.model.getFrameId(frame_name)
+            dJ = pin.getFrameJacobianTimeVariation(self.model, self.data, fid, ref)
+        dJ = np.asarray(dJ, dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            dJ = self._reduce_pin_matrix_to_project(dJ, axes_to_reduce=[(1, "v")])
+        return normalize_matrix(dJ)
+
+    def osc_inertia(self, q, frame_name, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """Operational-space inertia Lambda = (J M^{-1} J^T)^{-1}, 6 x 6.
+        Cross-checks Minv via `pin.computeMinverse` (reduced for mimic)."""
+        import pinocchio as pin
+
+        J = self.frame_jacobian(q, frame_name, reference_frame)
+        q_pin = self._to_pin_q(q)
+        Minv = np.asarray(pin.computeMinverse(self.model, self.data, q_pin),
+                          dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            # computeMinverse inverts the unreduced (singular) mimic model; use
+            # the reduced CRBA inverse the rest of the backend already uses.
+            Minv = self.minv(q)
+        task = J @ Minv @ J.T
+        return normalize_matrix(np.linalg.inv(task))
+
     def _normalize_project_q_for_pose_differences(self, q):
         q = np.asarray(q, dtype=np.float64).copy()
         if self.base_mode == "floating":

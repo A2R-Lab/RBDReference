@@ -1217,6 +1217,152 @@ class RBDReference(
 
         return deePos_arr
 
+    # ------------------------------------------------------------------
+    # General-frame geometric Jacobians + operational-space inertia (E2)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _skew(v):
+        v = np.asarray(v, dtype=np.float64).reshape(-1)
+        return np.array([[0.0, -v[2], v[1]],
+                         [v[2], 0.0, -v[0]],
+                         [-v[1], v[0], 0.0]], dtype=np.float64)
+
+    def _frame_world_placement_and_chain(self, q):
+        """Single forward-kinematics pass.
+
+        Returns (Xw, q_arg) where Xw[j] is the 4x4 world homogeneous transform
+        of joint j (mimic-aware) and q_arg(j) the joint's local q slice.
+        """
+        q = self._normalize_kinematics_q(q)
+        n_joints = self.robot.get_num_joints()
+
+        def q_arg(jid):
+            return self.robot.q_for_joint(jid, q)
+
+        Xw = [None] * n_joints
+        for j in range(n_joints):
+            X_local = np.asarray(self.robot.get_Xmat_hom_Func_by_id(j)(q_arg(j)),
+                                 dtype=np.float64)
+            par = self.robot.get_parent_id(j)
+            Xw[j] = X_local if par == -1 else (Xw[par] @ X_local)
+        return Xw, q_arg
+
+    def _resolve_frame_joint(self, frame_name):
+        """Map a frame/joint name to (target_joint_id, X_offset_hom).
+
+        Accepts an articulated joint name (offset = identity) or a fixed-joint
+        name (offset = the fixed joint's constant transform relative to its
+        movable parent). Mirrors `end_effector_pose`'s target resolution.
+        """
+        joint = self.robot.get_joint_by_name(frame_name)
+        if joint is not None:
+            return joint.get_id(), np.eye(4, dtype=np.float64)
+        fj = self.robot.get_fixed_joint_by_name(frame_name)
+        if fj is None:
+            raise ValueError("Could not find joint or fixed joint named: " + str(frame_name))
+        X_fixed = np.asarray(fj.get_transformation_matrix_hom(), dtype=np.float64)
+        if fj.parent_name == -1:
+            return -1, X_fixed
+        parent = self.robot.get_joint_by_name(fj.parent_name)
+        return parent.get_id(), X_fixed
+
+    def frame_jacobian(self, q, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """6 x nv geometric Jacobian of a frame, ordered [linear(3); angular(3)].
+
+        Matches pinocchio's `getFrameJacobian` / `getJointJacobian` for the
+        three `pin.ReferenceFrame` choices:
+          * ``WORLD``               -- spatial Jacobian at the world origin.
+          * ``LOCAL``               -- twist expressed in the frame's body axes.
+          * ``LOCAL_WORLD_ALIGNED`` -- at the frame origin, world-aligned axes.
+        """
+        reference_frame = str(reference_frame).upper()
+        if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
+            raise ValueError("reference_frame must be LOCAL/WORLD/LOCAL_WORLD_ALIGNED")
+
+        nv = self.robot.get_num_vel()
+        Xw, _ = self._frame_world_placement_and_chain(q)
+        target_id, X_offset = self._resolve_frame_joint(frame_name)
+
+        if target_id == -1:
+            # frame rigidly attached to the world root: no DOFs in the chain.
+            return np.zeros((6, nv), dtype=np.float64)
+
+        X_frame = Xw[target_id] @ X_offset
+        R_f = X_frame[:3, :3]
+        p_f = X_frame[:3, 3]
+
+        def vinds_for(jid):
+            try:
+                inds = self.robot.get_joint_index_v(jid)
+            except Exception:
+                inds = self.robot.get_joint_index_q(jid)
+            if isinstance(inds, (list, tuple, np.ndarray)):
+                return list(inds)
+            return [inds]
+
+        def mimic_scale(jid):
+            joint = self.robot.get_joint_by_id(jid)
+            return joint.get_mimic_multiplier() if getattr(joint, "is_mimic", False) else 1.0
+
+        # World-frame geometric Jacobian at the frame ORIGIN, world axes.
+        Jv = np.zeros((3, nv), dtype=np.float64)
+        Jw = np.zeros((3, nv), dtype=np.float64)
+        chain = sorted(self.robot.get_ancestors_by_id(target_id)) + [target_id]
+        for j in chain:
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            R_j = Xw[j][:3, :3]
+            p_j = Xw[j][:3, 3]
+            vinds = vinds_for(j)
+            scale = mimic_scale(j)
+            for c in range(S.shape[1]):
+                vi = vinds[c] if c < len(vinds) else vinds[-1]
+                ang_local = S[:3, c]
+                lin_local = S[3:6, c]
+                if np.linalg.norm(ang_local) > 0.5:       # rotational DOF
+                    aw = R_j @ ang_local
+                    Jw[:, vi] += scale * aw
+                    Jv[:, vi] += scale * np.cross(aw, p_f - p_j)
+                else:                                      # translational DOF
+                    Jv[:, vi] += scale * (R_j @ lin_local)
+
+        if reference_frame == "LOCAL_WORLD_ALIGNED":
+            return np.vstack([Jv, Jw])
+        if reference_frame == "WORLD":
+            # Spatial Jacobian: shift the reference point from the frame origin
+            # to the world origin (angular part unchanged, linear gains p_f x w).
+            return np.vstack([Jv + self._skew(p_f) @ Jw, Jw])
+        # LOCAL: rotate both blocks into the frame's body axes.
+        Rt = R_f.T
+        return np.vstack([Rt @ Jv, Rt @ Jw])
+
+    def frame_jacobian_dot(self, q, qd, frame_name=None,
+                           reference_frame="LOCAL_WORLD_ALIGNED", step=1e-6):
+        """Time derivative Jdot of `frame_jacobian` along v = qd, 6 x nv.
+
+        Jdot = d/dt J(q(t)) with q evolving on the Lie group under v = qd.
+        Central finite difference of the analytic `frame_jacobian` along the
+        integrator flow (machine-precision oracle; mirrors how the pose Hessian
+        oracle finite-differences the analytic Jacobian)."""
+        qd = self._normalize_v_input(np.asarray(qd, dtype=np.float64))
+        q_plus = self.integrate(q, step * qd)
+        q_minus = self.integrate(q, -step * qd)
+        Jp = self.frame_jacobian(q_plus, frame_name, reference_frame)
+        Jm = self.frame_jacobian(q_minus, frame_name, reference_frame)
+        return (Jp - Jm) / (2.0 * step)
+
+    def osc_inertia(self, q, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """Operational-space (task) inertia Lambda = (J M^{-1} J^T)^{-1}, 6 x 6.
+
+        Composes the frame Jacobian with the inverse joint-space mass matrix
+        (`self.minv`) and inverts the resulting 6x6 task-space matrix."""
+        J = self.frame_jacobian(q, frame_name, reference_frame)
+        Minv = np.asarray(self.minv(q), dtype=np.float64)
+        task = J @ Minv @ J.T
+        return np.linalg.inv(task)
+
     """
     End Effector Pose Hessian
     """

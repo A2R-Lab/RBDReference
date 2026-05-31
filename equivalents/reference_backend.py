@@ -198,6 +198,24 @@ class ProjectModelAdapter:
             self.reference.integrator_grad(q, qd, u, dt, integrator_type=integrator_type)
         )
 
+    # ----- General-frame Jacobians + operational-space inertia (E2) -----
+
+    def frame_jacobian(self, q, frame_name: str, reference_frame="LOCAL_WORLD_ALIGNED"):
+        return normalize_matrix(
+            self.reference.frame_jacobian(q, frame_name, reference_frame)
+        )
+
+    def frame_jacobian_dot(self, q, qd, frame_name: str,
+                           reference_frame="LOCAL_WORLD_ALIGNED"):
+        return normalize_matrix(
+            self.reference.frame_jacobian_dot(q, qd, frame_name, reference_frame)
+        )
+
+    def osc_inertia(self, q, frame_name: str, reference_frame="LOCAL_WORLD_ALIGNED"):
+        return normalize_matrix(
+            self.reference.osc_inertia(q, frame_name, reference_frame)
+        )
+
     def end_effector_pose(self, q, target_name: str, offset=None):
         if offset is None:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
