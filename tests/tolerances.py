@@ -192,11 +192,6 @@ ROBOT_ALGORITHM_TOLERANCES = {
         atol=1e-4,
         note="Gen3's -dJ^T/dq (FD-of-exact-first-order) inherits both the FD step error and the continuous-joint cross-library round-off, so it uses a wider absolute floor than the default FD-of-first-order bucket.",
     ),
-    ("gen3", "pose_gradient"): Tolerance(
-        rtol=1e-6,
-        atol=1e-4,
-        note="Gen3 has continuous joints (Pinocchio RUBZ cos/sin 2-D q-slots). The EE pose Jacobian leaks cross-library round-off at structurally-zero entries (project yields exact +/-0, pin's expanded model carries the round-off): the fixed-base config reaches a few 1e-4-relative blow-ups where |expected|~0 while the absolute residual stays ~0. Same RUBZ artifact as gen3's rnea/f_ext_grad/regressor; the absolute floor matches f_ext_grad_so. A structural error would be O(1).",
-    ),
     ("g1", "energy"): Tolerance(
         rtol=1e-5,
         atol=1e-3,
