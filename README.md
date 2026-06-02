@@ -26,7 +26,7 @@ outputs = rbd.ALGORITHM(inputs)
 
 | Algorithm | Signature |
 |---|---|
-| RNEA (inverse dynamics) | `(c, v, a, f) = rbd.rnea(q, qd, qdd=None, GRAVITY=-9.81)` |
+| Inverse dynamics (RNEA / Recursive Newton-Euler Algorithm) | `(c, v, a, f) = rbd.inverse_dynamics(q, qd, qdd=None, GRAVITY=-9.81)` |
 | ABA (forward dynamics, articulated body) | `qdd = rbd.aba(q, qd, tau, f_ext=[], GRAVITY=-9.81)` |
 | CRBA (composite-rigid-body mass matrix) | `M = rbd.crba(q)` |
 | Minv (direct mass-matrix inverse) | `Minv = rbd.minv(q, output_dense=True)` |
@@ -37,8 +37,8 @@ outputs = rbd.ALGORITHM(inputs)
 
 | Algorithm | Signature |
 |---|---|
-| ∂RNEA/∂(q, qd) | `dc_du = rbd.rnea_grad(q, qd, qdd=None, GRAVITY=-9.81)` returning `np.hstack((dc_dq, dc_dqd))` |
-| ∂forward-dynamics/∂(q, qd) | `(dqdd_dq, dqdd_dqd) = rbd.forward_dynamics_grad(q, qd, u)` |
+| ∂(inverse dynamics)/∂(q, qd) | `dc_du = rbd.inverse_dynamics_gradient(q, qd, qdd=None, GRAVITY=-9.81)` returning `np.hstack((dc_dq, dc_dqd))` |
+| ∂forward-dynamics/∂(q, qd) | `(dqdd_dq, dqdd_dqd) = rbd.forward_dynamics_gradient(q, qd, u)` |
 
 ### Kinematics
 
@@ -72,9 +72,10 @@ flat in chain depth which wins as DOF grows under floating base.
 
 ### Per-pass helpers
 
-Many algorithms also expose their internal passes (e.g. `rnea_fpass`,
-`rnea_bpass`, `minv_bpass`, `minv_fpass`, `rnea_grad_fpass_dq` / `_dqd`,
-`rnea_grad_bpass_dq` / `_dqd`) for unit-testing accelerator port pieces
+Many algorithms also expose their internal passes (e.g. `inverse_dynamics_fpass`,
+`inverse_dynamics_bpass`, `minv_bpass`, `minv_fpass`,
+`inverse_dynamics_gradient_fpass_dq` / `_dqd`,
+`inverse_dynamics_gradient_bpass_dq` / `_dqd`) for unit-testing accelerator port pieces
 independently. See `RBDReference/RBDReference.py` for full signatures.
 
 ## Installation
