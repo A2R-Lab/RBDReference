@@ -119,9 +119,9 @@ def test_continuous_joint_dynamics_match_pinocchio_at_large_wrapped_angles(
         # Pinocchio consumes its own nq layout; the adapter handles the
         # GRiD->pin q mapping (raw angle -> (cos,sin)) internally, so we pass
         # the GRiD-layout q to both adapters.
-        actual = project_model.rnea(q, qd, qdd)
-        expected = pinocchio_model.rnea(q, qd, qdd)
-        assert_close(actual, expected, algorithm="rnea", robot_id=spec.robot_id)
+        actual = project_model.inverse_dynamics(q, qd, qdd)
+        expected = pinocchio_model.inverse_dynamics(q, qd, qdd)
+        assert_close(actual, expected, algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
         actual_m = project_model.crba(q)
         expected_m = pinocchio_model.crba(q)

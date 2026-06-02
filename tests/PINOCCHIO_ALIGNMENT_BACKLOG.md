@@ -80,7 +80,7 @@ semantics. Each verified against the code in this checkout. Fix-ownership noted.
 
 - **`f_ext` not threaded through the mimic FD fast path**
   (`RBDReference.py:2139-2156`, NOTE relocated to `docs/open-tasks/notes.md`):
-  the mimic-aware `aba` computes `qdd = Minv @ (tau - rnea(q, qd, 0))`; neither
+  the mimic-aware `aba` computes `qdd = Minv @ (tau - inverse_dynamics(q, qd, 0))`; neither
   the bias nor the solve applies `f_ext`. **T4 owns the fix** (consolidate
   external-force handling so the mimic path supports it).
 

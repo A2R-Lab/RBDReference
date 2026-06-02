@@ -4,7 +4,7 @@ surface.
 The GRiD CUDA codegen exposes ``integrator_with_gradient`` — a single device
 pass that computes BOTH the next state ``x_{k+1}`` AND the integrator Jacobian
 ``[A | B]`` (see ``_integrator_gradient.py`` ``compute_x_kp1=True``). Its numpy
-oracle is the pairing ``(RBDReference.integrator, RBDReference.integrator_grad)``:
+oracle is the pairing ``(RBDReference.integrator, RBDReference.integrator_gradient)``:
 the CUDA equivalence harness diffs the combined kernel's ``x_kp1`` block against
 ``integrator(...)`` and its ``dAB`` block against ``integrator_gradient(...)``
 (see ``test/cuda_equivalents/test_cuda_integrator_equivalence.py``).
@@ -27,7 +27,7 @@ would be caught.
 
 Robots: iiwa14 (small fixed), go2 (floating), fr3 (mimic: NB=9 > NV=8 fixed,
 14-DoF floating). Methods: euler + semi_implicit_euler + a multi-stage RK
-(rk4). Tolerances reuse the per-robot ``rnea`` bucket, matching the existing
+(rk4). Tolerances reuse the per-robot ``inverse_dynamics`` bucket, matching the existing
 integrator equivalence + FD-sanity suites.
 """
 
@@ -141,14 +141,14 @@ def test_combined_matches_separate_references(robot_id, base_mode, integrator_ty
             pm.integrator(q, qd, u, _DT, integrator_type=integrator_type),
             dtype=np.float64,
         )
-        assert_close(x_kp1, expected_x, algorithm="rnea", robot_id=robot_id)
+        assert_close(x_kp1, expected_x, algorithm="inverse_dynamics", robot_id=robot_id)
 
         # 2) combined gradient block == integrator_gradient reference
         expected_g = np.asarray(
             pm.integrator_gradient(q, qd, u, _DT, integrator_type=integrator_type),
             dtype=np.float64,
         )
-        assert_close(dAB, expected_g, algorithm="rnea", robot_id=robot_id)
+        assert_close(dAB, expected_g, algorithm="inverse_dynamics", robot_id=robot_id)
 
         denom_x = max(np.max(np.abs(expected_x)), 1e-12)
         denom_g = max(np.max(np.abs(expected_g)), 1e-12)

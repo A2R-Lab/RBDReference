@@ -260,7 +260,7 @@ class PinocchioModelAdapter:
                                     np.asarray(angular, dtype=np.float64))
         return forces
 
-    def rnea(self, q, qd, qdd, f_ext=None):
+    def inverse_dynamics(self, q, qd, qdd, f_ext=None):
         import pinocchio as pin
 
         q_pin = self._to_pin_q(q)
@@ -289,7 +289,7 @@ class PinocchioModelAdapter:
         # project's constraint-aware semantics. Using a locked / reduced
         # model on the pinocchio side gives the bit-comparable answer:
         #     qdd = M_reduced^{-1} * (tau_project - rnea_reduced(q, v, 0))
-        # `self.rnea` and `self.minv` already perform the mimic
+        # `self.inverse_dynamics` and `self.minv` already perform the mimic
         # reduction (CRBA folds the duplicated rows/cols with the URDF
         # multiplier, and rnea reduces the resulting bias the same
         # way), so building ABA on top of them is the cleanest way to
@@ -301,7 +301,7 @@ class PinocchioModelAdapter:
             nv_proj = qd_proj.shape[0]
             # External forces enter the reduced-model bias only (mass matrix is
             # f_ext-independent), so thread f_ext into the rnea bias call.
-            bias = self.rnea(q, qd_proj, np.zeros(nv_proj), f_ext=f_ext)
+            bias = self.inverse_dynamics(q, qd_proj, np.zeros(nv_proj), f_ext=f_ext)
             mass = self.minv(q)
             return normalize_vector(mass @ (tau_proj - bias))
         tau_pin = self._expand_project_v_to_pin(np.asarray(tau, dtype=np.float64))
@@ -544,7 +544,7 @@ class PinocchioModelAdapter:
     # Ixz<->Iyy). Identity on mass + first-moment.
     _PARAM_PERM = [0, 1, 2, 3, 4, 5, 7, 6, 8, 9]
 
-    def joint_torque_regressor(self, q, qd, qdd, project_body_joint_names=None):
+    def inverse_dynamics_regressor(self, q, qd, qdd, project_body_joint_names=None):
         """Joint-torque regressor in the PROJECT layout (nv x 10*NB), with the
         per-link 10-param blocks ordered to match the project body ids and the
         GRiD/URDF inertia-entry basis.
@@ -581,7 +581,7 @@ class PinocchioModelAdapter:
             Y_out[:, 10 * b:10 * b + 10] = block[:, self._PARAM_PERM]
         return normalize_matrix(Y_out)
 
-    def rnea_grad(self, q, qd, qdd, f_ext=None):
+    def inverse_dynamics_gradient(self, q, qd, qdd, f_ext=None):
         import pinocchio as pin
 
         q_pin = self._to_pin_q(q)
@@ -688,7 +688,7 @@ class PinocchioModelAdapter:
         `Minv` in `self.minv` (which inverts the reduced CRBA mass matrix);
         the second-order RNEA and forward-dynamics gradient inputs are taken
         from the now-mimic-aware `self.idsva_so_body_frame` /
-        `self.forward_dynamics_grad`. The composition formula is unchanged
+        `self.forward_dynamics_gradient`. The composition formula is unchanged
         — only the source of each input shifts to the reduced model.
         """
         if self.mimic_info is not None and not self.mimic_info.is_empty():
@@ -696,7 +696,7 @@ class PinocchioModelAdapter:
             qdd = np.asarray(qdd, dtype=np.float64)
             d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq = self.idsva_so_body_frame(q, qd, qdd)
             Minv = self.minv(q)
-            fd_dq, fd_dqd = self.forward_dynamics_grad(q, qd, u)
+            fd_dq, fd_dqd = self.forward_dynamics_gradient(q, qd, u)
             daba_dqdq = -np.einsum(
                 "il,ljk->ijk",
                 Minv,
@@ -732,7 +732,7 @@ class PinocchioModelAdapter:
         d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq = self.idsva_so_body_frame(q, qd, qdd)
         pin.computeMinverse(self.model, self.data, q_pin)
         Minv = normalize_matrix(np.asarray(self.data.Minv, dtype=np.float64))
-        fd_dq, fd_dqd = self.forward_dynamics_grad(q, qd, u)
+        fd_dq, fd_dqd = self.forward_dynamics_gradient(q, qd, u)
         daba_dqdq = -np.einsum(
             "il,ljk->ijk",
             Minv,
@@ -753,7 +753,7 @@ class PinocchioModelAdapter:
         )
         return daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq
 
-    def forward_dynamics_grad(self, q, qd, u):
+    def forward_dynamics_gradient(self, q, qd, u):
         import pinocchio as pin
 
         # Mimic: pin.computeABADerivatives' per-body recursion doesn't commute
@@ -763,7 +763,7 @@ class PinocchioModelAdapter:
         if self.mimic_info is not None and not self.mimic_info.is_empty():
             qdd = self.forward_dynamics(q, qd, u)
             minv = self.minv(q)
-            dc_dq, dc_dqd = self.rnea_grad(q, qd, qdd)
+            dc_dq, dc_dqd = self.inverse_dynamics_gradient(q, qd, qdd)
             return (-minv @ dc_dq, -minv @ dc_dqd)
 
         q_pin = self._to_pin_q(q)
@@ -1021,7 +1021,7 @@ class PinocchioModelAdapter:
 
         Uses `pin.dIntegrate` for the q-side blocks and `pin.computeABADerivatives`
         for the qdd partials. The chain rule across multi-stage variants
-        mirrors the form in `RBDReference.integrator_grad`.
+        mirrors the form in `RBDReference.integrator_gradient`.
         """
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
@@ -1031,7 +1031,7 @@ class PinocchioModelAdapter:
         Z_n = np.zeros((nv, nv))
 
         def fd_grad_at(pq, pqd):
-            J_qq, J_qv = self.forward_dynamics_grad(pq, pqd, u)
+            J_qq, J_qv = self.forward_dynamics_gradient(pq, pqd, u)
             return np.asarray(J_qq, dtype=np.float64), np.asarray(J_qv, dtype=np.float64), self.minv(pq)
 
         def q_top_blocks(v_dt_arg):

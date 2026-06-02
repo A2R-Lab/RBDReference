@@ -114,11 +114,11 @@ class _PlantMixin:
     def plant_step_gradient(self, q, qd, u, dt, integrator_type="euler"):
         """[A | B] = [d x_{k+1}/dq | d/dqd | d/du], shape (2*nv, 3*nv).
 
-        Pass-through to `self.integrator_grad`, mirroring CUDA
+        Pass-through to `self.integrator_gradient`, mirroring CUDA
         `plant_step_gradient` (the s_dAB surface).
         """
         return np.asarray(
-            self.integrator_grad(q, qd, u, dt, integrator_type=integrator_type),
+            self.integrator_gradient(q, qd, u, dt, integrator_type=integrator_type),
             dtype=np.float64,
         )
 

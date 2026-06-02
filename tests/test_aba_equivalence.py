@@ -54,7 +54,7 @@ def test_fixed_base_aba_matches_pinocchio(
             pytest.skip(
                 f"{spec.robot_id} fixed-base mass matrix is singular for the resolved source model, so ABA equivalence is not well-defined."
             )
-        tau = project_model.rnea(sample.q, sample.qd, sample.qdd)
+        tau = project_model.inverse_dynamics(sample.q, sample.qd, sample.qdd)
         actual = project_model.aba(sample.q, sample.qd, tau)
         expected = pinocchio_model.aba(sample.q, sample.qd, tau)
         assert_close(actual, expected, algorithm="aba", robot_id=spec.robot_id)
@@ -69,7 +69,7 @@ def test_floating_base_aba_matches_pinocchio(
             pytest.skip(
                 f"{spec.robot_id} floating-base mass matrix is singular for the resolved source model, so ABA equivalence is not well-defined."
             )
-        tau = project_model.rnea(sample.q, sample.qd, sample.qdd)
+        tau = project_model.inverse_dynamics(sample.q, sample.qd, sample.qdd)
         actual = project_model.aba(sample.q, sample.qd, tau)
         expected = pinocchio_model.aba(sample.q, sample.qd, tau)
         assert_close(actual, expected, algorithm="aba", robot_id=spec.robot_id)

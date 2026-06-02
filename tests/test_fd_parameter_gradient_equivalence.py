@@ -1,10 +1,10 @@
 """Pinocchio equivalence for the forward-dynamics inertial-parameter gradient.
 
-Cross-checks `_RegressorMixin.fd_parameter_gradient` (the numpy reference
+Cross-checks `_RegressorMixin.forward_dynamics_parameter_gradient` (the numpy reference
 `dqdd/dpi`, the inertial-parameter gradient of forward dynamics) against an
 independent Pinocchio oracle. This closes the C2 gap: the existing
 `test_regressor_equivalence.py` only validated the regressor `Y`, never the
-`-Minv . Y` compose that `fd_parameter_gradient` returns.
+`-Minv . Y` compose that `forward_dynamics_parameter_gradient` returns.
 
 Oracle (derived):
   Forward dynamics solves  M(pi) qddot + c(q, qdot, pi) = u  for fixed input
@@ -17,11 +17,11 @@ Oracle (derived):
   with  qddot_actual = forward_dynamics(q, qdot, u) = aba(q, qdot, u).
 
 The oracle is assembled from the Pinocchio backend's `minv` (pin.crba inverse /
-computeMinverse), `aba` (pin.aba, mimic-reduced), and `joint_torque_regressor`
+computeMinverse), `aba` (pin.aba, mimic-reduced), and `inverse_dynamics_regressor`
 (pin.computeJointTorqueRegressor, remapped to the project body order + GRiD
 param basis) -- each already validated independently by the minv / aba /
 regressor equivalence suites -- so this test validates the COMPOSE, not the
-pieces. The input torque is grounded as  u = rnea(q, qdot, qddot_sample)  so the
+pieces. The input torque is grounded as  u = inverse_dynamics(q, qdot, qddot_sample)  so the
 gradient is taken at a physical acceleration; the SAME u feeds both sides.
 """
 
@@ -49,21 +49,21 @@ def build_case_params(base_mode: str):
     return params
 
 
-def _pin_fd_parameter_gradient_oracle(pinocchio_model, body_joint_names, q, qd, u):
+def _pin_forward_dynamics_parameter_gradient_oracle(pinocchio_model, body_joint_names, q, qd, u):
     """Independent -Minv . Y(q,qd,qdd_actual) oracle from the Pinocchio backend.
 
     qdd_actual = aba(q,qd,u); Y is remapped to the project body order + GRiD
     param basis; Minv is the reduced project-layout inverse mass matrix.
     """
     qdd_actual = np.asarray(pinocchio_model.aba(q, qd, u), dtype=np.float64)
-    Y_pin = pinocchio_model.joint_torque_regressor(
+    Y_pin = pinocchio_model.inverse_dynamics_regressor(
         q, qd, qdd_actual, project_body_joint_names=body_joint_names
     )
     Minv_pin = np.asarray(pinocchio_model.minv(q), dtype=np.float64)
     return -(Minv_pin @ Y_pin)
 
 
-def _check_fd_parameter_gradient(spec, project_model, pinocchio_model):
+def _check_forward_dynamics_parameter_gradient(spec, project_model, pinocchio_model):
     body_joint_names = project_model.body_joint_names
     for sample in build_dynamics_samples(project_model):
         q, qd, qdd = sample.q, sample.qd, sample.qdd
@@ -73,22 +73,22 @@ def _check_fd_parameter_gradient(spec, project_model, pinocchio_model):
             continue
         # Ground the input torque at a physical acceleration so the gradient is
         # evaluated at qdd_actual = forward_dynamics(q, qd, u) ≈ qdd_sample.
-        u = project_model.rnea(q, qd, qdd)
+        u = project_model.inverse_dynamics(q, qd, qdd)
 
-        actual = project_model.fd_parameter_gradient(q, qd, u)
-        oracle = _pin_fd_parameter_gradient_oracle(pinocchio_model, body_joint_names, q, qd, u)
-        assert_close(actual, oracle, algorithm="fd_param_grad", robot_id=spec.robot_id)
+        actual = project_model.forward_dynamics_parameter_gradient(q, qd, u)
+        oracle = _pin_forward_dynamics_parameter_gradient_oracle(pinocchio_model, body_joint_names, q, qd, u)
+        assert_close(actual, oracle, algorithm="forward_dynamics_parameter_gradient", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params("fixed"))
-def test_fixed_base_fd_parameter_gradient_matches_pinocchio(
+def test_fixed_base_forward_dynamics_parameter_gradient_matches_pinocchio(
     spec, base_mode, project_model, pinocchio_model
 ):
-    _check_fd_parameter_gradient(spec, project_model, pinocchio_model)
+    _check_forward_dynamics_parameter_gradient(spec, project_model, pinocchio_model)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params("floating"))
-def test_floating_base_fd_parameter_gradient_matches_pinocchio(
+def test_floating_base_forward_dynamics_parameter_gradient_matches_pinocchio(
     spec, base_mode, project_model, pinocchio_model
 ):
-    _check_fd_parameter_gradient(spec, project_model, pinocchio_model)
+    _check_forward_dynamics_parameter_gradient(spec, project_model, pinocchio_model)

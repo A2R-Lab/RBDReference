@@ -1,14 +1,14 @@
 """Pinocchio equivalence for the joint-torque regressor numpy reference (sysID).
 
-Cross-checks the additive `_RegressorMixin.joint_torque_regressor` against
+Cross-checks the additive `_RegressorMixin.inverse_dynamics_regressor` against
 `pin.computeJointTorqueRegressor`. Mind the two conventions reconciled here:
   - the per-link 10-param block ORDER (project body id <-> pin joint id; the
     floating root maps to pin's root_joint), and
   - the inertia-entry BASIS permutation inside each 10-block (GRiD/URDF
     [Ixx,Ixy,Ixz,Iyy,Iyz,Izz] vs pin [Ixx,Ixy,Iyy,Ixz,Iyz,Izz]).
-Both are handled by `PinocchioModelAdapter.joint_torque_regressor` when given
+Both are handled by `PinocchioModelAdapter.inverse_dynamics_regressor` when given
 the project's body-joint-name ordering, so the two matrices line up column for
-column. Also verifies the structural identity `Y @ pi == rnea(q,qd,qdd)`.
+column. Also verifies the structural identity `Y @ pi == inverse_dynamics(q,qd,qdd)`.
 """
 
 import numpy as np
@@ -63,15 +63,15 @@ def _check_regressor(spec, project_model, pinocchio_model):
             # Degenerate / zero-inertia model (e.g. rizon4's broken URDF) — the
             # Pinocchio regressor / RNEA oracle is non-physical here.
             continue
-        Y_ref = project_model.joint_torque_regressor(q, qd, qdd)
-        # structural identity: Y @ pi == rnea
-        tau = project_model.rnea(q, qd, qdd)
-        assert_close(Y_ref @ pi, tau, algorithm="rnea", robot_id=spec.robot_id)
+        Y_ref = project_model.inverse_dynamics_regressor(q, qd, qdd)
+        # structural identity: Y @ pi == inverse_dynamics
+        tau = project_model.inverse_dynamics(q, qd, qdd)
+        assert_close(Y_ref @ pi, tau, algorithm="inverse_dynamics", robot_id=spec.robot_id)
         # vs pinocchio (remapped to the project body order + GRiD param basis)
-        Y_pin = pinocchio_model.joint_torque_regressor(
+        Y_pin = pinocchio_model.inverse_dynamics_regressor(
             q, qd, qdd, project_body_joint_names=body_joint_names
         )
-        assert_close(Y_ref, Y_pin, algorithm="regressor", robot_id=spec.robot_id)
+        assert_close(Y_ref, Y_pin, algorithm="inverse_dynamics_regressor", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params("fixed"))

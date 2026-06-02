@@ -27,26 +27,26 @@ def build_fixed_case_params():
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_fixed_case_params())
-def test_fixed_base_rnea_grad_matches_pinocchio(
+def test_fixed_base_inverse_dynamics_gradient_matches_pinocchio(
     spec, base_mode, project_model, pinocchio_model
 ):
     for sample in build_dynamics_samples(project_model):
-        actual_dq, actual_dqd = project_model.rnea_grad(sample.q, sample.qd, sample.qdd)
-        expected_dq, expected_dqd = pinocchio_model.rnea_grad(
+        actual_dq, actual_dqd = project_model.inverse_dynamics_gradient(sample.q, sample.qd, sample.qdd)
+        expected_dq, expected_dqd = pinocchio_model.inverse_dynamics_gradient(
             sample.q, sample.qd, sample.qdd
         )
-        assert_close(actual_dq, expected_dq, algorithm="rnea", robot_id=spec.robot_id)
-        assert_close(actual_dqd, expected_dqd, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual_dq, expected_dq, algorithm="inverse_dynamics", robot_id=spec.robot_id)
+        assert_close(actual_dqd, expected_dqd, algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params(base_mode="floating"))
-def test_floating_base_rnea_grad_matches_pinocchio(
+def test_floating_base_inverse_dynamics_gradient_matches_pinocchio(
     spec, base_mode, project_model, pinocchio_model
 ):
     for sample in build_dynamics_samples(project_model):
-        actual_dq, actual_dqd = project_model.rnea_grad(sample.q, sample.qd, sample.qdd)
-        expected_dq, expected_dqd = pinocchio_model.rnea_grad(
+        actual_dq, actual_dqd = project_model.inverse_dynamics_gradient(sample.q, sample.qd, sample.qdd)
+        expected_dq, expected_dqd = pinocchio_model.inverse_dynamics_gradient(
             sample.q, sample.qd, sample.qdd
         )
-        assert_close(actual_dq, expected_dq, algorithm="rnea", robot_id=spec.robot_id)
-        assert_close(actual_dqd, expected_dqd, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual_dq, expected_dq, algorithm="inverse_dynamics", robot_id=spec.robot_id)
+        assert_close(actual_dqd, expected_dqd, algorithm="inverse_dynamics", robot_id=spec.robot_id)

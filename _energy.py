@@ -11,7 +11,7 @@ Pinocchio:
   - coriolis_matrix       vs pin.computeCoriolisMatrix
 
 Sign convention: `GRAVITY` is the scalar gravity acceleration (default -9.81),
-matching `RBDReference.rnea`. PE uses the gravity vector g = [0,0,GRAVITY] so
+matching `RBDReference.inverse_dynamics`. PE uses the gravity vector g = [0,0,GRAVITY] so
 that `PE = -M_total * g . p_com` reproduces Pinocchio's potential energy.
 """
 
@@ -25,14 +25,14 @@ class _EnergyMixin:
         """g(q) = RNEA(q, 0, 0): the generalized gravity torque (size nv)."""
         n = self.robot.get_num_vel()
         zero = np.zeros(n, dtype=np.float64)
-        c, _v, _a, _f = self.rnea(q, zero, zero, GRAVITY=GRAVITY)
+        c, _v, _a, _f = self.inverse_dynamics(q, zero, zero, GRAVITY=GRAVITY)
         return np.asarray(c, dtype=np.float64).reshape(-1)
 
     def nonlinear_effects(self, q, qd, GRAVITY=-9.81):
         """c(q, qd) = RNEA(q, qd, 0) = C(q,qd) qd + g(q) (size nv)."""
         n = self.robot.get_num_vel()
         zero = np.zeros(n, dtype=np.float64)
-        c, _v, _a, _f = self.rnea(q, qd, zero, GRAVITY=GRAVITY)
+        c, _v, _a, _f = self.inverse_dynamics(q, qd, zero, GRAVITY=GRAVITY)
         return np.asarray(c, dtype=np.float64).reshape(-1)
 
     def kinetic_energy(self, q, qd):

@@ -1,7 +1,7 @@
 """Pinocchio equivalence test for the RBDReference integrator.
 
 Cross-checks `ProjectModelAdapter.integrator(_gradient)` (which delegates to
-`RBDReference.integrator` / `.integrator_grad`) against
+`RBDReference.integrator` / `.integrator_gradient`) against
 `PinocchioModelAdapter.integrator(_gradient)` (which calls `pin.integrate`,
 `pin.dIntegrate`, and `pin.aba` directly). This is the strongest claim we
 make for floating-base: Pinocchio's `integrate` IS the canonical Lie-group
@@ -43,9 +43,9 @@ def _assert_integrator_state_close(actual_x, expected_x, project_model, pinocchi
     expected_x = np.asarray(expected_x, dtype=np.float64)
     q_a, v_a = actual_x[:nq], actual_x[nq:]
     q_e, v_e = expected_x[:nq], expected_x[nq:]
-    assert_close(v_a, v_e, algorithm="rnea", robot_id=spec.robot_id)
+    assert_close(v_a, v_e, algorithm="inverse_dynamics", robot_id=spec.robot_id)
     q_residual = pinocchio_model.q_tangent_residual(q_a, q_e)
-    assert_close(q_residual, np.zeros(nv), algorithm="rnea", robot_id=spec.robot_id)
+    assert_close(q_residual, np.zeros(nv), algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
 
 def build_case_params(base_mode: str):
@@ -79,7 +79,7 @@ def test_fixed_base_integrator_matches_pinocchio(
         _assert_integrator_state_close(actual_x, expected_x, project_model, pinocchio_model, spec)
         actual_dAB = project_model.integrator_gradient(sample.q, sample.qd, u, _DEFAULT_DT, integrator_type=integrator_type)
         expected_dAB = pinocchio_model.integrator_gradient(sample.q, sample.qd, u, _DEFAULT_DT, integrator_type=integrator_type)
-        assert_close(actual_dAB, expected_dAB, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual_dAB, expected_dAB, algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params("floating"))
@@ -98,4 +98,4 @@ def test_floating_base_integrator_matches_pinocchio(
         _assert_integrator_state_close(actual_x, expected_x, project_model, pinocchio_model, spec)
         actual_dAB = project_model.integrator_gradient(sample.q, sample.qd, u, _DEFAULT_DT, integrator_type=integrator_type)
         expected_dAB = pinocchio_model.integrator_gradient(sample.q, sample.qd, u, _DEFAULT_DT, integrator_type=integrator_type)
-        assert_close(actual_dAB, expected_dAB, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual_dAB, expected_dAB, algorithm="inverse_dynamics", robot_id=spec.robot_id)

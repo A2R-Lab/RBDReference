@@ -1,6 +1,6 @@
 """Shared equivalence interface for RBDReference.
 
-Two interchangeable backends expose an identical adapter API (``rnea``, ``aba``,
+Two interchangeable backends expose an identical adapter API (``inverse_dynamics``, ``aba``,
 ``forward_dynamics``, ``minv``, ``crba``, the first/second-order derivatives,
 ``idsva_so_body_frame``, ``fdsva_so``, the integrators, and
 ``end_effector_pose``/``_gradient``/``_hessian``):

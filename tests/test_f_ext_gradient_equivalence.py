@@ -41,9 +41,9 @@ def _check(spec, project_model, pinocchio_model):
         a_dtau, a_dqdd, a_djt = project_model.f_ext_gradient(q)
         e_dtau, e_dqdd, e_djt = pinocchio_model.f_ext_gradient(q)
         # first-order blocks are exact
-        assert_close(a_dtau, e_dtau, algorithm="f_ext_grad", robot_id=spec.robot_id)
-        assert_close(a_dqdd, e_dqdd, algorithm="f_ext_grad", robot_id=spec.robot_id)
+        assert_close(a_dtau, e_dtau, algorithm="f_ext_gradient", robot_id=spec.robot_id)
+        assert_close(a_dqdd, e_dqdd, algorithm="f_ext_gradient", robot_id=spec.robot_id)
         # mixed second-order block: FD-of-exact on both sides
         assert_close(
-            a_djt, e_djt, algorithm="f_ext_grad_so", robot_id=spec.robot_id
+            a_djt, e_djt, algorithm="f_ext_gradient_so", robot_id=spec.robot_id
         )

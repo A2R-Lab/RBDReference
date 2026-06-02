@@ -225,7 +225,7 @@ Why it matters for CUDA later:
 ### 3. Force-cross helper `fxS(...)` was corrected
 
 Problem:
-- The helper used in the `dq` backward pass of `rnea_grad(...)` was applying the
+- The helper used in the `dq` backward pass of `inverse_dynamics_gradient(...)` was applying the
   wrong cross action for differentiating transported forces.
 - This showed up clearly on Fetch with continuous roll joints upstream of
   prismatic gripper fingers.
@@ -250,7 +250,7 @@ Problem:
   the root.
 
 Change:
-- Floating-base `rnea(...)` now interprets the root velocity and acceleration
+- Floating-base `inverse_dynamics(...)` now interprets the root velocity and acceleration
   inputs in Pinocchio-style order:
   `[vx, vy, vz, wx, wy, wz]`.
 - The floating joint subspace now encodes the mapping from that user-facing
@@ -275,15 +275,15 @@ Change:
   - public floating `q` stays `[x, y, z, qx, qy, qz, qw, ...]`
   - root `qd/qdd` stay `[vx, vy, vz, wx, wy, wz]`
 - The smoke-robot test rollout validates these second-order tensors against
-  finite differences of the already-verified first-order `rnea_grad(...)`,
-  `forward_dynamics_grad(...)`, `crba(...)`, and `minv(...)` paths.
+  finite differences of the already-verified first-order `inverse_dynamics_gradient(...)`,
+  `forward_dynamics_gradient(...)`, `crba(...)`, and `minv(...)` paths.
 - The current implementation is intentionally hybrid for floating base:
   - `idsva_so_body_frame(...)` keeps the analytic old-style path for the velocity-side and
     mass-matrix-side tensors, while patching `d2tau_dq` from the already-verified
-    first-order `rnea_grad(...)` path.
+    first-order `inverse_dynamics_gradient(...)` path.
   - `fdsva_so(...)` keeps the analytic old-style composition for the
     velocity-side and torque-side tensors, while patching `daba_dqdq` from the
-    already-verified first-order `forward_dynamics_grad(...)` path.
+    already-verified first-order `forward_dynamics_gradient(...)` path.
 - The public inverse-dynamics second-order name is now `idsva_so_body_frame(...)`, which
   mirrors `fdsva_so(...)` and replaces the older
   `second_order_idsva_parallel(...)` naming in the equivalence harness.
@@ -349,7 +349,7 @@ Problem:
   still were not trustworthy enough to enforce across the floating-enabled set.
 - Floating `aba(...)` still mixed two root-only convention issues:
   the root gravity / acceleration initialization did not match the already-fixed
-  floating `rnea(...)` path, and the root final forward update still treated the
+  floating `inverse_dynamics(...)` path, and the root final forward update still treated the
   floating root like a transformed child.
 - Floating `crba(...)` still mixed conventions inside the root-to-joint
   cross-term blocks: the root block itself was already in the Pinocchio-facing
@@ -358,7 +358,7 @@ Problem:
 
 Change:
 - Floating `aba(...)` now keeps the root `U` solve in its local form, uses the
-  same floating root gravity transport convention as `rnea(...)`, and skips the
+  same floating root gravity transport convention as `inverse_dynamics(...)`, and skips the
   extra root `Xmat` application in the final root forward update.
 - Floating `crba(...)` now leaves the root `6 x 6` block untouched and only
   reorders the root-to-joint cross terms into the Pinocchio-facing root order.
@@ -397,8 +397,8 @@ Why it matters for CUDA later:
 ### 8. Floating-base inverse-dynamics gradients were aligned with Pinocchio
 
 Problem:
-- After floating-base `rnea(...)` itself matched Pinocchio, the `dq` block of
-  `rnea_grad(...)` still disagreed badly while the `d/dqd` block already
+- After floating-base `inverse_dynamics(...)` itself matched Pinocchio, the `dq` block of
+  `inverse_dynamics_gradient(...)` still disagreed badly while the `d/dqd` block already
   matched.
 - The remaining mismatch came from two floating-root-specific issues:
   the root `dq` backward pass still wrote out raw spatial-order results, and
@@ -407,9 +407,9 @@ Problem:
   `inv(Xmat) @ g` root transport.
 
 Change:
-- Floating `rnea_grad_bpass_dq(...)` now maps the root block through the
+- Floating `inverse_dynamics_gradient_bpass_dq(...)` now maps the root block through the
   floating joint subspace, just like the matching `d/dqd` path.
-- Floating `rnea_grad_fpass_dq(...)` now uses the corrected root gravity
+- Floating `inverse_dynamics_gradient_fpass_dq(...)` now uses the corrected root gravity
   transport when differentiating the floating-root acceleration with respect to
   root position.
 - The fixed-base path was kept unchanged; the corrected gravity derivative is

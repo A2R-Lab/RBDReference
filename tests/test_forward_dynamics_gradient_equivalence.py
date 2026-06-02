@@ -27,7 +27,7 @@ def build_fixed_case_params():
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_fixed_case_params())
-def test_fixed_base_forward_dynamics_grad_matches_pinocchio_aba_derivatives(
+def test_fixed_base_forward_dynamics_gradient_matches_pinocchio_aba_derivatives(
     spec, base_mode, project_model, pinocchio_model
 ):
     for sample in build_dynamics_samples(project_model):
@@ -35,18 +35,18 @@ def test_fixed_base_forward_dynamics_grad_matches_pinocchio_aba_derivatives(
             pytest.skip(
                 f"{spec.robot_id} fixed-base mass matrix is singular for the resolved source model, so forward-dynamics derivatives are not well-defined."
             )
-        actual_dq, actual_dqd = project_model.forward_dynamics_grad(
+        actual_dq, actual_dqd = project_model.forward_dynamics_gradient(
             sample.q, sample.qd, sample.qdd
         )
-        expected_dq, expected_dqd = pinocchio_model.forward_dynamics_grad(
+        expected_dq, expected_dqd = pinocchio_model.forward_dynamics_gradient(
             sample.q, sample.qd, sample.qdd
         )
-        assert_close(actual_dq, expected_dq, algorithm="rnea", robot_id=spec.robot_id)
-        assert_close(actual_dqd, expected_dqd, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual_dq, expected_dq, algorithm="inverse_dynamics", robot_id=spec.robot_id)
+        assert_close(actual_dqd, expected_dqd, algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params(base_mode="floating"))
-def test_floating_base_forward_dynamics_grad_matches_pinocchio(
+def test_floating_base_forward_dynamics_gradient_matches_pinocchio(
     spec, base_mode, project_model, pinocchio_model
 ):
     for sample in build_dynamics_samples(project_model):
@@ -54,11 +54,11 @@ def test_floating_base_forward_dynamics_grad_matches_pinocchio(
             pytest.skip(
                 f"{spec.robot_id} floating-base mass matrix is singular for the resolved source model, so forward-dynamics derivatives are not well-defined."
             )
-        actual_dq, actual_dqd = project_model.forward_dynamics_grad(
+        actual_dq, actual_dqd = project_model.forward_dynamics_gradient(
             sample.q, sample.qd, sample.qdd
         )
-        expected_dq, expected_dqd = pinocchio_model.forward_dynamics_grad(
+        expected_dq, expected_dqd = pinocchio_model.forward_dynamics_gradient(
             sample.q, sample.qd, sample.qdd
         )
-        assert_close(actual_dq, expected_dq, algorithm="rnea", robot_id=spec.robot_id)
-        assert_close(actual_dqd, expected_dqd, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual_dq, expected_dq, algorithm="inverse_dynamics", robot_id=spec.robot_id)
+        assert_close(actual_dqd, expected_dqd, algorithm="inverse_dynamics", robot_id=spec.robot_id)

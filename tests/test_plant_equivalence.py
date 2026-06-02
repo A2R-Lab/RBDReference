@@ -3,7 +3,7 @@
 These are GRiD-defined quantities (the CUDA `grid_plant` surface), so there is
 no Pinocchio oracle; instead each is validated against a closed-form value, a
 central-difference gradient, and a Gauss-Newton-hessian recompute:
-  - plant_step / plant_step_gradient  == integrator / integrator_grad
+  - plant_step / plant_step_gradient  == integrator / integrator_gradient
   - quadratic_state/input_cost value   == 1/2 r^T diag(W) r
                               gradient  == central-diff;  hess == diag(W)
   - ee_pos_cost value/grad             == central-diff (qd-block exactly zero)
@@ -74,11 +74,11 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
         q, qd = sample.q, sample.qd
         u = sample.qdd  # convention: 3rd vector is the control torque
 
-        # plant_step / gradient pass-through == integrator / integrator_grad
+        # plant_step / gradient pass-through == integrator / integrator_gradient
         assert_close(ref.plant_step(q, qd, u, _DT), ref.integrator(q, qd, u, _DT),
-                     algorithm="rnea", robot_id=spec.robot_id)
-        assert_close(ref.plant_step_gradient(q, qd, u, _DT), ref.integrator_grad(q, qd, u, _DT),
-                     algorithm="rnea", robot_id=spec.robot_id)
+                     algorithm="inverse_dynamics", robot_id=spec.robot_id)
+        assert_close(ref.plant_step_gradient(q, qd, u, _DT), ref.integrator_gradient(q, qd, u, _DT),
+                     algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
         # quadratic state cost
         x = np.concatenate([q, qd])
@@ -94,7 +94,7 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
             vm = ref.quadratic_state_cost(x - dx, x_des, Q)[0]
             gfd[i] = (vp - vm) / (2 * _FD)
         assert_close(grad, gfd, algorithm="pose_gradient", robot_id=spec.robot_id)
-        assert_close(hess, np.diag(Q), algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(hess, np.diag(Q), algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
         # quadratic input cost
         u_des = rng.uniform(-0.3, 0.3, nv)
@@ -102,8 +102,8 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
         valu, gradu, hessu = ref.quadratic_input_cost(u, u_des, R)
         ru = u - u_des
         assert np.isclose(valu, 0.5 * float(np.sum(R * ru * ru)))
-        assert_close(gradu, R * ru, algorithm="rnea", robot_id=spec.robot_id)
-        assert_close(hessu, np.diag(R), algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(gradu, R * ru, algorithm="inverse_dynamics", robot_id=spec.robot_id)
+        assert_close(hessu, np.diag(R), algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
         # ee position cost (value/grad via central diff over x; GN hess structure)
         pose = np.asarray(ref.end_effector_pose(
@@ -164,7 +164,7 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
             assert np.allclose(hess_com[nv:, :], 0.0) and np.allclose(hess_com[:, nv:], 0.0)
             # GN-hessian recompute: J_com^T diag(Wc) J_com in the q-block
             assert_close(hess_com[:nv, :nv], Jcom.T @ (Wc[:, None] * Jcom),
-                         algorithm="rnea", robot_id=spec.robot_id)
+                         algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
             # Centroidal-momentum-tracking cost. h = A qd is LINEAR in qd, so the
             # qd-block gradient/hessian are exact; FD over qd is the oracle. The
@@ -190,7 +190,7 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
             assert np.allclose(hess_mom[:nq, :], 0.0) and np.allclose(hess_mom[:, :nq], 0.0)
             # GN-hessian recompute: A^T diag(Wm) A in the qd-block
             assert_close(hess_mom[nq:, nq:], A_cmm.T @ (Wm[:, None] * A_cmm),
-                         algorithm="rnea", robot_id=spec.robot_id)
+                         algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
         # barriers: value/grad/hess vs hand-rolled, on each of the three slices
         for vals in (q, qd, u):
@@ -201,7 +201,7 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
             v0, g0, h0 = ref.joint_position_barrier(vals, lo, hi, mu)
             vh, hh = _hand_barrier_value_hess(vals, lo, hi, mu)
             assert np.isclose(v0, vh, atol=1e-9)
-            assert_close(h0, hh, algorithm="rnea", robot_id=spec.robot_id)
+            assert_close(h0, hh, algorithm="inverse_dynamics", robot_id=spec.robot_id)
             # FD check of the analytic gradient
             gfd = np.zeros(n)
             for i in range(n):

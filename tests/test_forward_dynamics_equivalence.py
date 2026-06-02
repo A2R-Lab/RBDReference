@@ -56,7 +56,7 @@ def test_fixed_base_forward_dynamics_matches_pinocchio_aba(
             )
         actual = project_model.forward_dynamics(sample.q, sample.qd, sample.qdd)
         expected = pinocchio_model.forward_dynamics(sample.q, sample.qd, sample.qdd)
-        assert_close(actual, expected, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual, expected, algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_fixed_case_params())
@@ -70,7 +70,7 @@ def test_fixed_base_forward_dynamics_matches_project_aba(
             )
         actual = project_model.forward_dynamics(sample.q, sample.qd, sample.qdd)
         expected = project_model.aba(sample.q, sample.qd, sample.qdd)
-        assert_close(actual, expected, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual, expected, algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_floating_case_params())
@@ -84,4 +84,4 @@ def test_floating_base_forward_dynamics_matches_pinocchio(
             )
         actual = project_model.forward_dynamics(sample.q, sample.qd, sample.qdd)
         expected = pinocchio_model.forward_dynamics(sample.q, sample.qd, sample.qdd)
-        assert_close(actual, expected, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(actual, expected, algorithm="inverse_dynamics", robot_id=spec.robot_id)

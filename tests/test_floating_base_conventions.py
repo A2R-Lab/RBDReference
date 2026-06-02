@@ -63,12 +63,12 @@ def test_floating_base_public_vector_outputs_match_across_conventions(
         q_legacy, qd_legacy, qdd_legacy = _convert_sample_to_legacy(legacy_model, sample)
 
         assert_close(
-            pin_model.rnea(sample.q, sample.qd, sample.qdd),
+            pin_model.inverse_dynamics(sample.q, sample.qd, sample.qdd),
             _canonicalize_vector(
                 legacy_model,
-                legacy_model.reference.rnea(q_legacy, qd_legacy, qdd_legacy)[0],
+                legacy_model.reference.inverse_dynamics(q_legacy, qd_legacy, qdd_legacy)[0],
             ),
-            algorithm="rnea",
+            algorithm="inverse_dynamics",
             robot_id=spec.robot_id,
         )
         assert_close(
@@ -123,21 +123,21 @@ def test_floating_base_public_gradient_outputs_match_across_conventions(
     for sample in build_dynamics_samples(pin_model):
         q_legacy, qd_legacy, qdd_legacy = _convert_sample_to_legacy(legacy_model, sample)
 
-        pin_dq, pin_dqd = pin_model.rnea_grad(sample.q, sample.qd, sample.qdd)
-        legacy_du = legacy_model.reference.rnea_grad(q_legacy, qd_legacy, qdd_legacy)
+        pin_dq, pin_dqd = pin_model.inverse_dynamics_gradient(sample.q, sample.qd, sample.qdd)
+        legacy_du = legacy_model.reference.inverse_dynamics_gradient(q_legacy, qd_legacy, qdd_legacy)
         legacy_dq = _canonicalize_v_reduced_q_matrix(
             legacy_model, legacy_du[:, : pin_model.nv]
         )
         legacy_dqd = _canonicalize_vv_matrix(
             legacy_model, legacy_du[:, pin_model.nv :]
         )
-        assert_close(pin_dq, legacy_dq, algorithm="rnea", robot_id=spec.robot_id)
-        assert_close(pin_dqd, legacy_dqd, algorithm="rnea", robot_id=spec.robot_id)
+        assert_close(pin_dq, legacy_dq, algorithm="inverse_dynamics", robot_id=spec.robot_id)
+        assert_close(pin_dqd, legacy_dqd, algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
-        pin_fd_dq, pin_fd_dqd = pin_model.forward_dynamics_grad(
+        pin_fd_dq, pin_fd_dqd = pin_model.forward_dynamics_gradient(
             sample.q, sample.qd, sample.qdd
         )
-        legacy_fd_dq, legacy_fd_dqd = legacy_model.reference.forward_dynamics_grad(
+        legacy_fd_dq, legacy_fd_dqd = legacy_model.reference.forward_dynamics_gradient(
             q_legacy, qd_legacy, qdd_legacy
         )
         assert_close(

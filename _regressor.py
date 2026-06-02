@@ -12,10 +12,10 @@ top-left 3x3 of `get_Imat_by_id`). This is the same basis the D.4 runtime path
 stores. Pinocchio's `toDynamicParameters` uses `[m, mc(3), [Ixx,Ixy,Iyy,Ixz,
 Iyz,Izz]]` and `[linear; angular]` spatial order; the pinocchio backend applies
 the constant 10x10 permutation `P` (a 6x6 swap on the inertia block) so the two
-bases line up — see `pinocchio_backend.joint_torque_regressor`.
+bases line up — see `pinocchio_backend.inverse_dynamics_regressor`.
 
 Spatial convention: internal `[angular; linear]` (Featherstone), matching
-`RBDReference.rnea` / `cross_operator` / `dual_cross_operator`. The body
+`RBDReference.inverse_dynamics` / `cross_operator` / `dual_cross_operator`. The body
 regressor `Y_body,i` (6x10) satisfies `f_i = Y_body,i . pi_i` with
 `f_i = I_i a_i + v_i x* (I_i v_i)`; the joint regressor is the RNEA backward
 force sweep run with a 6x10 right-hand side instead of a 6x1 force.
@@ -98,7 +98,7 @@ class _RegressorMixin:
             Y[:, k] = dI @ a + crf @ (dI @ v)
         return Y
 
-    def joint_torque_regressor(self, q, qd, qdd, GRAVITY=-9.81):
+    def inverse_dynamics_regressor(self, q, qd, qdd, GRAVITY=-9.81):
         """Joint-torque regressor Y (nv x 10*NB) with tau = Y . pi.
 
         Runs the RNEA forward sweep to get each link's (v_i, a_i), builds each
@@ -115,7 +115,7 @@ class _RegressorMixin:
         nv = self.robot.get_num_vel()
 
         # Forward pass: per-link spatial velocity v_i and acceleration a_i.
-        v, a, _f = self.rnea_fpass(q, qd, qdd, GRAVITY)
+        v, a, _f = self.inverse_dynamics_fpass(q, qd, qdd, GRAVITY)
 
         # Backward force sweep with a 6 x (10*NB) right-hand side per link.
         # `Fblk[i]` carries the spatial-force regressor (wrt EVERY link's param
@@ -152,7 +152,7 @@ class _RegressorMixin:
 
         return self._denormalize_reduced_q_matrix_output(Y, row_space="v")
 
-    def fd_parameter_gradient(self, q, qd, u, GRAVITY=-9.81):
+    def forward_dynamics_parameter_gradient(self, q, qd, u, GRAVITY=-9.81):
         """Forward-dynamics gradient w.r.t. the inertial params: ∂q̈/∂π.
 
         From `M(π)·q̈ + c(q,q̇,π) = u` with `u` fixed, differentiating in π gives
@@ -160,15 +160,15 @@ class _RegressorMixin:
         is affine in π with Jacobian `Y` at the *actual* acceleration. So:
 
           1. q̈_actual = forward_dynamics(q, q̇, u)
-          2. Y = joint_torque_regressor(q, q̇, q̈_actual)   (nv x 10*NB)
+          2. Y = inverse_dynamics_regressor(q, q̇, q̈_actual)   (nv x 10*NB)
           3. ∂q̈/∂π = − minv(q) · Y                          (nv x 10*NB)
 
         reuses the existing minv + regressor; no new factorization (mirrors the
-        CUDA emit `fd_parameter_gradient` = −Minv·Y). Result is nv x 10*NB.
+        CUDA emit `forward_dynamics_parameter_gradient` = −Minv·Y). Result is nv x 10*NB.
         """
         qdd = self.forward_dynamics(q, qd, u)
         Y = np.asarray(
-            self.joint_torque_regressor(q, qd, qdd, GRAVITY=GRAVITY), dtype=np.float64
+            self.inverse_dynamics_regressor(q, qd, qdd, GRAVITY=GRAVITY), dtype=np.float64
         )
         Minv = np.asarray(self.minv(q), dtype=np.float64)
         return -(Minv @ Y)

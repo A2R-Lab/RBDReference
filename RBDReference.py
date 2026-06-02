@@ -89,7 +89,7 @@ class RBDReference(
     def _denormalize_reduced_q_matrix_output(self, matrix, row_space=None):
         return self._denormalize_qv_matrix_output(matrix, row_space=row_space, col_space=None)
 
-    def _denormalize_rnea_grad_output(self, dc_dq, dc_dqd):
+    def _denormalize_inverse_dynamics_gradient_output(self, dc_dq, dc_dqd):
         return np.hstack(
             (
                 self._denormalize_reduced_q_matrix_output(dc_dq, row_space="v"),
@@ -391,7 +391,7 @@ class RBDReference(
         v_new = qd + dt * accel
         return np.concatenate([q_new, v_new])
 
-    def integrator_grad(self, q, qd, u, dt, integrator_type: str = "euler"):
+    def integrator_gradient(self, q, qd, u, dt, integrator_type: str = "euler"):
         """Return [A | B] of shape (2*nv, 3*nv) — the Jacobian of the integrator
         step in tangent space. Column order is [d/dq | d/dqd | d/du] where
         d/dq is the nv-tangent perturbation of q (NOT the nq scalar
@@ -405,7 +405,7 @@ class RBDReference(
         Z_n = np.zeros((nv, nv))
 
         def fd_grad_at(pq, pqd):
-            J_qq, J_qv = self.forward_dynamics_grad(pq, pqd, u)
+            J_qq, J_qv = self.forward_dynamics_gradient(pq, pqd, u)
             return (np.asarray(J_qq, dtype=np.float64),
                     np.asarray(J_qv, dtype=np.float64),
                     np.asarray(self.minv(pq), dtype=np.float64))
@@ -596,7 +596,7 @@ class RBDReference(
         res : numpy.ndarray
             6x6 inverse force cross operator matrix.
         """
-        #helper function defined in spatial_v2_extended library, called by idsva() and rnea_grad()
+        #helper function defined in spatial_v2_extended library, called by idsva() and inverse_dynamics_gradient()
         # inverse of the force(dual) cross operator
         # v crf f = f icrf v
         res = [[0,  -v[2],  v[1],    0,  -v[5],  v[4]],
@@ -624,7 +624,7 @@ class RBDReference(
         B : numpy.ndarray
             The resulting factorized matrix.
         """
-        # helper function defined in spatial_v2_extended library, called by idsva() and rnea_grad()
+        # helper function defined in spatial_v2_extended library, called by idsva() and inverse_dynamics_gradient()
         if number == 1:
             B = self.dual_cross_operator(v) * I
         elif number == 2:
@@ -1886,7 +1886,7 @@ class RBDReference(
             return float(joint.get_mimic_offset())
         return 0.0
 
-    def rnea_fpass(self, q, qd, qdd=None, GRAVITY=-9.81, f_ext=None):
+    def inverse_dynamics_fpass(self, q, qd, qdd=None, GRAVITY=-9.81, f_ext=None):
         """Perform the forward pass of the Recursive Newton-Euler Algorithm.
 
         Parameters
@@ -1955,7 +1955,7 @@ class RBDReference(
 
         return (v, a, f)
 
-    def rnea_bpass(self, q, f):
+    def inverse_dynamics_bpass(self, q, f):
         """Perform the backward pass of the Recursive Newton-Euler Algorithm.
 
         Parameters
@@ -1995,7 +1995,7 @@ class RBDReference(
 
         return (c, f)
 
-    def rnea(
+    def inverse_dynamics(
         self,
         q,
         qd,
@@ -2005,7 +2005,8 @@ class RBDReference(
         public_output=True,
         normalize_input=True,
     ):
-        """Compute the generalized forces using Recursive Newton-Euler Algorithm.
+        """Compute the generalized forces using the Recursive Newton-Euler
+        Algorithm (RNEA). This is the canonical inverse-dynamics routine.
 
         Parameters
         ----------
@@ -2029,9 +2030,9 @@ class RBDReference(
             if qdd is not None:
                 qdd = self._normalize_v_input(qdd)
         # forward pass (external forces are subtracted from f inside fpass)
-        (v, a, f) = self.rnea_fpass(q, qd, qdd, GRAVITY, f_ext=f_ext)
+        (v, a, f) = self.inverse_dynamics_fpass(q, qd, qdd, GRAVITY, f_ext=f_ext)
         # backward pass
-        (c, f) = self.rnea_bpass(q, f)
+        (c, f) = self.inverse_dynamics_bpass(q, f)
         if public_output:
             c = self._denormalize_v_output(c)
         return (c, v, a, f)
@@ -2046,7 +2047,7 @@ class RBDReference(
         ``j`` on the path root->i (zero off-path), i.e. the transpose of the
         stacked spatial body Jacobian in each link's LOCAL frame.
 
-        The forward convention (apply_external_forces / rnea_fpass) SUBTRACTS the
+        The forward convention (apply_external_forces / inverse_dynamics_fpass) SUBTRACTS the
         local wrench: ``f[:, i] -= f_ext[i]``. Therefore the gradient of the RNEA
         output ``tau`` w.r.t. ``f_ext`` is ``d(tau)/d(f_ext) = -J^T`` (see
         ``f_ext_gradient``). This method returns the (un-signed) ``J^T`` so both
@@ -2064,7 +2065,7 @@ class RBDReference(
             for k in range(6):
                 f = np.zeros((6, NB), dtype=np.float64)
                 f[k, i] = 1.0
-                (c, _f) = self.rnea_bpass(q, f)
+                (c, _f) = self.inverse_dynamics_bpass(q, f)
                 JT[:, 6 * i + k] = c
         return JT
 
@@ -2386,20 +2387,20 @@ class RBDReference(
         # mimic's S^T*tau_eff contribution into the mimicked v-slot
         # scaled by alpha. Rather than re-derive the recursion, we use
         # the equivalent reduced-model forward dynamics:
-        #     qdd = M_reduced^{-1} * (tau - rnea(q, qd, 0))
-        # where M_reduced and rnea(q, qd, 0) are already mimic-aware via
+        #     qdd = M_reduced^{-1} * (tau - inverse_dynamics(q, qd, 0))
+        # where M_reduced and inverse_dynamics(q, qd, 0) are already mimic-aware via
         # CRBA and the bpass `+= alpha * S^T f` pattern. This matches
         # pinocchio's constraint-aware forward dynamics for mimic models
         # (their `aba` on the unreduced model would diverge similarly).
         if self._has_mimic_joints():
             # Mimic reduced-model forward dynamics:
-            #   qdd = M_reduced^{-1} * (tau - rnea(q, qd, 0; f_ext))
-            # External forces enter purely through the rnea bias (which
+            #   qdd = M_reduced^{-1} * (tau - inverse_dynamics(q, qd, 0; f_ext))
+            # External forces enter purely through the inverse_dynamics bias (which
             # subtracts the local-frame f_ext from the per-body force); the
             # reduced mass matrix is unaffected by f_ext. T3 owns the mimic
             # ABA recursion fallback; here f_ext only flows into the bias.
             n = len(qd)
-            bias = self.rnea(
+            bias = self.inverse_dynamics(
                 q, qd, np.zeros(n),
                 GRAVITY=GRAVITY,
                 f_ext=f_ext,
@@ -2768,7 +2769,7 @@ class RBDReference(
         return self._denormalize_qv_matrix_output(H, row_space="v", col_space="v")
 
     ##### Testing original RNEA_grad to help with CUDA 
-    def rnea_grad_fpass_dq(self, q, qd, v, a, GRAVITY = -9.81):
+    def inverse_dynamics_gradient_fpass_dq(self, q, qd, v, a, GRAVITY = -9.81):
         """Forward pass gradient with respect to joint positions for RNEA.
 
         Parameters
@@ -2848,7 +2849,7 @@ class RBDReference(
 
         return (dv_dq, da_dq, df_dq)
 
-    def rnea_grad_fpass_dqd(self, q, qd, v):
+    def inverse_dynamics_gradient_fpass_dqd(self, q, qd, v):
         """Forward pass gradient with respect to joint velocities for RNEA.
 
         Parameters
@@ -2869,7 +2870,7 @@ class RBDReference(
         df_dqd = np.zeros((6,n,NB))
 
         # forward pass.
-        # Mimic-aware: same idiom as rnea_grad_fpass_dq above. inds_v / idx
+        # Mimic-aware: same idiom as inverse_dynamics_gradient_fpass_dq above. inds_v / idx
         # is the joint's v-slot (a list for the floating-base root); mimic
         # joints fold into their target's v-slot via `+=` scaled by alpha,
         # and reads of qd[idx] / S contributions likewise scale by alpha.
@@ -2910,7 +2911,7 @@ class RBDReference(
 
         return (dv_dqd, da_dqd, df_dqd)
 
-    def rnea_grad_bpass_dq(self, q, f, df_dq):
+    def inverse_dynamics_gradient_bpass_dq(self, q, f, df_dq):
         """Backward pass gradient with respect to joint positions for RNEA.
 
         Parameters
@@ -2953,7 +2954,7 @@ class RBDReference(
 
         return dc_dq
 
-    def rnea_grad_bpass_dqd(self, q, df_dqd, USE_VELOCITY_DAMPING = False):
+    def inverse_dynamics_gradient_bpass_dqd(self, q, df_dqd, USE_VELOCITY_DAMPING = False):
         """Backward pass gradient with respect to joint velocities for RNEA.
 
         Parameters
@@ -3000,7 +3001,7 @@ class RBDReference(
 
         return dc_dqd
 
-    def rnea_grad(
+    def inverse_dynamics_gradient(
         self,
         q,
         qd,
@@ -3038,9 +3039,9 @@ class RBDReference(
         # per-body force f (f[:,i] -= f_ext[i]); since it is q/qd-independent
         # its derivative is zero, so df_dq/df_dqd from the grad forward passes
         # are unchanged. The gradient inherits f_ext purely through the
-        # f_ext-corrected `f` that `rnea_grad_bpass_dq` consumes in its
+        # f_ext-corrected `f` that `inverse_dynamics_gradient_bpass_dq` consumes in its
         # `X^T * fxS(S, f[:,ind])` term. (FD-verified against pinocchio.)
-        (c, v, a, f) = self.rnea(
+        (c, v, a, f) = self.inverse_dynamics(
             q,
             qd,
             qdd,
@@ -3051,19 +3052,19 @@ class RBDReference(
         )
 
         # forward pass, dq
-        (dv_dq, da_dq, df_dq) = self.rnea_grad_fpass_dq(q, qd, v, a, GRAVITY)
+        (dv_dq, da_dq, df_dq) = self.inverse_dynamics_gradient_fpass_dq(q, qd, v, a, GRAVITY)
  
         # forward pass, dqd
-        (dv_dqd, da_dqd, df_dqd) = self.rnea_grad_fpass_dqd(q, qd, v)
+        (dv_dqd, da_dqd, df_dqd) = self.inverse_dynamics_gradient_fpass_dqd(q, qd, v)
 
         # backward pass, dq
-        dc_dq = self.rnea_grad_bpass_dq(q, f, df_dq)
+        dc_dq = self.inverse_dynamics_gradient_bpass_dq(q, f, df_dq)
 
         # backward pass, dqd
-        dc_dqd = self.rnea_grad_bpass_dqd(q, df_dqd, USE_VELOCITY_DAMPING)
+        dc_dqd = self.inverse_dynamics_gradient_bpass_dqd(q, df_dqd, USE_VELOCITY_DAMPING)
 
         if public_output:
-            return self._denormalize_rnea_grad_output(dc_dq, dc_dqd)
+            return self._denormalize_inverse_dynamics_gradient_output(dc_dq, dc_dqd)
         return np.hstack((dc_dq, dc_dqd))
 
 
@@ -3088,14 +3089,14 @@ class RBDReference(
             q = self._normalize_q_input(q)
             qd = self._normalize_v_input(qd)
             u = self._normalize_v_input(u)
-        (c,v,a,f) = self.rnea(q, qd, f_ext=f_ext, public_output=False, normalize_input=False)
+        (c,v,a,f) = self.inverse_dynamics(q, qd, f_ext=f_ext, public_output=False, normalize_input=False)
         minv = self.minv(q, public_output=False, normalize_input=False)
         qdd = np.matmul(minv, u - c)
         if public_output:
             return self._denormalize_v_output(qdd)
         return qdd
     
-    def forward_dynamics_grad(self, q, qd, u, f_ext=None, normalize_input=True):
+    def forward_dynamics_gradient(self, q, qd, u, f_ext=None, normalize_input=True):
         """Compute the gradients of the forward dynamics.
 
         Parameters
@@ -3117,12 +3118,12 @@ class RBDReference(
             qd = self._normalize_v_input(qd)
             u = self._normalize_v_input(u)
         # f_ext flows into qdd (via forward_dynamics) and into dc_du (via
-        # rnea_grad's f_ext-corrected f). For a constant local-frame f_ext
+        # inverse_dynamics_gradient's f_ext-corrected f). For a constant local-frame f_ext
         # there is no additional fd-gradient term: minv is f_ext-independent
         # and the only f_ext dependence is through the qdd/dc_du arguments
         # already threaded here.
         qdd = self.forward_dynamics(q, qd, u, f_ext=f_ext, public_output=False, normalize_input=False)
-        dc_du = self.rnea_grad(q, qd, qdd, f_ext=f_ext, public_output=False, normalize_input=False)
+        dc_du = self.inverse_dynamics_gradient(q, qd, qdd, f_ext=f_ext, public_output=False, normalize_input=False)
         dc_dq, dc_dqd = np.hsplit(dc_du, [len(qd)])
 
         minv = self.minv(q, public_output=False, normalize_input=False)
@@ -3218,10 +3219,10 @@ class RBDReference(
             q_pos = self._floating_lie_perturbed_q(q, dind, step)
             q_neg = self._floating_lie_perturbed_q(q, dind, -step)
             dc_dq_pos, _dc_dqd_pos = np.hsplit(
-                self.rnea_grad(q_pos, qd, qdd, GRAVITY), [n]
+                self.inverse_dynamics_gradient(q_pos, qd, qdd, GRAVITY), [n]
             )
             dc_dq_neg, _dc_dqd_neg = np.hsplit(
-                self.rnea_grad(q_neg, qd, qdd, GRAVITY), [n]
+                self.inverse_dynamics_gradient(q_neg, qd, qdd, GRAVITY), [n]
             )
             d2tau_dq[:, :, dind] = (dc_dq_pos - dc_dq_neg) / (2.0 * step)
         return d2tau_dq
@@ -3997,7 +3998,7 @@ class RBDReference(
         Minv = self.minv(q)
         qdd = self.forward_dynamics(q, qd, u)
         di2_dq, di2_dqd, di2_dvdq, dm_dq = self.idsva_so(q, qd, qdd, GRAVITY)
-        fd_dq, fd_dqd = self.forward_dynamics_grad(q, qd, u)
+        fd_dq, fd_dqd = self.forward_dynamics_gradient(q, qd, u)
 
         daba_dqdq = -np.einsum('il,ljk->ijk', Minv, di2_dq + np.einsum('ilk,lj->ijk', dm_dq, fd_dq) + np.einsum('ilk,lj->ikj', dm_dq, fd_dq))
         daba_dvdq = -np.einsum('il,ljk->ijk', Minv, di2_dvdq + np.einsum('ilk,lj->ijk', dm_dq, fd_dqd))

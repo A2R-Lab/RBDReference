@@ -61,8 +61,8 @@ class ProjectModelAdapter:
     def joint_types_by_name(self):
         return self.robot.get_joint_types_by_name()
 
-    def rnea(self, q, qd, qdd, f_ext=None):
-        c, _v, _a, _f = self.reference.rnea(q, qd, qdd, f_ext=f_ext)
+    def inverse_dynamics(self, q, qd, qdd, f_ext=None):
+        c, _v, _a, _f = self.reference.inverse_dynamics(q, qd, qdd, f_ext=f_ext)
         return normalize_vector(c)
 
     def aba(self, q, qd, tau, f_ext=None):
@@ -140,19 +140,19 @@ class ProjectModelAdapter:
             names.append(joint.get_name() if joint is not None else None)
         return names
 
-    def joint_torque_regressor(self, q, qd, qdd):
-        return normalize_matrix(self.reference.joint_torque_regressor(q, qd, qdd))
+    def inverse_dynamics_regressor(self, q, qd, qdd):
+        return normalize_matrix(self.reference.inverse_dynamics_regressor(q, qd, qdd))
 
-    def fd_parameter_gradient(self, q, qd, u):
+    def forward_dynamics_parameter_gradient(self, q, qd, u):
         """Forward-dynamics inertial-parameter gradient dqdd/dpi (nv x 10*NB)."""
-        return normalize_matrix(self.reference.fd_parameter_gradient(q, qd, u))
+        return normalize_matrix(self.reference.forward_dynamics_parameter_gradient(q, qd, u))
 
-    def rnea_grad(self, q, qd, qdd, f_ext=None):
-        dc_du = normalize_matrix(self.reference.rnea_grad(q, qd, qdd, f_ext=f_ext))
+    def inverse_dynamics_gradient(self, q, qd, qdd, f_ext=None):
+        dc_du = normalize_matrix(self.reference.inverse_dynamics_gradient(q, qd, qdd, f_ext=f_ext))
         return dc_du[:, : self.nv], dc_du[:, self.nv :]
 
-    def forward_dynamics_grad(self, q, qd, u, f_ext=None):
-        dqdd_dq, dqdd_dqd = self.reference.forward_dynamics_grad(q, qd, u, f_ext=f_ext)
+    def forward_dynamics_gradient(self, q, qd, u, f_ext=None):
+        dqdd_dq, dqdd_dqd = self.reference.forward_dynamics_gradient(q, qd, u, f_ext=f_ext)
         return normalize_matrix(dqdd_dq), normalize_matrix(dqdd_dqd)
 
     def f_ext_gradient(self, q):
@@ -186,7 +186,7 @@ class ProjectModelAdapter:
         )
 
     # ----- Time integrators -----
-    # Thin pass-through to `RBDReference.integrator` / `.integrator_grad`,
+    # Thin pass-through to `RBDReference.integrator` / `.integrator_gradient`,
     # which host the canonical Python implementation (same layering as
     # forward_dynamics, minv, etc.). Floating-base support is implemented
     # in RBDReference via Lie-group retract + SO(3) right-Jacobian.
@@ -199,7 +199,7 @@ class ProjectModelAdapter:
         [d/dq | d/dqd | d/du]. For floating-base the d/dq columns are in the
         nv-tangent of q (not the nq scalar perturbation)."""
         return normalize_matrix(
-            self.reference.integrator_grad(q, qd, u, dt, integrator_type=integrator_type)
+            self.reference.integrator_gradient(q, qd, u, dt, integrator_type=integrator_type)
         )
 
     # ----- General-frame Jacobians + operational-space inertia (E2) -----

@@ -10,16 +10,16 @@ algorithms before extending that trust boundary to CUDA and generated GPU code.
 - Robot acquisition is manifest-driven and reproducible.
 - The same resolved URDF can be loaded by both GRiD and Pinocchio.
 - Fixed-base default-tier robots have sane metadata and can be compared numerically.
-- Fixed-base `rnea` and `minv` match Pinocchio within central epsilon tolerances.
+- Fixed-base `inverse_dynamics` and `minv` match Pinocchio within central epsilon tolerances.
 - Fixed-base default-tier robots also exercise `crba`, `aba`,
-  `forward_dynamics`, `forward_dynamics_grad`, `rnea_grad`, and selected pose
+  `forward_dynamics`, `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose
   targets against Pinocchio when the resolved robot parses cleanly on both sides.
 - The current fixed-base verified set includes `iiwa14`, `go2`, `g1`, `fetch`,
   `baxter`, `fr3`, and `gen3`, while `rizon4` remains included with explicit
   skips for inverse-mass and ABA-style checks because the resolved source model
   is singular on both the GRiD and Pinocchio sides.
 - Floating-base parse and metadata coverage exists for the same smoke robots.
-- Floating-base `rnea` now matches Pinocchio for the floating-enabled smoke
+- Floating-base `inverse_dynamics` now matches Pinocchio for the floating-enabled smoke
   robots after aligning the floating root velocity/acceleration convention and
   correcting the root gravity transport in `RBDReference`.
 - Floating-base `minv` matches Pinocchio for the floating-enabled smoke robots
@@ -33,7 +33,7 @@ algorithms before extending that trust boundary to CUDA and generated GPU code.
 - Floating-base `forward_dynamics` now also matches Pinocchio for the current
   floating-enabled set: `iiwa14`, `go2`, `g1`, `fr3`, `fetch`, `baxter`, and
   `gen3`, with singular-model skips scoped narrowly where needed.
-- Floating-base `rnea_grad` and `forward_dynamics_grad` now also match
+- Floating-base `inverse_dynamics_gradient` and `forward_dynamics_gradient` now also match
   Pinocchio for the current floating-enabled set wherever the resolved source
   model has an invertible mass matrix.
 - Floating-base selected pose targets now also match Pinocchio for the current
@@ -50,8 +50,8 @@ algorithms before extending that trust boundary to CUDA and generated GPU code.
   `ComputeRNEASecondOrderDerivatives` (exposed through the `pin_so_ext`
   pybind11 extension), which is the golden second-order oracle rather than
   finite-differencing the first-order paths.
-- Floating-base parse, metadata, `rnea`, `minv`, `crba`, `aba`,
-  `forward_dynamics`, `rnea_grad`, `forward_dynamics_grad`, and selected pose
+- Floating-base parse, metadata, `inverse_dynamics`, `minv`, `crba`, `aba`,
+  `forward_dynamics`, `inverse_dynamics_gradient`, `forward_dynamics_gradient`, and selected pose
   targets are now exercised on the broader floating-enabled set `iiwa14`,
   `go2`, `g1`, `fr3`, `fetch`, `baxter`, `gen3`, and `rizon4`, with
   singular-model skips scoped narrowly where needed.

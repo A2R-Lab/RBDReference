@@ -23,10 +23,10 @@ def pose_vector_to_rotation_matrix(pose_vector):
 
 
 def assert_pose_close(actual, expected, robot_id: str):
-    assert_close(actual[:3], expected[:3], algorithm="rnea", robot_id=robot_id)
+    assert_close(actual[:3], expected[:3], algorithm="inverse_dynamics", robot_id=robot_id)
     actual_rot = pose_vector_to_rotation_matrix(actual)
     expected_rot = pose_vector_to_rotation_matrix(expected)
-    assert_close(actual_rot, expected_rot, algorithm="rnea", robot_id=robot_id)
+    assert_close(actual_rot, expected_rot, algorithm="inverse_dynamics", robot_id=robot_id)
 
 
 def assert_pose_and_rotation_close(
@@ -36,8 +36,8 @@ def assert_pose_and_rotation_close(
     expected_rot,
     robot_id: str,
 ):
-    assert_close(actual_pose[:3], expected_pose[:3], algorithm="rnea", robot_id=robot_id)
-    assert_close(actual_rot, expected_rot, algorithm="rnea", robot_id=robot_id)
+    assert_close(actual_pose[:3], expected_pose[:3], algorithm="inverse_dynamics", robot_id=robot_id)
+    assert_close(actual_rot, expected_rot, algorithm="inverse_dynamics", robot_id=robot_id)
 
 
 def build_fixed_pose_case_params():

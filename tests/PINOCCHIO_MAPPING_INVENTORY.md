@@ -8,13 +8,13 @@ appear clear from the current source are considered safe for enforcing tests.
 
 Clear or mostly clear dynamics-facing surface:
 
-- `rnea(q, qd, qdd=None, GRAVITY=-9.81, f_ext=None)`
+- `inverse_dynamics(q, qd, qdd=None, GRAVITY=-9.81, f_ext=None)`
 - `minv(q, output_dense=True)`
 - `crba(q)`
 - `aba(q, qd, tau, f_ext=[], GRAVITY=-9.81)`
 - `forward_dynamics(q, qd, u)`
-- `rnea_grad(q, qd, qdd=None, GRAVITY=-9.81, USE_VELOCITY_DAMPING=False)`
-- `forward_dynamics_grad(q, qd, u)`
+- `inverse_dynamics_gradient(q, qd, qdd=None, GRAVITY=-9.81, USE_VELOCITY_DAMPING=False)`
+- `forward_dynamics_gradient(q, qd, u)`
 - `idsva_so_body_frame(q, qd, qdd, GRAVITY=-9.81)`
 - `fdsva_so(q, qd, u, GRAVITY=-9.81)`
 
@@ -28,13 +28,13 @@ Pass-level helpers and implementation internals:
 
 - `rnea_fpass(...)`, `rnea_bpass(...)`
 - `minv_bpass(...)`, `minv_fpass(...)`
-- `rnea_grad_fpass_dq(...)`, `rnea_grad_fpass_dqd(...)`
-- `rnea_grad_bpass_dq(...)`, `rnea_grad_bpass_dqd(...)`
+- `inverse_dynamics_gradient_fpass_dq(...)`, `inverse_dynamics_gradient_fpass_dqd(...)`
+- `inverse_dynamics_gradient_bpass_dq(...)`, `inverse_dynamics_gradient_bpass_dqd(...)`
 - several spatial algebra helpers used by the algorithms above
 
 ## Clear Pinocchio Mappings Used In V1
 
-- `RBDReference.rnea(...)` maps to `pinocchio.rnea(...)`
+- `RBDReference.inverse_dynamics(...)` maps to `pinocchio.rnea(...)`
   Note: GRiD returns `(c, v, a, f)` while Pinocchio returns the generalized
   torque result directly, so the suite compares `c` to Pinocchio's `tau`. For
   floating-base robots, GRiD now interprets the root velocity and acceleration
@@ -62,13 +62,13 @@ Pass-level helpers and implementation internals:
   `iiwa14`, `go2`, `g1`, `fetch`, `baxter`, `fr3`, and `gen3`.
   It is also enforced for the floating-enabled robots `iiwa14`, `go2`, `g1`,
   `fr3`, `fetch`, and `baxter`.
-- `RBDReference.forward_dynamics_grad(q, qd, u)` maps to
+- `RBDReference.forward_dynamics_gradient(q, qd, u)` maps to
   `pinocchio.computeABADerivatives(...)` for the `ddq_dq` and `ddq_dv` blocks.
   This is currently enforced for the verified fixed-base default robots
   `iiwa14`, `go2`, `g1`, `fetch`, `baxter`, `fr3`, and `gen3`.
   It is also enforced for floating-base `iiwa14`, `go2`, `g1`, `fr3`, `fetch`,
   `baxter`, and `gen3`, with singular-model skips for `rizon4`.
-- `RBDReference.rnea_grad(...)` maps to `pinocchio.computeRNEADerivatives(...)`
+- `RBDReference.inverse_dynamics_gradient(...)` maps to `pinocchio.computeRNEADerivatives(...)`
   for the `dtau_dq` and `dtau_dv` blocks. This is currently enforced for the
   verified fixed-base default robots `iiwa14`, `go2`, `g1`, `fetch`, `baxter`,
   `fr3`, `gen3`, and `rizon4`.
@@ -94,21 +94,21 @@ Pass-level helpers and implementation internals:
 - `RBDReference.idsva_so_body_frame(...)` does not have a direct
   Pinocchio second-order inverse-dynamics API counterpart in the Python stack
   used here, so the suite validates it against finite differences of the
-  already-verified `rnea_grad(...)` and `crba(...)` paths. This is currently
+  already-verified `inverse_dynamics_gradient(...)` and `crba(...)` paths. This is currently
   enforced on a smoke-robot-first rollout: fixed-base `iiwa14` and floating-base
   `iiwa14`, `go2`, and `g1`, with `g1` currently treated as runtime-heavy
   rather than numerically suspect.
 - `RBDReference.fdsva_so(...)` likewise does not have a direct Pinocchio
   second-order forward-dynamics API counterpart in the Python stack used here,
   so the suite validates it against finite differences of the already-verified
-  `forward_dynamics_grad(...)` and `minv(...)` paths. This is currently
+  `forward_dynamics_gradient(...)` and `minv(...)` paths. This is currently
   enforced on the same smoke-robot-first rollout: fixed-base `iiwa14` and
   floating-base `iiwa14`, `go2`, and `g1`, with `g1` currently treated as
   runtime-heavy rather than numerically suspect.
 
 ## Ambiguous Or Deferred Mappings
 
-- `forward_dynamics_grad(...)`
+- `forward_dynamics_gradient(...)`
   The mapping to Pinocchio ABA derivatives is now explicit for fixed-base
   `iiwa14`, but broader fixed-base coverage and floating-base coverage are still
   deferred.
@@ -133,7 +133,7 @@ Pass-level helpers and implementation internals:
   tie-breaking, so joint-name alignment must be explicit.
 - GRiD merges fixed joints into retained custom structures, while Pinocchio keeps a
   different model/data view for those URDF elements.
-- `RBDReference.rnea(...)` returns more than the primary generalized torque result,
+- `RBDReference.inverse_dynamics(...)` returns more than the primary generalized torque result,
   so tests extract and compare only the torque-like output for v1.
 
 ## Relevant Pinocchio Capabilities Not Yet Implemented In RBDReference
@@ -151,8 +151,8 @@ the current repo layout and documentation, not from guesswork about hidden APIs.
 
 ## V1 Deferrals
 
-- Additional fixed-base algorithms beyond `rnea`, `minv`, `crba`, `aba`,
-  `forward_dynamics`, `forward_dynamics_grad`, `rnea_grad`, selected pose
+- Additional fixed-base algorithms beyond `inverse_dynamics`, `minv`, `crba`, `aba`,
+  `forward_dynamics`, `forward_dynamics_gradient`, `inverse_dynamics_gradient`, selected pose
   targets, end-effector pose gradients, and focused end-effector Hessian checks
   on the verified default robots
 - Broad end-effector Hessian equivalence beyond the focused `iiwa14`
@@ -160,51 +160,51 @@ the current repo layout and documentation, not from guesswork about hidden APIs.
 
 ## Current Suite Findings
 
-- Fixed-base `iiwa14`: `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `forward_dynamics_grad`, `rnea_grad`, and selected pose targets match
+- Fixed-base `iiwa14`: `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite.
-- Fixed-base `go2`: `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `forward_dynamics_grad`, `rnea_grad`, and selected pose targets match
+- Fixed-base `go2`: `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite.
-- Fixed-base `g1`: `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `forward_dynamics_grad`, `rnea_grad`, and selected pose targets match
+- Fixed-base `g1`: `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite using a narrowly scoped `g1` tolerance override.
-- Fixed-base `fetch`: `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `forward_dynamics_grad`, `rnea_grad`, and selected pose targets match
+- Fixed-base `fetch`: `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite after continuous-joint normalization and the
   corrected force-cross derivative transport term.
-- Fixed-base `baxter`: `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `forward_dynamics_grad`, `rnea_grad`, and selected pose targets match
+- Fixed-base `baxter`: `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite after inertial-origin and fixed-joint
   homogeneous-transform fixes.
-- Fixed-base `fr3`: `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `forward_dynamics_grad`, `rnea_grad`, and selected pose targets match
+- Fixed-base `fr3`: `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite, with generic pose-target selection excluding
   URDF mimic joints such as `fr3_finger_joint2`.
-- Fixed-base `gen3`: `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `forward_dynamics_grad`, `rnea_grad`, and selected pose targets match
+- Fixed-base `gen3`: `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite.
-- Fixed-base `rizon4`: parse, metadata, `rnea`, `crba`, `rnea_grad`, and
+- Fixed-base `rizon4`: parse, metadata, `inverse_dynamics`, `crba`, `inverse_dynamics_gradient`, and
   selected pose targets match Pinocchio in the current suite. `minv`, `aba`,
   and forward-dynamics-family checks are explicitly skipped because the resolved
   source model exposes a singular zero-mass-matrix interpretation on both the
   GRiD and Pinocchio sides.
 - Floating-base `iiwa14`, `go2`, and `g1`: parse and metadata match, and
-  floating-base `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `rnea_grad`, and `forward_dynamics_grad`, and selected pose targets match
+  floating-base `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `inverse_dynamics_gradient`, and `forward_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite.
 - Floating-base `fr3`, `fetch`, and `baxter`: parse and metadata match, and
-  floating-base `rnea`, `minv`, `crba`, `aba`, `forward_dynamics`,
-  `rnea_grad`, and `forward_dynamics_grad`, and selected pose targets match
+  floating-base `inverse_dynamics`, `minv`, `crba`, `aba`, `forward_dynamics`,
+  `inverse_dynamics_gradient`, and `forward_dynamics_gradient`, and selected pose targets match
   Pinocchio in the current suite.
-- Floating-base `gen3`: parse and metadata match, and floating-base `rnea`,
-  `minv`, `crba`, `aba`, `forward_dynamics`, `rnea_grad`, and
-  `forward_dynamics_grad` match Pinocchio in the current suite, along with
+- Floating-base `gen3`: parse and metadata match, and floating-base `inverse_dynamics`,
+  `minv`, `crba`, `aba`, `forward_dynamics`, `inverse_dynamics_gradient`, and
+  `forward_dynamics_gradient` match Pinocchio in the current suite, along with
   selected pose targets.
-- Floating-base `rizon4`: parse and metadata match, and floating-base `rnea`
-  and `rnea_grad` match Pinocchio in the current suite, along with selected
+- Floating-base `rizon4`: parse and metadata match, and floating-base `inverse_dynamics`
+  and `inverse_dynamics_gradient` match Pinocchio in the current suite, along with selected
   pose targets. Floating-base `minv`, `crba`, `aba`, `forward_dynamics`, and
-  `forward_dynamics_grad` are explicitly skipped because the resolved source
+  `forward_dynamics_gradient` are explicitly skipped because the resolved source
   model is singular on both sides.
 - End-effector pose gradients: the current suite matches Pinocchio across the
   verified fixed-base and floating-base default robots using articulated
