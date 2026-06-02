@@ -153,6 +153,27 @@ To list the manifest-controlled default robots:
 .venv/bin/python test/run_tests.py --list-tests
 ```
 
+### Fast default vs. `--runslow`
+
+A plain run is **fast by default** (a few minutes): a small tail of heavy
+big-robot numpy references — second-order `idsva_so`/`fdsva_so`, the per-DoF
+finite-difference plant + parameter-gradient + pose-Hessian oracles, the
+floating-base plant cross-check, and the `rk4` / FD-jacobian integrator
+cross-checks — is tagged `slow` and **deselected** automatically. Every
+algorithm keeps live small/medium-robot coverage, so the fast set is still a
+real regression gate. Run the exhaustive set explicitly:
+
+```bash
+pytest RBDReference/tests/ --runslow          # fast + the heavy big-robot cells
+pytest RBDReference/tests/ --runslow -m slow  # ONLY the heavy cells
+```
+
+The split lives in `tests/conftest.py` (`pytest_collection_modifyitems`); it is
+driven from the conftest rather than ini `addopts` because the active pytest
+config for this suite is the parent repo's `pyproject.toml` (the suite is run
+from the repo root so the `RBDReference.*` imports resolve), which would ignore
+a submodule-local `pytest.ini`.
+
 ## Provenance And Lock Files
 
 - `ROBOT_SOURCE_LOCK.json` is the checked-in source/provenance note for the suite.
