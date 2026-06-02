@@ -54,6 +54,11 @@ ALGORITHM_TOLERANCES = {
         atol=1e-7,
         note="The joint-torque regressor reproduces Pinocchio's computeJointTorqueRegressor after the per-link basis permutation; residuals are float64 round-off scaled by the (large) inertia-parameter magnitudes.",
     ),
+    "fd_param_grad": Tolerance(
+        rtol=1e-6,
+        atol=1e-7,
+        note="The forward-dynamics inertial-parameter gradient dqdd/dpi = -Minv . Y(q,qd,qdd_actual) composes the already-verified Minv and joint-torque regressor against an independent Pinocchio oracle built from pin.computeMinverse/crba and pin.computeJointTorqueRegressor at qdd_actual = aba(q,qd,u). Float64 round-off scaled by the (large) inertia-parameter magnitudes, one decade above the primary first-order bucket on the conditioned robots.",
+    ),
     "second_order_fdsva": Tolerance(
         rtol=1e-4,
         atol=1e-5,
@@ -231,6 +236,21 @@ ROBOT_ALGORITHM_TOLERANCES = {
         rtol=1e-4,
         atol=1e-2,
         note="h1_2's regressor rows fold mimic v-slots into their target with the URDF multiplier; the reduced-row regressor inherits the cond(M)~7e5 amplified round-off of its dynamics buckets.",
+    ),
+    ("g1", "fd_param_grad"): Tolerance(
+        rtol=1e-5,
+        atol=1e-2,
+        note="G1's -Minv.Y compose carries |Minv| up to ~3e3 times the regressor's large inertia x acceleration entries; cross-library float64 round-off reaches ~1e-3..1e-2 absolute on the high-energy samples. Relative residual stays at ~1e-7 (machine eps x conditioning). A structural error would be O(|dqdd/dpi|), orders of magnitude larger. Same conditioning rationale as the g1 minv/regressor buckets.",
+    ),
+    ("h1_2", "fd_param_grad"): Tolerance(
+        rtol=1e-3,
+        atol=1e-1,
+        note="h1_2 (12 mimic joints, reduced mass matrix cond ~7e5) inherits the same near-singular Minv noise floor as its minv/aba buckets, amplified through the -Minv.Y compose and the large regressor magnitudes. A structural error would be O(|dqdd/dpi|), orders of magnitude larger.",
+    ),
+    ("gen3", "fd_param_grad"): Tolerance(
+        rtol=1e-3,
+        atol=1e-1,
+        note="gen3's 4 continuous joints (RUBZ cos/sin vs raw-angle) leave cross-library round-off in qdd_actual=aba(q,qd,u) and in Minv, amplified through the -Minv.Y compose (~2.4e-4 relative on high-energy samples, larger absolute on the floating cond~6e4 configuration). A structural continuous-joint error would be O(scale). See the gen3 round-off block comment.",
     ),
     ("g1", "second_order_fdsva"): Tolerance(
         rtol=1e-4,

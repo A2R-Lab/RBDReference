@@ -143,6 +143,10 @@ class ProjectModelAdapter:
     def joint_torque_regressor(self, q, qd, qdd):
         return normalize_matrix(self.reference.joint_torque_regressor(q, qd, qdd))
 
+    def fd_parameter_gradient(self, q, qd, u):
+        """Forward-dynamics inertial-parameter gradient dqdd/dpi (nv x 10*NB)."""
+        return normalize_matrix(self.reference.fd_parameter_gradient(q, qd, u))
+
     def rnea_grad(self, q, qd, qdd, f_ext=None):
         dc_du = normalize_matrix(self.reference.rnea_grad(q, qd, qdd, f_ext=f_ext))
         return dc_du[:, : self.nv], dc_du[:, self.nv :]
