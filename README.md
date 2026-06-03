@@ -4,7 +4,7 @@ A Python reference implementation of rigid body dynamics algorithms.
 
 This package is designed to enable rapid prototyping and testing of new
 algorithms and algorithmic optimizations. The CUDA / FPGA / accelerator
-implementations in the parent GRiD-A2R repo use it as a golden CPU oracle
+implementations in the parent GRiD repo use it as a golden CPU oracle
 during testing (in turn grounded against Pinocchio's C++ implementation via
 the in-package `equivalents/` layer; see "Equivalence testing" below).
 
@@ -91,8 +91,8 @@ Two dependency tiers:
   package, not on PyPI).
 
 * **Developer / equivalence testing** — adds the Pinocchio backend and the
-  test suite (`pin`, `robot_descriptions`, `beautifulsoup4`, `pybind11`,
-  `pytest`):
+  test suite (`pin`, `robot_descriptions`, `xacrodoc`, `beautifulsoup4`,
+  `pybind11`, `pytest`):
   ```shell
   pip install -r requirements-dev.txt
   ```
