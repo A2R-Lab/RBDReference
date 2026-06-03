@@ -10,11 +10,13 @@ the RNEA backward sweep with unit local wrenches (exactly the forward
 `apply_external_forces` convention), and is validated here against the pinocchio
 backend oracle, which reads pinocchio's exact RNEA-with-unit-fext response and
 `computeMinverse`. The first-order blocks (-J^T, M^-1 J^T) are exact. The mixed
-second-order block (-dJ^T/dq) is ANALYTIC (closed form) on the project side for a
-fixed base (``RBDReference.f_ext_jacobian_transpose_dq``) and central-FD-of-exact
-on the pinocchio side; on a floating base both sides finite-difference. The
-analytic fixed-base oracle is additionally self-checked against a central FD of
-the exact J^T in ``test_fixed_base_djt_dq_analytic_matches_fd``.
+second-order block (-dJ^T/dq) is ANALYTIC (closed form) on the project side for
+BOTH fixed and floating base (``RBDReference.f_ext_jacobian_transpose_dq``: the
+free-flyer root's 6 motion-subspace columns slot into the same Featherstone
+``-crm(S)X`` pushdown as the scalar joints) and central-FD-of-exact on the
+pinocchio side. The analytic oracle (fixed AND floating) is additionally
+self-checked against a central FD of the exact J^T through ``self.integrate`` in
+``test_fixed_base_djt_dq_analytic_matches_fd`` (now covering floating too).
 """
 
 import numpy as np
@@ -47,19 +49,25 @@ def _check(spec, project_model, pinocchio_model):
         # first-order blocks are exact
         assert_close(a_dtau, e_dtau, algorithm="f_ext_gradient", robot_id=spec.robot_id)
         assert_close(a_dqdd, e_dqdd, algorithm="f_ext_gradient", robot_id=spec.robot_id)
-        # mixed second-order block (-dJ^T/dq): analytic (fixed base) / FD
-        # (floating) on the project side vs pinocchio FD-of-exact.
+        # mixed second-order block (-dJ^T/dq): analytic closed form on the
+        # project side (fixed AND floating) vs pinocchio FD-of-exact.
         assert_close(
             a_djt, e_djt, algorithm="f_ext_gradient_so", robot_id=spec.robot_id
         )
 
 
-@pytest.mark.parametrize(("spec", "base_mode"), build_case_params(base_mode="fixed"))
+@pytest.mark.parametrize(
+    ("spec", "base_mode"),
+    build_case_params(base_mode="fixed") + build_case_params(base_mode="floating"),
+)
 def test_fixed_base_djt_dq_analytic_matches_fd(spec, base_mode, project_model):
-    """The closed-form ``f_ext_jacobian_transpose_dq`` (-dJ^T/dq, fixed base)
-    must agree with a central finite difference of the exact J^T to FD-truncation
-    accuracy — an independent self-consistency check on the analytic oracle that
-    does not rely on pinocchio."""
+    """The closed-form ``f_ext_jacobian_transpose_dq`` (dJ^T/dq) must agree with a
+    central finite difference of the exact J^T (perturbed through ``self.integrate``,
+    so the floating free-flyer root is retracted on SE(3)) to FD-truncation
+    accuracy — an independent self-consistency check on the analytic oracle, for
+    BOTH fixed and floating base, that does not rely on pinocchio. (The
+    ``fixed_base`` in the name is retained for the conftest slow-gating substring;
+    the test now also covers floating-base cases.)"""
     ref = project_model.reference
     nb = ref.robot.get_num_bodies()
     nv = ref.robot.get_num_vel()

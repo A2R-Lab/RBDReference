@@ -2071,7 +2071,7 @@ class RBDReference(
 
     def f_ext_jacobian_transpose_dq(self, q, normalize_input=True):
         """Analytic ``dJ^T/dq`` (nv x 6*NB x nv) of the stacked body-Jacobian
-        transpose, fixed base only (section A.3 oracle).
+        transpose, for FIXED and FLOATING base (section A.3 oracle).
 
         ``J^T[v_j, 6*i + k] = col_{i,j}[k]`` where the geometric-Jacobian column
         of body ``i`` for chain joint ``j`` (in body ``i``'s LOCAL frame) is
@@ -2094,9 +2094,23 @@ class RBDReference(
         where ``X_{m->i} = X[i]...X[m+1]`` pushes the perturbation from frame ``m``
         down to frame ``i`` and ``col_{m,j} = X[m]...X[j+1] S_j`` is the partial
         pushdown to body ``m``. The result is written to ``dJT[v_j, 6*i+k, v_m]``.
-        Out-of-chain ``(i, m)`` pairs are zero. This matches a central FD of
-        ``f_ext_jacobian_transpose`` to FD-truncation accuracy and is the analytic
-        oracle used by ``f_ext_gradient``'s A.3 block (``did_du_dfext_dq``).
+        Out-of-chain ``(i, m)`` pairs are zero.
+
+        FLOATING BASE: the same closed form holds for the 6-DoF free-flyer root
+        (jid 0) with NO new identity. The root's motion subspace is the 6-column
+        ``S_0`` (the free-flyer twist basis, pinocchio [v_lin; omega] order); each
+        column ``S_0^{(a)}`` owns a distinct root v-slot ``a in [0,6)``. As a SOURCE
+        joint it contributes 6 geometric-Jacobian columns (one per root v-slot); as
+        a PERTURBED joint, ``d col_{i,j}/d(root v-slot a) = -X_{m->i}(S_0^{(a)} x
+        col_{0,j})`` -- exactly the Featherstone ``-crm(S)X`` retract along the
+        a-th body-frame twist column, the same SE(3) right-retract that
+        ``self.integrate`` applies to the root in the central-FD self-check. Per
+        root v-slot it is a separate ``a`` with ``-crm(S_0^{(a)})X[0]``; no special
+        6-DoF code is needed -- the multi-column loop over each chain joint's S
+        subsumes both the scalar revolute/prismatic joints (1 column, 1 v-slot) and
+        the 6-column root. Validated against a central FD of
+        ``f_ext_jacobian_transpose`` through ``self.integrate`` to FD-truncation
+        accuracy (~1e-10) on iiwa14-floating / go2-floating.
 
         MIMIC: a mimic joint shares its target's reduced v-slot, so its
         geometric-Jacobian column accumulates (alpha-weighted via the motion
@@ -2109,11 +2123,20 @@ class RBDReference(
         nv = self.robot.get_num_vel()
         dJT = np.zeros((nv, 6 * NB, nv), dtype=np.float64)
 
-        def _vslot(jid):
+        def _vslots(jid):
+            # Full ordered list of v-slots a joint owns: a single scalar for
+            # revolute/prismatic, the 6-wide free-flyer block for the floating
+            # root (one per motion-subspace column).
             v = self.robot.get_joint_index_v(jid)
             if isinstance(v, (list, tuple, np.ndarray)):
-                return int(list(v)[0])
-            return int(v)
+                return [int(x) for x in v]
+            return [int(v)]
+
+        def _Sof(jid):
+            S = np.asarray(self.robot.get_S_by_id(jid), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            return S
 
         def _Xof(m):
             return np.asarray(
@@ -2124,10 +2147,8 @@ class RBDReference(
         for i in range(NB):
             chain = sorted(self.robot.get_ancestors_by_id(i)) + [i]
             for j in chain:
-                S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
-                if S.ndim == 1:
-                    S = S.reshape(-1, 1)
-                vj = _vslot(j)
+                S = _Sof(j)
+                vj_list = _vslots(j)  # per-column source v-slots (root: 6 of them)
                 # ordered chain joints (j, i] whose local transforms push S_j down
                 tf = []
                 mm = i
@@ -2135,9 +2156,11 @@ class RBDReference(
                     tf.append(mm)
                     mm = self.robot.get_parent_id(mm)
                 tf = list(reversed(tf))  # j+1, j+2, ..., i
-                # precompute the running pushdown col_{m,j} = X[m]..X[j+1] S_j at
-                # each frame m on the chain (col_at[j] = S_j).
+                # one source geometric-Jacobian column per S column / source v-slot
                 for c in range(S.shape[1]):
+                    vj = vj_list[c]
+                    # precompute the running pushdown col_{m,j} = X[m]..X[j+1] S_j
+                    # at each frame m on the chain (col_at[j] = S_j[:, c]).
                     col = S[:6, c].astype(np.float64)
                     col_at = {j: col.copy()}
                     for m in tf:
@@ -2145,18 +2168,19 @@ class RBDReference(
                         col_at[m] = col.copy()
                     # derivative wrt each chain coordinate q_m, m in (j, i]
                     for midx, m in enumerate(tf):
-                        Sm = np.asarray(self.robot.get_S_by_id(m), dtype=np.float64)
-                        if Sm.ndim == 1:
-                            Sm = Sm.reshape(-1, 1)
-                        vm = _vslot(m)
-                        # S_m x col_{m,j} (spatial motion cross product)
-                        term = self.cross_operator(Sm[:6, 0]) @ col_at[m]
+                        Sm = _Sof(m)
+                        vm_list = _vslots(m)  # per-column perturbed v-slots
                         # X_{m->i} = X[i]...X[m+1]
                         Xmi = np.eye(6)
                         for m2 in tf[midx + 1:]:
                             Xmi = _Xof(m2) @ Xmi
-                        dcol = -(Xmi @ term)
-                        dJT[vj, 6 * i:6 * i + 6, vm] += dcol
+                        # one perturbed coordinate per S_m column / v-slot (root: 6)
+                        for cm in range(Sm.shape[1]):
+                            vm = vm_list[cm]
+                            # S_m^(cm) x col_{m,j} (spatial motion cross product)
+                            term = self.cross_operator(Sm[:6, cm]) @ col_at[m]
+                            dcol = -(Xmi @ term)
+                            dJT[vj, 6 * i:6 * i + 6, vm] += dcol
         return dJT
 
     def f_ext_gradient(self, q, normalize_input=True):
@@ -2176,11 +2200,11 @@ class RBDReference(
         ``J^T`` is the stacked spatial body-Jacobian transpose (local frame, all
         bodies) from ``f_ext_jacobian_transpose``. ``M^{-1}`` is ``minv``. The
         q-derivative ``dJ^T/dq`` is the analytic closed form from
-        ``f_ext_jacobian_transpose_dq`` on a FIXED base (no finite differencing).
-        On a FLOATING base the root carries a 6-DoF SE(3) twist (the analytic
-        per-coordinate motion-cross identity above is derived for the scalar
-        revolute joints), so ``dJ^T/dq`` there is still central finite differenced
-        on the exact J^T through the Lie-group integrator.
+        ``f_ext_jacobian_transpose_dq`` for BOTH fixed and floating base (no finite
+        differencing): the floating free-flyer root's 6 motion-subspace columns
+        slot into the same Featherstone ``-crm(S)X`` pushdown as the scalar joints
+        (one ``-crm(S_0^{(a)})X[0]`` per root v-slot a). See that method's
+        derivation + FD self-check.
         """
         if normalize_input:
             q = self._normalize_q_input(q)
@@ -2192,23 +2216,8 @@ class RBDReference(
         dtau_dfext = -JT
         dqdd_dfext = Minv @ JT
 
-        if not self.robot.floating_base:
-            # Fixed base: analytic dJ^T/dq (closed form, no FD).
-            dJT_dq = self.f_ext_jacobian_transpose_dq(q, normalize_input=False)
-        else:
-            # Floating base: central FD of the exact J^T, perturbing each
-            # generalized velocity coordinate through the Lie-group integrator
-            # (handles the floating-base quaternion/root-twist coordinate).
-            h = 1e-6
-            dJT_dq = np.zeros((nv, 6 * NB, nv), dtype=np.float64)
-            for i in range(nv):
-                dv = np.zeros(nv, dtype=np.float64)
-                dv[i] = h
-                q_plus = self.integrate(q, dv)
-                q_minus = self.integrate(q, -dv)
-                JT_plus = self.f_ext_jacobian_transpose(q_plus, normalize_input=False)
-                JT_minus = self.f_ext_jacobian_transpose(q_minus, normalize_input=False)
-                dJT_dq[:, :, i] = (JT_plus - JT_minus) / (2.0 * h)
+        # Analytic dJ^T/dq (closed form, no FD) for fixed AND floating base.
+        dJT_dq = self.f_ext_jacobian_transpose_dq(q, normalize_input=False)
 
         return {
             "dtau_dfext": dtau_dfext,
