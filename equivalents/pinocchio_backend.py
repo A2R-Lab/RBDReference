@@ -33,6 +33,24 @@ class PinocchioModelAdapter:
     # Empty for robots without mimic joints (everything else stays bit-exact).
     mimic_info: MimicInfo = None
 
+    # ----- Native pinocchio reduced/mimic model (lazy) -----
+    # For mimic robots, pinocchio 3.9 can build a NATIVE reduced model via
+    # `pin.transformJointIntoMimic`, in which every mimic joint is coupled to
+    # its target (nq/nv = 0 at the target's index) so the model carries the
+    # project's reduced (nv) coordinates directly. CRBA / RNEA /
+    # generalizedGravity are computed IN reduced space on this model -- no
+    # manual `G^T M G` folding -- which makes it an INDEPENDENT oracle for
+    # `minv` (invert the native reduced CRBA). Pinocchio 3.9's derivative
+    # algorithms (`computeRNEADerivatives`, `computeABADerivatives`,
+    # `computeMinverse`, `aba`) raise on the mimic joint type, so those stay on
+    # the (provably-correct, constant-G) fold path; see `inverse_dynamics_gradient`.
+    # Built lazily by `_ensure_native_mimic_model`; `None` until first use, and
+    # left `None` (with `_native_mimic_failed=True`) if the build is unavailable
+    # so callers transparently fall back to the fold path.
+    _native_mimic_model: object = None
+    _native_mimic_data: object = None
+    _native_mimic_failed: bool = False
+
     @property
     def nq(self) -> int:
         # Report the PROJECT layout's nq (mimic joints don't own a generalized
@@ -154,6 +172,68 @@ class PinocchioModelAdapter:
             floating_prefix_len_q=self._floating_prefix_q(),
             floating_prefix_len_v=self._floating_prefix_v(),
             axes_to_reduce=axes_to_reduce,
+        )
+
+    def _ensure_native_mimic_model(self):
+        """Lazily build pinocchio's NATIVE reduced/mimic model and return
+        `(model, data)`, or `(None, None)` if the build is unavailable.
+
+        Each URDF `<mimic>` relation is applied with `pin.transformJointIntoMimic
+        (model, mimicked_id, mimicking_id, multiplier, offset)`, which couples
+        the mimic joint to its target natively (the mimic joint keeps nq=nv=0 at
+        the target's index). Joint ids are re-resolved by NAME after every
+        transform because the rebuilt model re-indexes joints. The resulting
+        model's velocity ordering equals `project_scalar_joint_names`
+        (verified for fr3 + h1_2), so the native reduced q is exactly the
+        project q with the standard continuous-joint / free-flyer expansion and
+        NO mimic mirroring.
+
+        Returns `(None, None)` for non-mimic robots (callers should use the
+        plain `self.model`) and caches a failure so we only attempt the build
+        once.
+        """
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            return None, None
+        if self._native_mimic_model is not None:
+            return self._native_mimic_model, self._native_mimic_data
+        if self._native_mimic_failed:
+            return None, None
+        import pinocchio as pin
+
+        if not hasattr(pin, "transformJointIntoMimic"):
+            self._native_mimic_failed = True
+            return None, None
+        try:
+            model = self.model
+            for name, (target_name, mult, offset) in self.mimic_info.relations.items():
+                mimicked = model.getJointId(target_name)
+                mimicking = model.getJointId(name)
+                model = pin.transformJointIntoMimic(
+                    model, mimicked, mimicking, float(mult), float(offset)
+                )
+            data = model.createData()
+        except Exception:
+            self._native_mimic_failed = True
+            return None, None
+        self._native_mimic_model = model
+        self._native_mimic_data = data
+        return model, data
+
+    def _to_native_mimic_q(self, q):
+        """Map a project-layout q to the native reduced/mimic model's nq layout.
+
+        The native model owns one coordinate per project scalar joint (mimic
+        joints contribute none), in `project_scalar_joint_names` order, so this
+        is just the standard continuous-joint / free-flyer expansion applied to
+        the project q -- the SAME mapping used for non-mimic robots, but against
+        the mimic-excluded joint list. No mimic mirroring is needed because the
+        native model has no mimic q-slots to fill.
+        """
+        return normalize_project_q_for_pin(
+            self.base_mode,
+            q,
+            joint_names=self.project_scalar_joint_names,
+            joint_types_by_name=self.urdf_joint_types_by_name,
         )
 
     @property
@@ -318,14 +398,31 @@ class PinocchioModelAdapter:
     def minv(self, q):
         import pinocchio as pin
 
+        # Mimic robots: prefer pinocchio's NATIVE reduced/mimic model, where
+        # `pin.crba` produces the reduced (nv x nv) mass matrix DIRECTLY (no
+        # manual `G^T M G` fold). Inverting that native reduced M gives an
+        # oracle for Minv that does not depend on our fold code. This is
+        # bit-identical to the fold path for the manifest's mimic robots
+        # (verified fr3 fixed+floating, h1_2), so the fold path remains a
+        # correct fallback if the native model can't be built.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            native_model, native_data = self._ensure_native_mimic_model()
+            if native_model is not None:
+                q_native = self._to_native_mimic_q(q)
+                mass = np.asarray(
+                    pin.crba(native_model, native_data, q_native), dtype=np.float64
+                )
+                mass = 0.5 * (mass + mass.T)
+                return normalize_matrix(np.linalg.inv(mass))
+
         q_pin = self._to_pin_q(q)
         mass = pin.crba(self.model, self.data, q_pin)
         mass = np.asarray(mass, dtype=np.float64)
         mass = 0.5 * (mass + mass.T)
-        # Reduce pinocchio's nv_pin x nv_pin mass matrix to project nv x nv
-        # by collapsing mimic rows/cols into the mimicked column (with
-        # multiplier scaling on both axes). The inverse is then taken on the
-        # reduced matrix so it matches the project-layout Minv.
+        # Fallback fold path: reduce pinocchio's nv_pin x nv_pin mass matrix to
+        # project nv x nv by collapsing mimic rows/cols into the mimicked column
+        # (with multiplier scaling on both axes). The inverse is then taken on
+        # the reduced matrix so it matches the project-layout Minv.
         if self.mimic_info is not None and not self.mimic_info.is_empty():
             mass = self._reduce_pin_matrix_to_project(
                 mass, axes_to_reduce=[(0, "v"), (1, "v")]
@@ -335,6 +432,19 @@ class PinocchioModelAdapter:
 
     def crba(self, q):
         import pinocchio as pin
+
+        # Mimic robots: prefer the native reduced/mimic model so `pin.crba`
+        # yields the reduced (nv x nv) M directly (no fold). Falls back to the
+        # fold path when the native model is unavailable.
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            native_model, native_data = self._ensure_native_mimic_model()
+            if native_model is not None:
+                q_native = self._to_native_mimic_q(q)
+                mass = np.asarray(
+                    pin.crba(native_model, native_data, q_native), dtype=np.float64
+                )
+                mass = 0.5 * (mass + mass.T)
+                return normalize_matrix(mass)
 
         q_pin = self._to_pin_q(q)
         mass = pin.crba(self.model, self.data, q_pin)
@@ -596,6 +706,18 @@ class PinocchioModelAdapter:
         # mimic rows into target rows) BEFORE the q-Jacobian chain reduction;
         # otherwise the matrix carries pinocchio-full v-width which doesn't
         # match the project nq layout expected by reduce_pinocchio_q_jacobian.
+        #
+        # NOTE (native-mimic deferral): pinocchio 3.9's NATIVE reduced/mimic
+        # model (`pin.transformJointIntoMimic`) is used for `minv`/`crba`, but
+        # `computeRNEADerivatives` RAISES on the mimic joint type, so this
+        # derivative cannot be computed in native reduced space here. The fold
+        # below (`G^T (d tau) G`) is nonetheless EXACT for the URDF mimic
+        # constraint: `<mimic>` is always LINEAR (`q_m = mult*q_t + offset`), so
+        # the constraint Jacobian `G` is CONSTANT and differentiation commutes
+        # with the reduction. Validated vs the native-reduced-RNEA finite
+        # difference and vs the RBDReference numpy oracle to ~1e-13 relative on
+        # fr3 (fixed + floating). Same reasoning applies to
+        # `forward_dynamics_gradient` and `idsva_so_body_frame`.
         if self.mimic_info is not None and not self.mimic_info.is_empty():
             dtau_dq = self._reduce_pin_matrix_to_project(
                 np.asarray(self.data.dtau_dq, dtype=np.float64),
