@@ -328,6 +328,82 @@ class RBDReference(
             return J
         raise ValueError("with_respect_to must be 'q' or 'v'")
 
+    def d2Integrate(self, q, v_dt, arg1, arg2, fd_step=1e-3):
+        """Second-order Lie-group retract derivative: the tangent-space
+        derivative of the `dIntegrate` Jacobian.
+
+        Returns ``H`` of shape ``(nv, nv, nv)`` with
+
+            H[i, j, k] = d/dxi_k ( dIntegrate(q, v_dt, arg1)[i, j] )
+
+        where ``xi_k`` is a unit tangent perturbation in the ``arg2``
+        coordinate:
+
+          * ``arg2 == 'v'`` -> additive perturbation of the increment,
+            ``v_dt -> v_dt + h * e_k``;
+          * ``arg2 == 'q'`` -> right group perturbation of the base,
+            ``q -> integrate(q, h * e_k)``.
+
+        ``arg1, arg2`` each in ``{'q', 'v'}`` (Pinocchio ARG0/ARG1
+        semantics). This is the building block for the second-order
+        sensitivity of the time-integration step (e.g. the floating-base
+        position rows of a `plant_step_hessian`).
+
+        Structure for the project manifest (free-flyer + revolute joints,
+        optional fixed base):
+
+          * Fixed-base -> identically zero (`integrate` is affine, its
+            Jacobian constant).
+          * The free-flyer `dIntegrate` blocks depend only on ``v_dt`` and
+            never on the base ``q`` (see `dIntegrate`, which discards
+            ``q``), so every ``arg2 == 'q'`` tensor is exactly zero and the
+            only nonzero entries live in the 6x6 free-flyer block over
+            ``arg2 == 'v'``.
+          * Revolute rows/cols are linear in the increment -> zero.
+
+        Implementation note: evaluated by 4th-order (Richardson) central
+        finite differencing of the pinocchio-validated `dIntegrate`
+        (float64, ~1e-8 accurate). The default ``fd_step`` of 1e-3 is
+        deliberately *not* tiny: it sits near the roundoff/truncation
+        optimum for the 4th-order stencil (h ~ eps**(1/5)) and, crucially,
+        keeps the perturbed increments clear of the ill-conditioned
+        small-angle regime of `dIntegrate`'s exact (1-cos)/theta^2 and
+        SE(3) Q-block formulas (cf. the theta < 1e-4 guard in
+        `_se3_Q_block`), which dominate the error as v_dt -> 0. A
+        hand-rolled closed form is deferred
+        until a GPU/codegen consumer for the floating-base position-row
+        Hessian exists; the only current consumers are float64 oracles,
+        where exact-to-1e-9 differencing of an already-exact Jacobian is
+        indistinguishable from a closed form. See
+        docs/open-tasks/f1_plant_step_hessian_plan.md (floating-q rows).
+        """
+        if arg1 not in ("q", "v") or arg2 not in ("q", "v"):
+            raise ValueError("arg1 and arg2 must each be 'q' or 'v'")
+        nv = self.robot.get_num_vel()
+        H = np.zeros((nv, nv, nv), dtype=np.float64)
+        if not self.robot.floating_base:
+            return H
+        if arg2 == "q":
+            # The free-flyer dIntegrate blocks are independent of the base
+            # q, so this derivative is exactly zero. Returned explicitly
+            # (rather than as FD-of-a-constant) to avoid spurious roundoff.
+            return H
+        v_dt = np.asarray(v_dt, dtype=np.float64)
+
+        def J_at(delta):
+            return self.dIntegrate(q, v_dt + delta, arg1)
+
+        h = float(fd_step)
+        for k in range(nv):
+            e = np.zeros(nv, dtype=np.float64)
+            e[k] = 1.0
+            # 4th-order central stencil:
+            #   f'(0) ~= (8(f(h)-f(-h)) - (f(2h)-f(-2h))) / (12 h)
+            d1 = J_at(h * e) - J_at(-h * e)
+            d2 = J_at(2.0 * h * e) - J_at(-2.0 * h * e)
+            H[:, :, k] = (8.0 * d1 - d2) / (12.0 * h)
+        return H
+
     # ----- Multi-integrator one-step time-integration -----
 
     @staticmethod

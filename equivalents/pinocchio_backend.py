@@ -1092,6 +1092,40 @@ class PinocchioModelAdapter:
             )
         return J
 
+    def d2Integrate(self, q, v_dt, arg1, arg2, fd_step=1e-3):
+        """Pinocchio cross-check for `RBDReference.d2Integrate`: the
+        tangent-space derivative of `pin.dIntegrate(arg1)` along the
+        `arg2` coordinate, shape ``(nv_project, nv_project, nv_project)``.
+
+        Pinocchio exposes no native second-order integrate, so this is a
+        4th-order central difference of `pin.dIntegrate` (an independent
+        path from the RBDReference FD, which differences our own
+        `dIntegrate`). The two agreeing is a real cross-check: the
+        derivative is far more sensitive to a wrong v-dependence in the
+        SE(3) Q-block than the Jacobian value itself.
+        """
+        nv = self.nv
+        H = np.zeros((nv, nv, nv), dtype=np.float64)
+        if self.base_mode != "floating":
+            return H
+        if arg2 == "q":
+            return H  # free-flyer dIntegrate blocks are q-independent
+        if arg2 != "v":
+            raise ValueError("arg2 must be 'q' or 'v'")
+        v_dt = np.asarray(v_dt, dtype=np.float64)
+        h = float(fd_step)
+
+        def J_at(delta):
+            return self._pin_dIntegrate(q, v_dt + delta, arg1)
+
+        for k in range(nv):
+            e = np.zeros(nv, dtype=np.float64)
+            e[k] = 1.0
+            d1 = J_at(h * e) - J_at(-h * e)
+            d2 = J_at(2.0 * h * e) - J_at(-2.0 * h * e)
+            H[:, :, k] = (8.0 * d1 - d2) / (12.0 * h)
+        return H
+
     @staticmethod
     def _butcher(integrator_type: str):
         if integrator_type == "euler":
