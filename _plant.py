@@ -122,6 +122,100 @@ class _PlantMixin:
             dtype=np.float64,
         )
 
+    def _d2qdd_tangent(self, q, qd, u):
+        """Assemble the full forward-dynamics Hessian over the 3*nv tangent
+        z = [dq (nv); dqd (nv); du (nv)] from the four `fdsva_so` blocks.
+
+        Returns ``D2`` of shape ``(nv, 3*nv, 3*nv)`` with
+        ``D2[i, a, b] = d^2 qdd[i] / dz[a] dz[b]``. Everything is in the nv
+        tangent (correct for continuous joints where nq != nv).
+
+        Block structure (qdd = M^{-1}(q)(u - c(q,qd)) is linear in u, and the
+        M^{-1} coupling does not depend on qd, so the u-u, u-qd, qd-u blocks
+        vanish):
+
+              q (nv)        qd (nv)        u (nv)
+            +-------------+-------------+-------------+
+          q | daba_dqdq   | daba_dvdq^T | daba_dtdq^T |
+            +-------------+-------------+-------------+
+         qd | daba_dvdq   | daba_dvdv   |     0       |
+            +-------------+-------------+-------------+
+          u | daba_dtdq   |     0       |     0       |
+            +-------------+-------------+-------------+
+
+        where the named blocks are exactly `RBDReference.fdsva_so`'s outputs
+        ``(daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq)`` with
+        ``daba_dvdq[i,j,k] = d^2 qdd_i / dqd_j dq_k`` and
+        ``daba_dtdq[i,j,k] = d^2 qdd_i / dtau_j dq_k`` (velocity/torque first,
+        position second) -- the off-diagonal q-blocks are their (0,2,1)
+        transposes.
+        """
+        nv = self.robot.get_num_vel()
+        daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq = self.fdsva_so(q, qd, u)
+        nz = 3 * nv
+        qsl, vsl, usl = slice(0, nv), slice(nv, 2 * nv), slice(2 * nv, nz)
+        D2 = np.zeros((nv, nz, nz), dtype=np.float64)
+        D2[:, qsl, qsl] = daba_dqdq
+        D2[:, vsl, vsl] = daba_dvdv
+        # q <-> qd mixed (daba_dvdq is [d/dqd, d/dq]).
+        D2[:, vsl, qsl] = daba_dvdq
+        D2[:, qsl, vsl] = np.transpose(daba_dvdq, (0, 2, 1))
+        # q <-> u mixed (daba_dtdq is [d/dtau, d/dq]); u-u, u-qd blocks are 0.
+        D2[:, usl, qsl] = daba_dtdq
+        D2[:, qsl, usl] = np.transpose(daba_dtdq, (0, 2, 1))
+        return D2
+
+    def plant_step_hessian(self, q, qd, u, dt, integrator_type="euler"):
+        """Second-order sensitivity of the integrator step x_{k+1} = [q; v].
+
+        Returns ``H`` of shape ``(2*nv, 3*nv, 3*nv)`` (the s_d2AB surface),
+        the Hessian of each output-state tangent component w.r.t. the
+        3*nv tangent z = [dq (nv); dqd (nv); du (nv)]:
+
+            H[o, a, b] = d^2 x_{k+1}[o] / dz[a] dz[b]
+
+        Output rows split as [position-tangent (nv); velocity (nv)].
+
+        **Scope (first landing).** ``euler`` and ``semi_implicit_euler`` on a
+        **fixed base**, fully analytic. The velocity rows are
+        ``dt * D2qdd`` (single-stage), the position rows are ``0`` (Euler,
+        linear retract) or ``dt^2 * D2qdd`` (SI-Euler, q_{k+1}=q+dt*v_{k+1}).
+        See `docs/open-tasks/f1_plant_step_hessian_plan.md`.
+
+        **Deferred.** Floating-base position rows need the second-order SE(3)
+        retract: the q-qd and qd-qd blocks are now expressible via
+        `d2Integrate`, but the q-q block carries a Lie-group connection term
+        with no PDDP/pinocchio reference convention; and multi-stage RK adds a
+        2nd-order chain rule PDDP itself leaves unimplemented. Both raise
+        rather than emit a silently-wrong tensor (clean-break).
+        """
+        if integrator_type not in ("euler", "semi_implicit_euler", "si_euler"):
+            raise NotImplementedError(
+                f"plant_step_hessian: integrator '{integrator_type}' not yet "
+                "supported (multi-stage RK 2nd-order chain rule is deferred; "
+                "see f1_plant_step_hessian_plan.md)."
+            )
+        if self.robot.floating_base:
+            raise NotImplementedError(
+                "plant_step_hessian: floating-base is deferred. The velocity "
+                "rows and the position q-qd/qd-qd blocks are unblocked by "
+                "d2Integrate, but the position q-q block needs the SE(3) "
+                "retract connection term (no reference convention yet); "
+                "see f1_plant_step_hessian_plan.md."
+            )
+        nv = self.robot.get_num_vel()
+        nz = 3 * nv
+        D2 = self._d2qdd_tangent(q, qd, u)  # (nv, 3nv, 3nv)
+        H = np.zeros((2 * nv, nz, nz), dtype=np.float64)
+        # Velocity rows (bottom nv): v_{k+1} = qd + dt * qdd for both variants.
+        H[nv:, :, :] = dt * D2
+        if integrator_type in ("semi_implicit_euler", "si_euler"):
+            # Position rows (top nv): q_{k+1} = q + dt * v_{k+1}
+            #                                 = q + dt*qd + dt^2*qdd.
+            H[:nv, :, :] = (dt * dt) * D2
+        # else euler: position rows stay zero (q_{k+1} = q + dt*qd, linear).
+        return H
+
     # ----- quadratic state / input cost (value, grad, GN-diag hess) -----
 
     @staticmethod
