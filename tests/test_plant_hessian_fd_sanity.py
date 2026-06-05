@@ -83,15 +83,16 @@ def test_plant_hessian_matches_finite_difference(robot_id, integrator_type):
 
 
 @pytest.mark.developer_only
-def test_plant_hessian_defers_rk_and_floating():
-    # RK is deferred (multi-stage 2nd-order chain rule).
+def test_plant_hessian_defers_rk():
+    # RK is deferred (multi-stage 2nd-order chain rule), fixed and floating.
     _spec_, ref, samples = _build("iiwa14", "fixed")
     s = samples[0]
     with pytest.raises(NotImplementedError):
         ref.plant_step_hessian(s.q, s.qd, s.qdd, 0.01, integrator_type="rk4")
 
-    # Floating-base is deferred (SE(3) retract connection term).
+    # Floating-base Euler / SI-Euler are now SUPPORTED (see
+    # test_plant_hessian_floating_pin.py); only RK still defers there.
     _spec2, ref_fl, samples_fl = _build("go2", "floating")
     sf = samples_fl[0]
     with pytest.raises(NotImplementedError):
-        ref_fl.plant_step_hessian(sf.q, sf.qd, sf.qdd, 0.01, integrator_type="euler")
+        ref_fl.plant_step_hessian(sf.q, sf.qd, sf.qdd, 0.01, integrator_type="rk3")

@@ -173,21 +173,52 @@ class _PlantMixin:
         3*nv tangent z = [dq (nv); dqd (nv); du (nv)]:
 
             H[o, a, b] = d^2 x_{k+1}[o] / dz[a] dz[b]
+                       = d/dz[a] ( plant_step_gradient[o, b] )
 
+        so axis ``a`` is the perturbation axis and axis ``b`` the
+        gradient-column axis (the convention the FD-of-gradient oracle uses).
         Output rows split as [position-tangent (nv); velocity (nv)].
 
-        **Scope (first landing).** ``euler`` and ``semi_implicit_euler`` on a
-        **fixed base**, fully analytic. The velocity rows are
-        ``dt * D2qdd`` (single-stage), the position rows are ``0`` (Euler,
-        linear retract) or ``dt^2 * D2qdd`` (SI-Euler, q_{k+1}=q+dt*v_{k+1}).
-        See `docs/open-tasks/f1_plant_step_hessian_plan.md`.
+        **Scope.** ``euler`` and ``semi_implicit_euler`` on both **fixed** and
+        **floating** base, fully analytic. Multi-stage RK still raises (its
+        2nd-order chain rule is a separate task).
 
-        **Deferred.** Floating-base position rows need the second-order SE(3)
-        retract: the q-qd and qd-qd blocks are now expressible via
-        `d2Integrate`, but the q-q block carries a Lie-group connection term
-        with no PDDP/pinocchio reference convention; and multi-stage RK adds a
-        2nd-order chain rule PDDP itself leaves unimplemented. Both raise
-        rather than emit a silently-wrong tensor (clean-break).
+        Velocity rows (both variants, single-stage): the Hessian of
+        ``v_{k+1} = qd + dt*qdd(z)`` is ``dt * D2qdd``. We assemble it from
+        ``_d2qdd_tangent`` and *transpose its (a,b) axes* so the perturbation
+        axis sits in ``a``. For a fixed base D2qdd is (a,b)-symmetric and the
+        transpose is a no-op; for a floating base the q-q block is genuinely
+        asymmetric (the body-frame ``fdsva_so`` second derivative), and the
+        ``(perturb, column)`` ordering is the one matching a finite difference
+        of ``integrator_gradient``.
+
+        Position rows ``q_{k+1} = integrate(q, w)`` (Lie-group retract).
+          * **Euler**, ``w = dt*qd``: ``q_{k+1}`` depends on z only through the
+            increment ``w`` (the ``dIntegrate`` blocks are q-independent for a
+            free-flyer), and ``w`` depends only on ``qd`` (``dw/dqd = dt*I``).
+            Hence every block whose perturbation axis ``a`` is in ``q`` or
+            ``u`` is exactly zero, and the nonzero pieces are
+              - ``a in qd, b in q``  : ``dt   * d2Integrate(q, w, 'q', 'v')``
+              - ``a in qd, b in qd`` : ``dt^2 * d2Integrate(q, w, 'v', 'v')``
+            with the increment-derivative index in ``a`` and the
+            gradient-column index in ``b`` (i.e. ``d2Integrate[o, b, a']``).
+            No symmetrization: the FD-of-pinocchio ground truth is itself
+            asymmetric in (a,b) (the q-row stays zero, only the qd-row carries
+            the cross term), so the tensor is filled un-symmetrized.
+          * **Semi-implicit Euler**, ``w = dt*v_{k+1} = dt*(qd + dt*qdd(z))``:
+            the increment depends on all of z through ``v_{k+1}``, so the
+            position-row Hessian is the chain rule of ``integrate`` (its 1st +
+            2nd derivatives at ``w``) composed with ``Vgrad = d v_{k+1}/dz``
+            (the bottom rows of ``integrator_gradient``) and the velocity-row
+            Hessian ``d^2 v_{k+1}/dz^2 = dt * D2qdd``:
+              t1 (b in q only) dt   * d2Int_qv : Vgrad
+              t2               dt^2 * Vgrad^T : d2Int_vv : Vgrad
+              t3               dt^2 * dIntegrate_v . D2qdd
+
+        For a fixed base ``d2Integrate`` is identically zero and
+        ``dIntegrate_v = I``, so this collapses to the historical fixed-base
+        result (position rows ``0`` for Euler, ``dt^2 * D2qdd`` for SI-Euler).
+        See `docs/open-tasks/f1_plant_step_hessian_plan.md`.
         """
         if integrator_type not in ("euler", "semi_implicit_euler", "si_euler"):
             raise NotImplementedError(
@@ -195,25 +226,61 @@ class _PlantMixin:
                 "supported (multi-stage RK 2nd-order chain rule is deferred; "
                 "see f1_plant_step_hessian_plan.md)."
             )
-        if self.robot.floating_base:
-            raise NotImplementedError(
-                "plant_step_hessian: floating-base is deferred. The velocity "
-                "rows and the position q-qd/qd-qd blocks are unblocked by "
-                "d2Integrate, but the position q-q block needs the SE(3) "
-                "retract connection term (no reference convention yet); "
-                "see f1_plant_step_hessian_plan.md."
-            )
         nv = self.robot.get_num_vel()
         nz = 3 * nv
-        D2 = self._d2qdd_tangent(q, qd, u)  # (nv, 3nv, 3nv)
+        qsl, vsl = slice(0, nv), slice(nv, 2 * nv)
+        si = integrator_type in ("semi_implicit_euler", "si_euler")
+
+        D2 = self._d2qdd_tangent(q, qd, u)  # (nv, 3nv, 3nv), axes [out, b, a]
+        # Reorder to (out, a=perturb, b=column). Symmetric for a fixed base;
+        # carries the asymmetric free-flyer q-q block otherwise.
+        D2T = np.transpose(D2, (0, 2, 1))
         H = np.zeros((2 * nv, nz, nz), dtype=np.float64)
-        # Velocity rows (bottom nv): v_{k+1} = qd + dt * qdd for both variants.
-        H[nv:, :, :] = dt * D2
-        if integrator_type in ("semi_implicit_euler", "si_euler"):
-            # Position rows (top nv): q_{k+1} = q + dt * v_{k+1}
-            #                                 = q + dt*qd + dt^2*qdd.
-            H[:nv, :, :] = (dt * dt) * D2
-        # else euler: position rows stay zero (q_{k+1} = q + dt*qd, linear).
+
+        # ---- velocity rows: d^2 v_{k+1} / dz^2 = dt * D2qdd ----
+        H[nv:, :, :] = dt * D2T
+
+        if not self.robot.floating_base:
+            # Fixed base: linear retract -> position rows 0 (Euler) or the same
+            # dt^2 * D2qdd as the velocity rows (SI-Euler, q_{k+1}=q+dt*v_{k+1}).
+            if si:
+                H[:nv, :, :] = (dt * dt) * D2T
+            return H
+
+        # ---- floating base position rows via the SE(3) retract derivatives ----
+        if not si:
+            # Euler: q_{k+1} = integrate(q, dt*qd). Only the qd perturbation
+            # axis is nonzero; b in q -> d2Int_qv, b in qd -> dt * d2Int_vv.
+            w = dt * np.asarray(qd, dtype=np.float64)
+            d2qv = self.d2Integrate(q, w, "q", "v")  # [out, col, incr]
+            d2vv = self.d2Integrate(q, w, "v", "v")  # [out, col, incr]
+            for a_loc in range(nv):
+                a = nv + a_loc  # perturbation axis lives in the qd block
+                H[:nv, a, qsl] = dt * d2qv[:, :, a_loc]
+                H[:nv, a, vsl] = (dt * dt) * d2vv[:, :, a_loc]
+            return H
+
+        # SI-Euler: q_{k+1} = integrate(q, dt*v_{k+1}), v_{k+1} = qd + dt*qdd(z).
+        qdd = np.asarray(self.forward_dynamics(q, qd, u), dtype=np.float64).reshape(-1)
+        v_new = np.asarray(qd, dtype=np.float64) + dt * qdd
+        w = dt * v_new
+        Jv = self.dIntegrate(q, w, "v")          # (nv, nv)  d q_{k+1}/d w
+        d2qv = self.d2Integrate(q, w, "q", "v")  # [out, col, incr]  d dInt_q / d w
+        d2vv = self.d2Integrate(q, w, "v", "v")  # [out, col, incr]  d dInt_v / d w
+        J_qq, J_qv = self.forward_dynamics_gradient(q, qd, u)
+        Minv = np.asarray(self.minv(q), dtype=np.float64)
+        I_n = np.eye(nv)
+        # Vgrad = d v_{k+1}/dz = [dt*J_qq | I + dt*J_qv | dt*Minv]  (nv, 3nv).
+        Vgrad = np.hstack([dt * np.asarray(J_qq, dtype=np.float64),
+                           I_n + dt * np.asarray(J_qv, dtype=np.float64),
+                           dt * Minv])
+        # t1 (gradient-column b restricted to q): dt * d2Int_qv contracted with
+        #    d w / dz[a] = dt * Vgrad[:, a]  -> dt * sum_c d2qv[o,b,c]*Vgrad[c,a].
+        H[:nv, :, qsl] += dt * np.einsum("obc,ca->oab", d2qv, Vgrad)
+        # t2: dt^2 * sum_{m,c} d2Int_vv[o,m,c]*Vgrad[c,a]*Vgrad[m,b].
+        H[:nv, :, :] += (dt * dt) * np.einsum("omc,ca,mb->oab", d2vv, Vgrad, Vgrad)
+        # t3: dt^2 * sum_m dIntegrate_v[o,m] * D2qdd[m,a,b].
+        H[:nv, :, :] += (dt * dt) * np.einsum("om,mab->oab", Jv, D2T)
         return H
 
     # ----- quadratic state / input cost (value, grad, GN-diag hess) -----
