@@ -654,9 +654,6 @@ class RBDReference(
         I_dot : numpy.ndarray
             6x6 time derivative of spatial inertia.
         """
-        A =  self.dual_cross_operator(v) @ I - I @ self.cross_operator(v)
-        scale_factor = 10**-15
-        A = A / scale_factor
         return self.dual_cross_operator(v) @ I - I @ self.cross_operator(v)
     
     def icrf(self, v):
@@ -745,10 +742,12 @@ class RBDReference(
             The 6xN matrix product.
         """
         result = np.zeros((6))
-        # Flatten S to 1-D so each S[k] is a scalar: a 6x1 subspace column
-        # arrives as shape (6,1), making S[k] a 1-element array. Passing that
-        # as the scalar `alpha` to mx1-mx6 triggers NumPy's "ndim>0 to scalar"
-        # DeprecationWarning (will error in a future NumPy) on every element write.
+        # Flatten S to 1-D so each S[k] is a true scalar: a 6x1 subspace column
+        # arrives as shape (6,1), so without this reshape S[k] would be a
+        # 1-element array. Passing that as the scalar `alpha` into mx1-mx6's
+        # per-element writes would raise NumPy's "Conversion of an array with
+        # ndim > 0 to a scalar is deprecated" DeprecationWarning (will error in
+        # a future NumPy). The reshape extracts genuine scalars and silences it.
         S = np.asarray(S).reshape(-1)
         if not S[0] == 0:
             result += self.mx1(vec, S[0])
