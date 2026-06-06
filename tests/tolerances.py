@@ -49,6 +49,11 @@ ALGORITHM_TOLERANCES = {
         atol=1e-4,
         note="The C2 centroidal dynamics derivatives (dh_dq / dhdot_dq / dhdot_dv) are central finite differences of the exact value layer against Pinocchio's analytic getCentroidalDynamicsDerivatives. dh_dq is a single FD (~1e-8); dhdot_dq / dhdot_dv compose a second nested FD for the Adot-qd bias, so they carry ~1e-4 absolute FD truncation/round-off, a few decades above the exact value-layer bucket. dhdot_da == A is exact and is checked under the tight 'centroidal' bucket.",
     ),
+    "dccrba": Tolerance(
+        rtol=1e-6,
+        atol=1e-7,
+        note="The ANALYTIC dCCRBA (Adot = dAg/dt and the dA_dq tensor, _dccrba_analytic: one world-frame sweep + spatial cross-product / inertia-derivative operators) matches pinocchio's exact pin.dccrba / computeCentroidalDynamicsDerivatives to ~1e-12 (relative ~1e-9 on the big humanoids where the world-frame inertia accumulation carries float64 round-off scaled by the large inertia magnitudes). The 4th-order-FD cross-check (dccrba_fd / cmm_time_variation_fd of the exact value layer) adds ~1e-10..1e-8 absolute FD truncation. This bucket is intentionally a few decades tighter than the nested-FD 'centroidal_grad' bucket — the analytic path has no nested FD. assert_close floors atol at rtol*max|expected|, so the per-element check scales with each robot's magnitude (no per-robot override needed for g1/h1_2).",
+    ),
     "inverse_dynamics_regressor": Tolerance(
         rtol=1e-6,
         atol=1e-7,

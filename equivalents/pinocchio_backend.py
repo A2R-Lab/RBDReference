@@ -601,6 +601,20 @@ class PinocchioModelAdapter:
             A = self._reduce_pin_matrix_to_project(A, axes_to_reduce=[(1, "v")])
         return normalize_matrix(A), normalize_vector(h)
 
+    def dccrba(self, q, qd):
+        """Time variation of the centroidal map `Adot = dAg/dt` (= pin.dccrba),
+        ordered [linear; angular] at the CoM in a world-aligned frame. For mimic
+        robots the v-axis (column) is folded into the mimicked column with the
+        URDF multiplier scaling, matching the project nv layout."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        Adot = np.asarray(pin.dccrba(self.model, self.data, q_pin, qd_pin), dtype=np.float64)
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            Adot = self._reduce_pin_matrix_to_project(Adot, axes_to_reduce=[(1, "v")])
+        return normalize_matrix(Adot)
+
     def centroidal_momentum(self, q, qd):
         import pinocchio as pin
 

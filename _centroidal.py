@@ -348,7 +348,146 @@ class _CentroidalMixin:
 
     # ---- dCCRBA: derivatives of the centroidal map A(q) itself ----
 
-    def dccrba(self, q, fd_step=1e-5):
+    def _dccrba_world_sweep(self, q, Xw=None):
+        """Shared backbone for the analytic dCCRBA. Runs ONE world-frame sweep
+        (the centroidal analogue of `idsva_so_world_frame`'s forward pass) and
+        returns the per-body world quantities the analytic tensor / Adot reuse:
+
+          Iw   : list of NB world-origin spatial inertias (Featherstone [ang;lin])
+          Jw   : list of NB world spatial Jacobians (6 x nv), alpha-folded, so
+                 `Jw[i] @ qd` is body i's world spatial velocity (== value layer)
+          units: list of per-(body, local-DOF) "motion units", each a dict
+                 {j (owner body), phi (6, alpha-scaled world motion column),
+                  vi (project v-slot)}.  Mimic-aware: several units may share a
+                 project v-slot (the mimic + its target both write the slot).
+          A0   : world-ORIGIN momentum map, A0 = sum_i Iw_i Jw_i  (6 x nv,
+                 [ang;lin]) BEFORE the CoM dual-shift / [lin;ang] reorder.
+          Jcom : CoM Jacobian (3 x nv) = A0[lin]/m_total = d(com)/dv.
+          com, m_total, root_v (set of floating-base root v-slots).
+
+        Every quantity matches `_ccrba_core` / `jacobian_com` to float64
+        rounding (same closed-form world inertias + body Jacobians)."""
+        r = self.robot
+        nv = r.get_num_vel()
+        NB = r.get_num_bodies()
+        if Xw is None:
+            Xw = self._world_transforms(q)
+        Iw = [self._link_world_spatial_inertia(j, Xw)[0] for j in range(NB)]
+        m_total, com = self._total_mass_and_com(q, Xw=Xw)
+
+        # Per-(body, local-DOF) world motion units, alpha-scaled exactly as
+        # `_body_spatial_jacobian_world` builds its columns.
+        units = []
+        for j in range(NB):
+            S = np.asarray(r.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            R_j = Xw[j][:3, :3]
+            p_j = Xw[j][:3, 3]
+            alpha = self._mimic_multiplier(j)
+            vinds = self._as_index_list(r.get_joint_index_v(j))
+            for c in range(S.shape[1]):
+                vi = vinds[c] if c < len(vinds) else vinds[-1]
+                aw = R_j @ S[:3, c]
+                lw = R_j @ S[3:6, c]
+                phi = np.empty(6, dtype=np.float64)
+                phi[:3] = alpha * aw
+                phi[3:] = alpha * (lw + np.cross(p_j, aw))
+                units.append({"j": j, "phi": phi, "vi": vi})
+
+        Jw = [np.zeros((6, nv), dtype=np.float64) for _ in range(NB)]
+        for i in range(NB):
+            anc_self = set(r.get_ancestors_by_id(i)) | {i}
+            for u in units:
+                if u["j"] in anc_self:
+                    Jw[i][:, u["vi"]] += u["phi"]
+        A0 = np.zeros((6, nv), dtype=np.float64)
+        for i in range(NB):
+            A0 += Iw[i] @ Jw[i]
+        Jcom = A0[3:, :] / m_total if m_total != 0.0 else A0[3:, :]
+        root_v = set(self._as_index_list(r.get_joint_index_v(0))) if r.floating_base else set()
+        return {
+            "Iw": Iw, "Jw": Jw, "units": units, "A0": A0, "Jcom": Jcom,
+            "com": com, "m_total": m_total, "root_v": root_v,
+        }
+
+    def _dccrba_analytic(self, q, Xw=None):
+        """Analytic dCCRBA tensor `dA_dq[:, k, i] = d A[:, k]/d q_i` (6 x nv x nv).
+
+        Derivation (all in the world-ORIGIN [ang;lin] frame, then CoM-shifted):
+          A0 = sum_i Iw_i Jw_i.  Differentiating w.r.t. tangent coord m,
+            * JOINT dof m: only the subtree it moves changes.  For each body i,
+                d Iw_i / d q_m = dot_matrix(Iw_i, phi_m)   (if m moves body i, i.e.
+                    m's owner is an ancestor-or-self of i; else 0), and
+                d (Jw_i col c) / d q_m = crm(phi_m) @ phi_c  (if m's owner is a
+                    STRICT ancestor of c's owner; else 0).
+              (`phi_m` = the alpha-scaled world motion column of dof m.)
+            * BASE dof m (floating root): a base twist rigidly transports the
+              whole world-origin momentum map, so d A0 / d q_m = crf(phi_m) @ A0
+              (`crf = dual_cross_operator`).  Verified to ~1e-10 vs FD of A0.
+          Then A_fs = Xstar A0 with Xstar[ang,lin] = -skew(com); its q-derivative
+          adds the CoM-MOTION term  d Xstar/d q_m = -skew(Jcom[:, m])  (Jcom the
+          CoM Jacobian).  Finally reorder rows [ang;lin] -> [lin;ang].
+
+        Mimic-aware: units share a project v-slot, so a mimic q_m drives every
+        unit on that slot (each with its own owner/alpha); the per-unit
+        contributions accumulate into the project column.
+
+        Validates vs the FD tensor to ~1e-7 (~1e-9 typical) and both pinocchio
+        contractions (Adot, dh_dq) to ~1e-12 (relative ~1e-9 on big robots)."""
+        r = self.robot
+        nv = r.get_num_vel()
+        NB = r.get_num_bodies()
+        sw = self._dccrba_world_sweep(q, Xw=Xw)
+        Iw, Jw, units, A0 = sw["Iw"], sw["Jw"], sw["units"], sw["A0"]
+        Jcom, com, root_v = sw["Jcom"], sw["com"], sw["root_v"]
+
+        crm = self.cross_operator
+        crf = self.dual_cross_operator
+        ancestors = [set(r.get_ancestors_by_id(i)) for i in range(NB)]
+        anc_self = [ancestors[i] | {i} for i in range(NB)]
+        units_by_vi = {}
+        for u in units:
+            units_by_vi.setdefault(u["vi"], []).append(u)
+
+        # d A0 / d q_m, assembled in the world-origin [ang;lin] frame.
+        dA0 = np.zeros((6, nv, nv), dtype=np.float64)
+        for m in range(nv):
+            if m in root_v:
+                # Base twist: the single root unit on this slot transports all of A0.
+                phim = units_by_vi[m][0]["phi"]
+                dA0[:, :, m] = crf(phim) @ A0
+                continue
+            for um in units_by_vi.get(m, ()):
+                jm = um["j"]
+                phim = um["phi"]
+                crmM = crm(phim)
+                for i in range(NB):
+                    block = np.zeros((6, nv), dtype=np.float64)
+                    if jm in anc_self[i]:
+                        block += self.dot_matrix(Iw[i], phim) @ Jw[i]
+                    # d Jw_i / d q_m : crm(phi_m) @ phi_c for units c BELOW m in i's chain
+                    dJi = np.zeros((6, nv), dtype=np.float64)
+                    for u2 in units:
+                        if u2["j"] in anc_self[i] and jm in ancestors[u2["j"]]:
+                            dJi[:, u2["vi"]] += crmM @ u2["phi"]
+                    block += Iw[i] @ dJi
+                    dA0[:, :, m] += block
+
+        # CoM dual-shift + its q-derivative (CoM-motion term) + [lin;ang] reorder.
+        Xstar = np.eye(6, dtype=np.float64)
+        S_com = _skew(com)
+        Xstar[:3, 3:] = -S_com
+        reorder = np.array([3, 4, 5, 0, 1, 2])
+        dA = np.zeros((6, nv, nv), dtype=np.float64)
+        for m in range(nv):
+            dXstar = np.zeros((6, 6), dtype=np.float64)
+            dXstar[:3, 3:] = -_skew(Jcom[:, m])
+            dA_fs = dXstar @ A0 + Xstar @ dA0[:, :, m]
+            dA[:, :, m] = dA_fs[reorder, :]
+        return dA
+
+    def dccrba(self, q):
         """Configuration derivative of the CMM: the rank-3 tensor
 
             dA_dq[:, k, i] = d A[:, k] / d q_i      (6 x nv x nv)
@@ -362,14 +501,21 @@ class _CentroidalMixin:
             Adot   = sum_i dA_dq[:, :, i] * qd[i]         (= d A / dt, pin.dccrba)
             dh_dq  = sum_k dA_dq[:, k, :] * qd[k]         (= d(A qd)/dq)
 
-        Built as a 4th-order central finite difference of the EXACT value-layer
+        Computed ANALYTICALLY (`_dccrba_analytic`): one world-frame sweep plus
+        spatial cross-product / inertia-derivative operators, mimic-aware and
+        valid for fixed- and floating-base. Matches the FD tensor to ~1e-7 and
+        both pinocchio contractions to ~1e-12 (relative ~1e-9 on big robots).
+        See `dccrba_fd` for the finite-difference cross-check."""
+        return self._dccrba_analytic(q)
+
+    def dccrba_fd(self, q, fd_step=1e-5):
+        """Finite-difference cross-check for `dccrba`: the same rank-3 tensor
+        `dA_dq[:, k, i]` built as a 4th-order central FD of the EXACT value-layer
         CMM `ccrba` along the Lie-group tangent (`self.integrate`), one stencil
-        per tangent coordinate. Float64, ~1e-9 vs a `pin.dccrba` / FD-of-ccrba
-        cross-check. The value layer it differences is exact (closed-form world
-        spatial inertias + body Jacobians), so this is the only FD in the chain;
-        a single 4th-order FD keeps it ~3 decades tighter than the nested-FD
-        `dhdot_dq` / `dhdot_dv` blocks. `copy=True` on each sampled `A` dodges
-        the pin-view aliasing trap (guide §6)."""
+        per tangent coordinate. The value layer it differences is exact, so this
+        is float64-accurate (~1e-9 vs `pin.dccrba`); kept as the independent
+        oracle the analytic path is validated against. `copy=True` on each
+        sampled `A` dodges the pin-view aliasing trap (guide §6)."""
         nv = self.robot.get_num_vel()
         dA_dq = np.zeros((6, nv, nv), dtype=np.float64)
         zero_v = np.zeros(nv, dtype=np.float64)
@@ -386,18 +532,29 @@ class _CentroidalMixin:
             ) / (12.0 * fd_step)
         return dA_dq
 
-    def cmm_time_variation(self, q, qd, fd_step=1e-5):
+    def cmm_time_variation(self, q, qd):
         """Time derivative of the centroidal map, `Adot = dA(q(t))/dt` (6 x nv),
         in the Pinocchio centroidal convention ([linear; angular] at the CoM,
         world-aligned). Matches `pin.dccrba(model, data, q, v)` and
-        `pin.computeCentroidalMapTimeVariation` to ~1e-9.
+        `pin.computeCentroidalMapTimeVariation` to ~1e-12 (relative ~1e-9 on big
+        robots).
 
-        `Adot = sum_i (dA/dq_i) qd_i`; computed directly as a 4th-order central
-        FD of the exact `ccrba` along `qd` (the Lie-group retract `self.integrate`)
-        rather than forming the full `dccrba` tensor, so it is O(nv) value-layer
-        evaluations. By construction `Adot @ qd == centroidal_bias` (the
-        `Adot qd` term of `hdot`) and `Adot @ qdd + (Adot qd)` is consistent with
+        Computed ANALYTICALLY as the qd-contraction of the exact dCCRBA tensor,
+        `Adot = sum_i (dA/dq_i) qd_i` (`_dccrba_analytic`), so it shares the
+        single world-frame sweep and is consistent by construction with both
+        `dccrba` contractions. `Adot @ qd == centroidal_bias` (the `Adot qd`
+        term of `hdot`) and `Adot @ qdd + (Adot qd)` matches
         `centroidal_momentum_time_variation`."""
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        dA = self._dccrba_analytic(q)
+        return np.einsum("abi,i->ab", dA, qd)
+
+    def cmm_time_variation_fd(self, q, qd, fd_step=1e-5):
+        """Finite-difference cross-check for `cmm_time_variation`: `Adot` as a
+        4th-order central FD of the exact `ccrba` along `qd` (the Lie-group
+        retract `self.integrate`), O(nv) value-layer evals (no full tensor).
+        Kept as the independent oracle the analytic `cmm_time_variation` is
+        validated against (~1e-9 vs `pin.dccrba`)."""
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
         zero_v = np.zeros(self.robot.get_num_vel(), dtype=np.float64)
 
