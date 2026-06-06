@@ -4187,3 +4187,62 @@ class RBDReference(
         daba_dvdv = -np.einsum('il,ljk->ijk', Minv, di2_dqd)
         daba_dtdq = -np.einsum('il,ljk->ijk', Minv, np.einsum('ilk,lj->ijk', dm_dq, Minv))
         return daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq
+
+    # ------------------------------------------------------------------
+    # Energy regressors (sysID): kinetic / potential energy linear in pi
+    # ------------------------------------------------------------------
+    # The kinetic and potential energies are each EXACTLY affine in the stacked
+    # standard inertial parameters pi = [pi_1; ...; pi_NB] (same 10-param/link
+    # GRiD basis as `inverse_dynamics_regressor`: pi_i = [m, h(3)=m*c,
+    # I_O(6)=[Ixx,Ixy,Ixz,Iyy,Iyz,Izz]]). These row regressors complete the
+    # regressor family next to the joint-torque regressor and cross-check vs
+    # pinocchio's `computeKineticEnergyRegressor` / `computePotentialEnergyRegressor`.
+
+    def kinetic_energy_regressor(self, q, qd):
+        """Kinetic-energy regressor y_KE (length 10*NB) with KE = y_KE . pi.
+
+        KE = sum_i 1/2 v_i^T I_i v_i is linear in each link's spatial inertia, so
+        the k-th column of link i is 1/2 v_i^T (dI_k) v_i with dI_k the k-th basis
+        spatial inertia (`_regressor._BASIS_I`). v_i is the link's spatial velocity
+        from the RNEA forward pass (body/local frame; the quadratic form is
+        frame-invariant so the local-frame v_i and local-frame I_i agree with the
+        world-frame value pinocchio reports). Param blocks are ordered by body id.
+        """
+        from ._regressor import _BASIS_I
+
+        q = self._normalize_q_input(q)
+        qd = self._normalize_v_input(qd)
+        NB = self.robot.get_num_bodies()
+        nv = self.robot.get_num_vel()
+        v, _a, _f = self.inverse_dynamics_fpass(q, qd, np.zeros(nv, dtype=np.float64))
+        Y = np.zeros(10 * NB, dtype=np.float64)
+        for i in range(NB):
+            vi = np.asarray(v[:, i], dtype=np.float64)
+            for k, dI in enumerate(_BASIS_I):
+                Y[10 * i + k] = 0.5 * float(vi @ (dI @ vi))
+        return Y
+
+    def potential_energy_regressor(self, q, GRAVITY=-9.81):
+        """Potential-energy regressor y_PE (length 10*NB) with PE = y_PE . pi.
+
+        PE = -sum_i m_i g . p_{com,i} = -sum_i g . (m_i p_i + R_i h_i) with
+        g = [0,0,GRAVITY], p_i / R_i the link-origin world position / rotation, and
+        h_i = m_i c_i the first mass moment. So per link the only nonzero columns
+        are: the mass column (-g . p_i) and the three first-moment columns
+        (-(R_i^T g), since g . (R_i h_i) = (R_i^T g) . h_i). The six inertia
+        columns are identically zero (PE is independent of the rotational inertia).
+        Matches the [0,0,GRAVITY] gravity convention used by `potential_energy`
+        and reuses the SAME mimic-aware homogeneous forward kinematics
+        (`_world_transforms`) as `_total_mass_and_com`, so y_PE . pi reproduces
+        `potential_energy` exactly.
+        """
+        NB = self.robot.get_num_bodies()
+        g = np.array([0.0, 0.0, GRAVITY], dtype=np.float64)
+        Xw = self._world_transforms(q)            # 4x4 homogeneous world transforms
+        Y = np.zeros(10 * NB, dtype=np.float64)
+        for i in range(NB):
+            R = Xw[i][:3, :3]                      # world<-body rotation
+            p = Xw[i][:3, 3]                       # body-origin world position
+            Y[10 * i + 0] = -float(g @ p)          # mass column
+            Y[10 * i + 1:10 * i + 4] = -(R.T @ g)  # first-moment (h) columns
+        return Y

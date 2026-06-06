@@ -678,18 +678,66 @@ class PinocchioModelAdapter:
         if project_body_joint_names is None:
             return normalize_matrix(Y)
         # Remap column blocks to the project body order + GRiD param basis.
+        return normalize_matrix(
+            self._remap_param_blocks_to_project(Y, project_body_joint_names)
+        )
+
+    def _remap_param_blocks_to_project(self, Y, project_body_joint_names):
+        """Remap the 10-param column blocks of a regressor from pin joint order
+        to the project body order + GRiD param basis (rows untouched).
+
+        Y has shape (rows, 10*njoints_pin); the project floating root maps to
+        pin's root_joint (id 1). Reused by the joint-torque / kinetic-energy /
+        potential-energy regressors.
+        """
+        Y = np.asarray(Y, dtype=np.float64)
+        if Y.ndim == 1:
+            Y = Y.reshape(1, -1)
         name2pinjid = {str(self.model.names[i]): i for i in range(self.model.njoints)}
-        # The floating root carries pin joint id 1 regardless of its URDF name.
         nb = len(project_body_joint_names)
         Y_out = np.zeros((Y.shape[0], 10 * nb), dtype=np.float64)
         for b, jname in enumerate(project_body_joint_names):
             pjid = name2pinjid.get(jname)
             if pjid is None:
-                # project floating-root body -> pin root_joint (id 1)
-                pjid = 1
+                pjid = 1  # project floating-root body -> pin root_joint
             block = Y[:, 10 * (pjid - 1):10 * (pjid - 1) + 10]
             Y_out[:, 10 * b:10 * b + 10] = block[:, self._PARAM_PERM]
-        return normalize_matrix(Y_out)
+        return Y_out
+
+    def kinetic_energy_regressor(self, q, qd, project_body_joint_names=None):
+        """Kinetic-energy regressor (length 10*NB) with KE = y . pi, from
+        pinocchio's `computeKineticEnergyRegressor`, remapped to the project body
+        order + GRiD param basis when `project_body_joint_names` is given."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        y = np.asarray(
+            pin.computeKineticEnergyRegressor(self.model, self.data, q_pin, qd_pin),
+            dtype=np.float64,
+        ).reshape(1, -1)
+        if project_body_joint_names is None:
+            return normalize_vector(y.reshape(-1))
+        return normalize_vector(
+            self._remap_param_blocks_to_project(y, project_body_joint_names).reshape(-1)
+        )
+
+    def potential_energy_regressor(self, q, project_body_joint_names=None):
+        """Potential-energy regressor (length 10*NB) with PE = y . pi, from
+        pinocchio's `computePotentialEnergyRegressor`, remapped to the project
+        body order + GRiD param basis when `project_body_joint_names` is given."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        y = np.asarray(
+            pin.computePotentialEnergyRegressor(self.model, self.data, q_pin),
+            dtype=np.float64,
+        ).reshape(1, -1)
+        if project_body_joint_names is None:
+            return normalize_vector(y.reshape(-1))
+        return normalize_vector(
+            self._remap_param_blocks_to_project(y, project_body_joint_names).reshape(-1)
+        )
 
     def inverse_dynamics_gradient(self, q, qd, qdd, f_ext=None):
         import pinocchio as pin

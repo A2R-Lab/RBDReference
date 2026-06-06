@@ -345,3 +345,64 @@ class _CentroidalMixin:
             dhdot_dv[:, i] = (bias_p - bias_m) / (2.0 * fd_step)
 
         return dh_dq, dhdot_dq, dhdot_dv, A
+
+    # ---- dCCRBA: derivatives of the centroidal map A(q) itself ----
+
+    def dccrba(self, q, fd_step=1e-5):
+        """Configuration derivative of the CMM: the rank-3 tensor
+
+            dA_dq[:, k, i] = d A[:, k] / d q_i      (6 x nv x nv)
+
+        i.e. the partial of every CMM column `k` with respect to every tangent
+        coordinate `i`, in the Pinocchio centroidal convention ([linear; angular]
+        at the CoM, world-aligned). This is the fundamental dCCRBA object the
+        downstream codegen consumes: it contracts with `qd` two different ways to
+        recover both first-order centroidal derivatives,
+
+            Adot   = sum_i dA_dq[:, :, i] * qd[i]         (= d A / dt, pin.dccrba)
+            dh_dq  = sum_k dA_dq[:, k, :] * qd[k]         (= d(A qd)/dq)
+
+        Built as a 4th-order central finite difference of the EXACT value-layer
+        CMM `ccrba` along the Lie-group tangent (`self.integrate`), one stencil
+        per tangent coordinate. Float64, ~1e-9 vs a `pin.dccrba` / FD-of-ccrba
+        cross-check. The value layer it differences is exact (closed-form world
+        spatial inertias + body Jacobians), so this is the only FD in the chain;
+        a single 4th-order FD keeps it ~3 decades tighter than the nested-FD
+        `dhdot_dq` / `dhdot_dv` blocks. `copy=True` on each sampled `A` dodges
+        the pin-view aliasing trap (guide §6)."""
+        nv = self.robot.get_num_vel()
+        dA_dq = np.zeros((6, nv, nv), dtype=np.float64)
+        zero_v = np.zeros(nv, dtype=np.float64)
+        for i in range(nv):
+            e = np.zeros(nv, dtype=np.float64)
+            e[i] = fd_step
+
+            def _A(scale):
+                A, _h, _m = self._ccrba_core(self.integrate(q, scale * e), zero_v)
+                return np.asarray(A, dtype=np.float64).copy()
+
+            dA_dq[:, :, i] = (
+                -_A(2.0) + 8.0 * _A(1.0) - 8.0 * _A(-1.0) + _A(-2.0)
+            ) / (12.0 * fd_step)
+        return dA_dq
+
+    def cmm_time_variation(self, q, qd, fd_step=1e-5):
+        """Time derivative of the centroidal map, `Adot = dA(q(t))/dt` (6 x nv),
+        in the Pinocchio centroidal convention ([linear; angular] at the CoM,
+        world-aligned). Matches `pin.dccrba(model, data, q, v)` and
+        `pin.computeCentroidalMapTimeVariation` to ~1e-9.
+
+        `Adot = sum_i (dA/dq_i) qd_i`; computed directly as a 4th-order central
+        FD of the exact `ccrba` along `qd` (the Lie-group retract `self.integrate`)
+        rather than forming the full `dccrba` tensor, so it is O(nv) value-layer
+        evaluations. By construction `Adot @ qd == centroidal_bias` (the
+        `Adot qd` term of `hdot`) and `Adot @ qdd + (Adot qd)` is consistent with
+        `centroidal_momentum_time_variation`."""
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        zero_v = np.zeros(self.robot.get_num_vel(), dtype=np.float64)
+
+        def _A(scale):
+            A, _h, _m = self._ccrba_core(self.integrate(q, scale * fd_step * qd), zero_v)
+            return np.asarray(A, dtype=np.float64).copy()
+
+        return (-_A(2.0) + 8.0 * _A(1.0) - 8.0 * _A(-1.0) + _A(-2.0)) / (12.0 * fd_step)
