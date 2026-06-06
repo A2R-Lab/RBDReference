@@ -23,20 +23,26 @@ Two independent oracles, deliberately separated so neither hides the other:
      `integrator_gradient`.
 
 WHY THE PER-ROBOT PIN BUCKETS WIDEN. The velocity rows are `dt * D2qdd`, and
-the q-q block of `D2qdd` is GRiD's *body-frame* `fdsva_so` second derivative.
-That body-frame second derivative equals pinocchio's `integrate`-tangent second
-derivative of qdd for go2 (~1e-9) but DIVERGES by a robot-dependent O(few)
-amount on more-jointed humanoids (g1 ~1.6e-3, h1_2 ~3.5 absolute on the q-q
-block) -- a pre-existing convention gap between GRiD's body-frame
-`idsva_so_body_frame`/`fdsva_so` and pinocchio's `computeABADerivatives`
-tangent, NOT introduced by this Hessian. It is invisible at first order (the
-gradients agree to 1e-13) and only shows up in the second derivative. For
-SI-Euler it also leaks into the *position* rows through the
+the q-q block of `D2qdd` is GRiD's `fdsva_so` second derivative. It equals
+pinocchio's for go2 (~1e-9) but DIVERGES on more-jointed humanoids (g1 ~1.6e-3,
+h1_2 ~3.5 absolute on the q-q block). DIAGNOSED (2026-06-06,
+diag_fdsva_so_qq_*): this is NOT an `fdsva_so`/`idsva_so` second-order bug and
+NOT a tangent/frame convention difference -- the decisive FD-of-GRiD-OWN-gradient
+test shows `fdsva_so` IS the exact 2nd derivative of GRiD's own first-order
+surface (h1_2: ~3.9e-5). The residual is the GRiD-vs-pinocchio `forward_dynamics`
+VALUE discrepancy, amplified by two differentiations, with a different root per
+robot: g1 (non-mimic) = a tiny GRiD `forward_dynamics` value diff (~1e-9 RELATIVE,
+float64 accumulation order), negligible for downstream; h1_2 = a `<mimic>`-joint
+PHYSICS-MODELING difference (GRiD vs pin model mimic differently; `|grid.fwd -
+pin.fwd|` up to 7.1) -- the same mimic-modeling gap tracked in the URDF/mimic
+backlog, NOT a derivative defect. First-order gradients agree to ~1e-13 (relative),
+so the gap is invisible there and the relative-tolerance equivalence tests pass.
+For SI-Euler it also leaks into the *position* rows through the
 `dt^2 * dIntegrate_v . D2qdd` chain term (h1_2 SI-Euler position rows ~2.6e-2).
-The pin buckets below track exactly that residual; the tight
-self-consistency check (oracle 2) is the gate that the analytic is the correct
-derivative of GRiD's own surface. Mimic robots are skipped (reduced-model
-pin dim mismatch).
+The pin buckets below absorb exactly that inherited residual; the tight
+self-consistency check (oracle 2) is the real gate that the analytic is the
+correct derivative of GRiD's own surface. (fr3 and other reduced-model mimic
+robots whose pin nv mismatch are skipped.)
 """
 
 from __future__ import annotations
