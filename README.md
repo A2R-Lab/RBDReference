@@ -47,6 +47,24 @@ outputs = rbd.ALGORITHM(inputs)
 | End-effector pose | `ee = rbd.end_effector_pose(q, ee_joint_names=None, ee_offsets=None)` |
 | EE pose gradient (Jacobian) | `dee = rbd.end_effector_pose_gradient(q, ee_joint_names=None, ee_offsets=None)` |
 | EE pose Hessian | `d2ee = rbd.end_effector_pose_hessian(q, offsets=None, ee_joint_names=None)` |
+| General-frame geometric Jacobian | `J = rbd.frame_jacobian(q, frame_name, reference_frame)` (`LOCAL`/`WORLD`/`LOCAL_WORLD_ALIGNED`) |
+| Frame Jacobian time-variation (J̇) | `Jdot = rbd.frame_jacobian_dot(q, qd, frame_name, reference_frame)` |
+| Operational-space (OSC) inertia | `Lambda = rbd.osc_inertia(q)` = `(J·M⁻¹·Jᵀ)⁻¹` |
+
+### Energy / centroidal / regressors
+
+| Algorithm | Signature |
+|---|---|
+| Generalized gravity / nonlinear effects | `g = rbd.generalized_gravity(q, GRAVITY=-9.81)`, `c = rbd.nonlinear_effects(q, qd, GRAVITY=-9.81)` |
+| Kinetic / potential / mechanical energy | `rbd.kinetic_energy(q, qd)`, `rbd.potential_energy(q, GRAVITY=-9.81)`, `rbd.mechanical_energy(...)` |
+| Coriolis matrix `C(q,q̇)` | `C = rbd.coriolis_matrix(q, qd)` (with `C·q̇ + g = nonlinear_effects`) |
+| CoM + CoM Jacobian | `(p_com, J_com) = rbd.com(q)`, `rbd.jacobian_com(q)` |
+| CCRBA / centroidal momentum | `(A, h) = rbd.ccrba(q, qd)`, `rbd.centroidal_momentum(q, qd)` |
+| dCCRBA (∂A/∂q tensor) | `dA = rbd.dccrba(q)` (analytic; replaces the prior finite-difference oracle) |
+| CMM time variation (Ȧ) | `Adot = rbd.cmm_time_variation(q, qd)` = `Σ_i (∂A/∂q_i)·q̇_i` |
+| Inverse-dynamics regressor | `Y = rbd.inverse_dynamics_regressor(q, qd, qdd=None)` (`τ = Y·π`) |
+| Kinetic / potential energy regressors | `rbd.kinetic_energy_regressor(q, qd)`, `rbd.potential_energy_regressor(q, GRAVITY=-9.81)` (`E = y·π`, length `10·NB`) |
+| Plant / cost / barrier reference | `rbd.plant_step(...)` (+ gradient / hessian), quadratic state/input costs, `ee_pos_cost`, `com_cost`, `momentum_cost`, joint position/velocity/torque log-barriers |
 
 ### Second-order
 
