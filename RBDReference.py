@@ -2983,18 +2983,15 @@ class RBDReference(
         if normalize_input:
             q = self._normalize_q_input(q)
         if self.robot.floating_base:
-            # A spherical/planar joint MID-CHAIN under a floating ROOT would hit
-            # the float()-collapsed H-assembly below (correct only for 1-DOF
-            # columns). The fixed-base path handles multi-column non-root S
-            # (np.ix_ block assembly); the floating-root + multi-DOF-mid-chain
-            # combination is the deferred Tier-C generalization (Phase-6 item 4).
-            # Fail loudly rather than silently return a wrong M.
-            if self._robot_has_multidof_nonfloating_joint():
-                raise NotImplementedError(
-                    "CRBA for a multi-DOF (spherical/planar) mid-chain joint under "
-                    "a FLOATING base is not yet implemented (the fixed-base path is; "
-                    "see docs/open-tasks/phase6_joint_types_plan_REFRESH.md item 4)."
-                )
+            # Floating-base CRBA via the SAME generalized block machinery as the
+            # fixed-base path below. The free-flyer ROOT (jid 0) is treated as an
+            # ordinary 6-DOF joint whose motion subspace S = get_S_by_id(0) is the
+            # permuted identity [[0,I],[I,0]] that already encodes Pinocchio's
+            # [v_lin; omega] root ordering -- so S^T (chain) writes the correctly-
+            # ordered root block and root<->joint cross terms with NO post-hoc
+            # [3,4,5,0,1,2] reorder. A spherical/planar MID-CHAIN joint is then
+            # just a second multi-column S (6xN) handled by the same np.ix_ block
+            # writes as the root, validated vs pin free-flyer+JointModelSpherical.
             NB = self.robot.get_num_bodies()
             n = self.robot.get_num_vel()
             H = np.zeros((n, n))
@@ -3002,68 +2999,48 @@ class RBDReference(
             IC = copy.deepcopy(
                 self.robot.get_Imats_dict_by_id()
             )  # composite inertia calculation
-            # Mimic-aware floating-base CRBA: bodies still chain their
-            # composite inertia upward through the body's local transform
-            # (use q_for_joint so mimic joints see the scaled+offset block).
-            # H is assembled with v-space indices via get_joint_index_v and
-            # joint contributions are scaled by their mimic multipliers
-            # (1.0 for non-mimic joints) and accumulated with +=.
+            # Pass 1: compose each body's composite inertia up through its own
+            # local transform (mimic-aware q_for_joint so a mimic joint sees the
+            # scaled+offset coordinate). Root (jid 0) has parent -1 and is skipped.
             for ind in range(NB - 1, -1, -1):
                 parent_ind = self.robot.get_parent_id(ind)
-                if ind > 0:
+                if parent_ind != -1:
                     _q = self.robot.q_for_joint(ind, q)
                     Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
-                    S = self.robot.get_S_by_id(ind)
                     IC[parent_ind] = IC[parent_ind] + np.matmul(
                         np.matmul(Xmat.T, IC[ind]), Xmat
                     )
-                    alpha_i = self._mimic_multiplier(ind)
-                    vi = self.robot.get_joint_index_v(ind)
-                    fh = np.matmul(IC[ind], S)
-                    diag = alpha_i * alpha_i * np.matmul(S.T, fh)
-                    H[vi, vi] += float(np.asarray(diag).reshape(-1)[0])
-                    j = ind
-                    while self.robot.get_parent_id(j) > 0:
-                        _qj = self.robot.q_for_joint(j, q)
-                        Xmat = self.robot.get_Xmat_Func_by_id(j)(_qj)
-                        fh = np.matmul(Xmat.T, fh)
-                        j = self.robot.get_parent_id(j)
-                        S = self.robot.get_S_by_id(j)
-                        alpha_j = self._mimic_multiplier(j)
-                        vj = self.robot.get_joint_index_v(j)
-                        contribution = alpha_i * alpha_j * float(
-                            np.asarray(np.matmul(fh.T, S)).reshape(-1)[0]
-                        )
-                        # Symmetric: both halves contribute to (v_i, v_j) and
-                        # (v_j, v_i); when v_i == v_j (mimic-ancestor share)
-                        # the cell correctly accumulates twice.
-                        H[vi, vj] += contribution
-                        H[vj, vi] += contribution
-                    # # treat floating base 6 dof joint
-                    _qroot = self.robot.q_for_joint(j, q)
-                    Xmat = self.robot.get_Xmat_Func_by_id(j)(_qroot)
-                    S = np.eye(6)
-                    fh = np.matmul(Xmat.T, fh)
-                    cross = alpha_i * np.matmul(fh.T, S).reshape(-1)
-                    H[vi, :6] += cross
-                    H[:6, vi] += cross
-                else:
-                    ind = 0
-                    _q = self.robot.q_for_joint(ind, q)
-                    Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
-                    S = self.robot.get_S_by_id(ind)
-                    parent_ind = self.robot.get_parent_id(ind)
-                    fh = np.matmul(IC[ind], S)
-                    H[:6, :6] = np.matmul(S.T, fh)
 
-            # keep the user-facing floating-base convention in one place:
-            # the root block already matches the Pinocchio-style ordering,
-            # but the root-to-joint cross terms are still accumulated in the
-            # internal spatial row order [wx, wy, wz, vx, vy, vz].
-            root_order = [3, 4, 5, 0, 1, 2]
-            root_cross = H[:6, 6:].copy()
-            H[:6, 6:] = root_cross[root_order, :]
-            H[6:, :6] = np.transpose(H[:6, 6:])
+            # Pass 2: H[v_i, v_j] = alpha_i alpha_j S_i^T (chain X^T) S_j, assembled
+            # as full (N_i x N_j) blocks via np.ix_. For 1-DOF joints these are
+            # 1x1 and reduce to the historical scalar; for the 6-DOF root and any
+            # 3-DOF spherical/planar joint they place the multi-column block. The
+            # chain walk runs to the root (parent_id > -1) so root<->joint coupling
+            # is produced by the same loop (no separate root special-case).
+            for ind in range(NB):
+                vi = self._as_index_list(self.robot.get_joint_index_v(ind))
+                alpha_i = self._mimic_multiplier(ind)
+                S = self.robot.get_S_by_id(ind)
+                fh = np.matmul(IC[ind], S)
+                diag = (alpha_i * alpha_i) * np.matmul(S.T, fh)
+                H[np.ix_(vi, vi)] += np.asarray(diag, dtype=np.float64).reshape(len(vi), len(vi))
+                j = ind
+                while self.robot.get_parent_id(j) > -1:
+                    _qj = self.robot.q_for_joint(j, q)
+                    Xmat = self.robot.get_Xmat_Func_by_id(j)(_qj)
+                    fh = np.matmul(Xmat.T, fh)
+                    j = self.robot.get_parent_id(j)
+                    S = self.robot.get_S_by_id(j)
+                    alpha_j = self._mimic_multiplier(j)
+                    vj = self._as_index_list(self.robot.get_joint_index_v(j))
+                    block = (alpha_i * alpha_j) * np.asarray(
+                        np.matmul(S.T, fh), dtype=np.float64
+                    ).reshape(len(vj), len(vi))
+                    # Off-diagonal chain pair (ind, j): both halves contribute to
+                    # H[v_i, v_j] and H[v_j, v_i]. When v_i == v_j (mimic-ancestor
+                    # sharing a slot) both writes land in the same cell.
+                    H[np.ix_(vj, vi)] += block
+                    H[np.ix_(vi, vj)] += block.T
         else:
             # # Fixed base implmentation of CRBA
             NB = self.robot.get_num_bodies()
