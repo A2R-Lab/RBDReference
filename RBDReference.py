@@ -21,13 +21,21 @@ class RBDReference(
     _CentroidalMixin,
     _RegressorMixin,
 ):
-    def __init__(self, robotObj):
+    def __init__(self, robotObj, use_joint_dynamics=False):
         """Initialize RBDReference with a robot object.
 
         Parameters
         ----------
         robotObj : URDFparser
             An instance of the URDFparser class.
+        use_joint_dynamics : bool, optional
+            When True, the RNEA/ABA value path applies the joint-local
+            ``<dynamics damping>`` / ``<dynamics friction>`` bias
+            (tau += damping*qd + friction*sign(qd)). DEFAULT False to stay
+            consistent with bare Pinocchio's `pin.rnea`/`pin.aba`, which IGNORE
+            `model.damping`/`model.friction` in the value path — making this the
+            authoritative-oracle-preserving default. Mirror of the existing
+            opt-in `USE_VELOCITY_DAMPING` on the id-gradient side.
 
         Returns
         -------
@@ -35,6 +43,7 @@ class RBDReference(
             None
         """
         self.robot = robotObj # instance of Robot Object class created by URDFparser
+        self.use_joint_dynamics = use_joint_dynamics
         self._spatial_xmat_derivative_func_cache = {}
         self._spatial_xmat_second_derivative_func_cache = {}
 
@@ -2030,6 +2039,42 @@ class RBDReference(
 
         return (v, a, f)
 
+    def _joint_dynamics_bias(self, qd):
+        """Per-v-slot joint-dynamics bias tau += damping*qd + friction*sign(qd).
+
+        Viscous damping and Coulomb friction are joint-local generalized forces
+        that oppose motion. They are returned as an nv-vector added to the RNEA
+        bias (inverse_dynamics) and subtracted from the available torque in ABA.
+
+        Returns the zero vector when no joint declares damping/friction (the
+        common case), so this is numerically a no-op there. `qd` is the
+        already-normalized internal nv-velocity vector.
+        """
+        n = self.robot.get_num_vel()
+        bias = np.zeros(n)
+        if not self.use_joint_dynamics:
+            return bias
+        has_damping = self.robot.robot_has_joint_damping()
+        has_friction = self.robot.robot_has_joint_friction()
+        if not (has_damping or has_friction):
+            return bias
+        # Iterate bodies and fold each joint's coefficient into its v-slot.
+        # Mimic joints share their target's slot; their damping/friction add
+        # into that shared slot (scaled by the mimic multiplier, matching the
+        # alpha-weighted reduction used throughout the reduced-model path).
+        for jid in range(self.robot.get_num_bodies()):
+            b = float(self.robot.get_damping_by_id(jid)) if has_damping else 0.0
+            fr = float(self.robot.get_friction_by_id(jid)) if has_friction else 0.0
+            if b == 0.0 and fr == 0.0:
+                continue
+            idx = self.robot.get_joint_index_v(jid)
+            alpha = self._mimic_multiplier(jid)
+            idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+            for k in idx_list:
+                qd_k = qd[k]
+                bias[k] += alpha * (b * qd_k + fr * np.sign(qd_k))
+        return bias
+
     def inverse_dynamics_bpass(self, q, f):
         """Perform the backward pass of the Recursive Newton-Euler Algorithm.
 
@@ -2108,6 +2153,9 @@ class RBDReference(
         (v, a, f) = self.inverse_dynamics_fpass(q, qd, qdd, GRAVITY, f_ext=f_ext)
         # backward pass
         (c, f) = self.inverse_dynamics_bpass(q, f)
+        # joint-local viscous damping + Coulomb friction bias (no-op when the
+        # robot declares neither; gated inside the helper)
+        c = c + self._joint_dynamics_bias(qd)
         if public_output:
             c = self._denormalize_v_output(c)
         return (c, v, a, f)
@@ -2593,6 +2641,10 @@ class RBDReference(
             )
             qdd = Minv @ (tau - bias)
             return self._denormalize_v_output(qdd)
+        # joint-local viscous damping + Coulomb friction reduce the torque
+        # available to accelerate: qdd = Minv*(tau - rnea_bias - dyn_bias).
+        # No-op (zero vector) when no joint declares damping/friction.
+        dyn_bias = self._joint_dynamics_bias(qd)
         if self.robot.floating_base:
             # allocate memory. see docs/open-tasks/notes.md (RBDReference.py:2158)
             n = len(qd)
@@ -2663,7 +2715,7 @@ class RBDReference(
 
                 U[:, inds_v] = np.squeeze(np.matmul(IA[ind], S))
                 d[ind] = np.matmul(np.transpose(S), U[:, inds_v])
-                u[inds_v] = tau[inds_v] - (np.matmul(S.T, pA[:, ind])) - (np.matmul(U[:, inds_v].T, c[:, ind]))
+                u[inds_v] = tau[inds_v] - dyn_bias[inds_v] - (np.matmul(S.T, pA[:, ind])) - (np.matmul(U[:, inds_v].T, c[:, ind]))
 
                 if parent_ind != -1:
                     U[:, inds_v] = np.matmul(Xmat.T, U[:, inds_v]) # spatial edit
@@ -2767,7 +2819,7 @@ class RBDReference(
 
                 U[:,ind] = np.squeeze(np.array(np.matmul(IA[:,:,ind],S)))
                 d[ind] = np.matmul(np.transpose(S),U[:,ind])
-                u[ind] = tau[ind] - np.matmul(np.transpose(S),pA[:,ind])
+                u[ind] = tau[ind] - dyn_bias[ind] - np.matmul(np.transpose(S),pA[:,ind])
 
                 if parent_ind != -1:
 
