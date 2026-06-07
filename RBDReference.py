@@ -258,83 +258,142 @@ class RBDReference(
         one_minus_cos = (1.0 - np.cos(theta)) / (theta * theta)
         return np.eye(3) + sin_t * Px + one_minus_cos * (Px @ Px)
 
+    def _spherical_retract(self, quat_xyzw, omega_dt):
+        """SO(3) retract of a spherical joint's unit quaternion:
+        q_new = q ⊗ exp(½·omega_dt), renormalized. Reuses the floating-base
+        quaternion primitives (`_quat_exp_from_half_omega`, `_quat_mul_xyzw`)
+        so there is ONE quaternion-exp implementation. `omega_dt` is the
+        body-frame angular increment (Pinocchio JointModelSpherical v ordering).
+        """
+        delta_quat = self._quat_exp_from_half_omega(0.5 * np.asarray(omega_dt))
+        return self._normalize_xyzw_quaternion(
+            self._quat_mul_xyzw(np.asarray(quat_xyzw, dtype=np.float64), delta_quat)
+        )
+
+    def _joint_retract_specs(self):
+        """Yield (jtype, q_slice, v_slice) for each joint that needs a special
+        (non-vector-add) retract: the floating ROOT (SE(3), 7q/6v prefix) and
+        every SPHERICAL joint (SO(3), 4q/3v block). All other joints retract by
+        plain vector add and are handled by the q+v_dt fallback.
+        """
+        specs = []
+        for joint in self.robot.get_joints_ordered_by_id():
+            jid = joint.get_id()
+            jtype = getattr(joint, "jtype", None)
+            if self.robot.floating_base and jid == 0:
+                specs.append(("floating",
+                              self._as_index_list(self.robot.get_joint_index_q(jid)),
+                              self._as_index_list(self.robot.get_joint_index_v(jid))))
+            elif jtype == "spherical" and not getattr(joint, "is_mimic", False):
+                specs.append(("spherical",
+                              self._as_index_list(self.robot.get_joint_index_q(jid)),
+                              self._as_index_list(self.robot.get_joint_index_v(jid))))
+        return specs
+
     def integrate(self, q, v_dt):
         """Lie-group retract: q_new = q ⊕ v_dt.
 
-        Matches Pinocchio's `pin.integrate(model, q, v_dt)` for both fixed-base
-        and free-flyer + revolute joint robots (the only configurations in our
-        manifest). For fixed-base this is just `q + v_dt`; for floating-base
-        the first 6 v_dt components drive an SE(3) exponential update of the
-        position+quaternion prefix and the remainder is a vector add.
+        Per-joint dispatch matching Pinocchio's `pin.integrate(model, q, v_dt)`:
+          - vector-space joints (revolute/prismatic/...): q_new = q + v_dt.
+          - floating ROOT: the 7q/6v prefix drives an SE(3) exponential update
+            of the position + xyzw-quaternion.
+          - SPHERICAL joint: its 4q (unit quaternion) / 3v block drives an SO(3)
+            quaternion exponential, q_new = q ⊗ exp(½·omega_dt).
 
         Convention (user-facing, matches Pinocchio):
-          q     = [pos(3), quat_xyzw(4), joint_q...]    size nq
-          v_dt  = [v_lin*dt(3), omega*dt(3), joint_v*dt...]  size nv
-          q_new is in the same convention as q.
+          q     = [..., pos(3), quat_xyzw(4), ..., joint_q, ...]    size nq
+          v_dt  = [..., v_lin*dt(3), omega*dt(3), ..., joint_v*dt, ...]  size nv
+          q_new is in the same convention as q. Quaternion convention: xyzw.
         """
         q = np.asarray(q, dtype=np.float64).copy()
         v_dt = np.asarray(v_dt, dtype=np.float64)
-        if not self.robot.floating_base:
+        specs = self._joint_retract_specs()
+        if not specs:
             return q + v_dt
-        # Free-flyer prefix:
-        rho = v_dt[0:3]   # v_lin * dt   (local/body frame)
-        phi = v_dt[3:6]   # omega * dt   (local/body frame)
-        # SE(3) exp returns local-frame (R_delta, p_delta).
-        V = self._so3_V_matrix(phi)
-        p_delta_local = V @ rho
-        delta_quat = self._quat_exp_from_half_omega(0.5 * phi)
-        # T_new = T_old * exp(twist_dt):
-        #   R_new = R_old * R_delta;  p_new = p_old + R_old * p_delta_local
-        R_old = self._rotation_from_quat_xyzw(q[3:7])
-        q_pos_new = q[0:3] + R_old @ p_delta_local
-        q_quat_new = self._normalize_xyzw_quaternion(self._quat_mul_xyzw(q[3:7], delta_quat))
-        q_joints_new = q[7:] + v_dt[6:]
-        return np.concatenate([q_pos_new, q_quat_new, q_joints_new])
+        # Start from the plain vector add, then OVERWRITE each manifold block.
+        q_new = q.copy()
+        # Vector-add every v-slot into its q-slot; manifold blocks below replace
+        # their own q-block (the floating quat/pos and each spherical quat).
+        for joint in self.robot.get_joints_ordered_by_id():
+            jid = joint.get_id()
+            if self.robot.floating_base and jid == 0:
+                continue
+            if getattr(joint, "jtype", None) == "spherical" and not getattr(joint, "is_mimic", False):
+                continue
+            iq = self._as_index_list(self.robot.get_joint_index_q(jid))
+            iv = self._as_index_list(self.robot.get_joint_index_v(jid))
+            q_new[iq] = q[iq] + v_dt[iv]
+        for jtype, iq, iv in specs:
+            if jtype == "floating":
+                # SE(3) free-flyer prefix (Pinocchio v_dt order [v_lin; omega]).
+                rho = v_dt[iv][0:3]
+                phi = v_dt[iv][3:6]
+                V = self._so3_V_matrix(phi)
+                p_delta_local = V @ rho
+                R_old = self._rotation_from_quat_xyzw(q[iq][3:7])
+                q_new[iq[0:3]] = q[iq][0:3] + R_old @ p_delta_local
+                q_new[iq[3:7]] = self._spherical_retract(q[iq][3:7], phi)
+            else:  # spherical
+                q_new[iq] = self._spherical_retract(q[iq], v_dt[iv])
+        return q_new
 
     def dIntegrate(self, q, v_dt, with_respect_to):
         """Return the (nv, nv) Jacobian of `integrate(q, v_dt)` in tangent
-        space. `with_respect_to` is 'q' or 'v' (matching Pinocchio's
-        pin.ARG0 / pin.ARG1 — ARG1 is the Jacobian w.r.t. the v_dt argument,
-        not w.r.t. v itself).
+        space. `with_respect_to` is 'q' or 'v' (Pinocchio's ARG0 / ARG1 — ARG1
+        is the Jacobian w.r.t. the v_dt argument, not v itself).
 
-        Free-flyer block uses (in Pinocchio v_dt order [rho; phi] = [v_lin*dt; omega*dt]):
-          ARG_q : Ad(exp(-v_dt))  — SE(3) adjoint of the inverse exponential
-          ARG_v : SE(3) right-Jacobian J_r(v_dt) — with the Q(rho, phi) coupling
-        Revolute joint block is identity for both. For fixed-base this
-        collapses to identity overall.
+        Block-diagonal per joint:
+          - vector-space joints: identity.
+          - floating ROOT (Pinocchio order [v_lin; omega]):
+              ARG_q : Ad(exp(-v_dt))  — SE(3) adjoint of the inverse exponential
+              ARG_v : SE(3) right-Jacobian J_r(v_dt) with the Q(rho,phi) coupling
+          - SPHERICAL joint (omega-only SO(3) restriction of the free-flyer):
+              ARG_q : R_inv = exp(-omega_dt)
+              ARG_v : J_r(omega_dt)  (SO(3) right Jacobian)
         """
-        del q  # unused for the closed-form free-flyer + revolute case
+        del q  # unused for the closed-form retracts
         nv = self.robot.get_num_vel()
         J = np.eye(nv)
-        if not self.robot.floating_base:
-            return J
         v_dt = np.asarray(v_dt, dtype=np.float64)
-        rho = v_dt[0:3]   # v_lin * dt   (Pinocchio order: linear first)
-        phi = v_dt[3:6]   # omega * dt
+        for jtype, iq, iv in self._joint_retract_specs():
+            if jtype == "floating":
+                rho = v_dt[iv][0:3]
+                phi = v_dt[iv][3:6]
+                blk = self._se3_dintegrate_block(rho, phi, with_respect_to)
+                ix = np.ix_(iv, iv)
+                J[ix] = blk
+            else:  # spherical: omega-only SO(3) restriction
+                phi = v_dt[iv]  # omega * dt
+                ix = np.ix_(iv, iv)
+                if with_respect_to == "q":
+                    J[ix] = self._so3_exp(-phi)
+                elif with_respect_to == "v":
+                    J[ix] = self._so3_right_jacobian(phi)
+                else:
+                    raise ValueError("with_respect_to must be 'q' or 'v'")
+        return J
+
+    def _se3_dintegrate_block(self, rho, phi, with_respect_to):
+        """The 6x6 free-flyer dIntegrate block (Pinocchio order [v_lin; omega])."""
+        blk = np.eye(6)
         if with_respect_to == "q":
-            # exp(-v_dt) = (R_inv, p_inv) where R_inv = exp(-phi),
-            #             p_inv = V(-phi) @ (-rho) = -V(-phi) @ rho.
             R_inv = self._so3_exp(-phi)
             V_neg = self._so3_V_matrix(-phi)
             p_inv = -V_neg @ rho
-            # SE(3) Adjoint: [[R, [p]_x R], [0, R]]  in Pinocchio order [v_lin, omega].
             P_inv_x = self._so3_skew(p_inv)
-            J[0:3, 0:3] = R_inv
-            J[0:3, 3:6] = P_inv_x @ R_inv
-            J[3:6, 0:3] = 0.0
-            J[3:6, 3:6] = R_inv
-            return J
+            blk[0:3, 0:3] = R_inv
+            blk[0:3, 3:6] = P_inv_x @ R_inv
+            blk[3:6, 0:3] = 0.0
+            blk[3:6, 3:6] = R_inv
+            return blk
         if with_respect_to == "v":
-            # SE(3) right-Jacobian J_r(v_dt) in Pinocchio order [v_lin, omega]:
-            #   [[J_r(phi),  Q(rho, phi)],
-            #    [0,          J_r(phi)  ]]
             J_r = self._so3_right_jacobian(phi)
             Q = self._se3_Q_block(rho, phi)
-            J[0:3, 0:3] = J_r
-            J[0:3, 3:6] = Q
-            J[3:6, 0:3] = 0.0
-            J[3:6, 3:6] = J_r
-            return J
+            blk[0:3, 0:3] = J_r
+            blk[0:3, 3:6] = Q
+            blk[3:6, 0:3] = 0.0
+            blk[3:6, 3:6] = J_r
+            return blk
         raise ValueError("with_respect_to must be 'q' or 'v'")
 
     def d2Integrate(self, q, v_dt, arg1, arg2, fd_step=1e-3):
@@ -1970,6 +2029,43 @@ class RBDReference(
             return float(joint.get_mimic_offset())
         return 0.0
 
+    @staticmethod
+    def _Sq(S, qvec):
+        """Project a joint coordinate-rate vector through the motion subspace S.
+
+        Returns the spatial motion 6-vector ``S @ qvec`` for ANY joint:
+
+        - 1-DOF cardinal/skew joint: ``S`` is a flat 6-vector and ``qvec`` is a
+          scalar, so this is the elementwise ``S * qvec`` (a 6-vector).
+        - Multi-DOF joint (floating root 6x6, spherical 6x3, planar 6x3): ``S``
+          is a 6xN matrix and ``qvec`` is an N-vector, so this is the true
+          matrix-vector product (a 6-vector).
+
+        Unifies the previous floating-root-only ``matmul`` special-case so any
+        mid-chain multi-column joint (spherical/planar) gets the correct
+        contraction instead of a broadcast. Always returns a flat (6,) array.
+        """
+        S = np.asarray(S, dtype=np.float64)
+        qvec = np.asarray(qvec, dtype=np.float64)
+        if S.ndim == 2 and S.shape[1] > 1:
+            return (S @ qvec.reshape(-1)).reshape(6)
+        return (S.reshape(6) * float(qvec)).reshape(6)
+
+    def _robot_has_multidof_nonfloating_joint(self):
+        """True if any NON-root joint has dof>1 (spherical/planar mid-chain).
+
+        The floating root (jid 0) is excluded: its 6-DOF block is handled by the
+        established floating-base recursion. Used to route fixed-base ABA through
+        the reduced-model identity (its scalar-only recursion can't handle a
+        multi-column motion subspace).
+        """
+        for joint in self.robot.get_joints_ordered_by_id():
+            if joint.get_id() == 0 and self.robot.floating_base:
+                continue
+            if joint.get_num_dof() > 1:
+                return True
+        return False
+
     def inverse_dynamics_fpass(self, q, qd, qdd=None, GRAVITY=-9.81, f_ext=None):
         """Perform the forward pass of the Recursive Newton-Euler Algorithm.
 
@@ -2018,17 +2114,13 @@ class RBDReference(
             mimic_scale = self._mimic_multiplier(curr_id)
             _qd = mimic_scale * qd[inds_v]
 
-            if self.robot.floating_base and curr_id == 0:
-                vJ = np.matmul(S, np.asarray(_qd, dtype=np.float64).reshape(-1, 1))
-            else: vJ = S * _qd
-            v[:, curr_id] += np.squeeze(np.array(vJ))  # reduces shape to (6,) matching v[:,curr_id]
+            vJ = self._Sq(S, _qd)
+            v[:, curr_id] += vJ
             a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
             if qdd is not None:
                 _qdd = mimic_scale * qdd[inds_v]
-                if self.robot.floating_base and curr_id == 0:
-                    aJ = np.matmul(S, np.asarray(_qdd, dtype=np.float64).reshape(-1, 1))
-                else: aJ = S * _qdd
-                a[:, curr_id] += np.squeeze(np.array(aJ))  # reduces shape to (6,) matching a[:,curr_id]
+                aJ = self._Sq(S, _qdd)
+                a[:, curr_id] += aJ
             # compute f
             Imat = self.robot.get_Imat_by_id(curr_id)
             f[:, curr_id] = np.matmul(Imat, a[:, curr_id]) + self.vxIv(v[:, curr_id], Imat)
@@ -2641,6 +2733,25 @@ class RBDReference(
             )
             qdd = Minv @ (tau - bias)
             return self._denormalize_v_output(qdd)
+        # Multi-DOF non-floating joint (spherical/planar mid-chain): the in-place
+        # ABA recursion below is written for SCALAR 1-DOF joints (per-body U, d,
+        # q[ind]/qd[ind] scalar indexing). Rather than re-derive the multi-column
+        # articulated-inertia recursion, use the equivalent reduced-model forward
+        # dynamics qdd = M^{-1} (tau - rnea_bias) (with f_ext folded into the
+        # bias). M (crba) and the RNEA bias are already multi-column-correct, so
+        # this is exact. The cardinal 1-DOF fixed-base path below is untouched.
+        if self._robot_has_multidof_nonfloating_joint():
+            n = len(qd)
+            bias = self.inverse_dynamics(
+                q, qd, np.zeros(n),
+                GRAVITY=GRAVITY,
+                f_ext=f_ext,
+                public_output=False,
+                normalize_input=False,
+            )[0]
+            M = self.crba(q, normalize_input=False)
+            qdd = np.linalg.solve(M, tau - bias)
+            return self._denormalize_v_output(qdd)
         # joint-local viscous damping + Coulomb friction reduce the torque
         # available to accelerate: qdd = Minv*(tau - rnea_bias - dyn_bias).
         # No-op (zero vector) when no joint declares damping/friction.
@@ -2872,6 +2983,18 @@ class RBDReference(
         if normalize_input:
             q = self._normalize_q_input(q)
         if self.robot.floating_base:
+            # A spherical/planar joint MID-CHAIN under a floating ROOT would hit
+            # the float()-collapsed H-assembly below (correct only for 1-DOF
+            # columns). The fixed-base path handles multi-column non-root S
+            # (np.ix_ block assembly); the floating-root + multi-DOF-mid-chain
+            # combination is the deferred Tier-C generalization (Phase-6 item 4).
+            # Fail loudly rather than silently return a wrong M.
+            if self._robot_has_multidof_nonfloating_joint():
+                raise NotImplementedError(
+                    "CRBA for a multi-DOF (spherical/planar) mid-chain joint under "
+                    "a FLOATING base is not yet implemented (the fixed-base path is; "
+                    "see docs/open-tasks/phase6_joint_types_plan_REFRESH.md item 4)."
+                )
             NB = self.robot.get_num_bodies()
             n = self.robot.get_num_vel()
             H = np.zeros((n, n))
@@ -2971,12 +3094,18 @@ class RBDReference(
             # with += (the symmetric H[v_j, v_i] also accumulates, avoiding
             # double-count when v_i == v_j).
             for ind in range(NB):
-                vi = self.robot.get_joint_index_v(ind)
+                vi = self._as_index_list(self.robot.get_joint_index_v(ind))
                 alpha_i = self._mimic_multiplier(ind)
                 S = self.robot.get_S_by_id(ind)
+                # fh = IC_i S_i is (6 x N_i); diag = S_i^T fh is the (N_i x N_i)
+                # joint-block of the mass matrix. For a 1-DOF joint these are
+                # 6x1 / 1x1 and reduce to the historical scalar. ix_ places the
+                # full block (off-diagonal entries within a multi-DOF joint's
+                # own block, e.g. the spherical 3x3, are otherwise dropped by
+                # the diagonal-only `H[vi, vi]` fancy index).
                 fh = np.matmul(IC[ind], S)
-                diag = alpha_i * alpha_i * np.matmul(S.T, fh)
-                H[vi, vi] += float(np.asarray(diag).reshape(-1)[0])
+                diag = (alpha_i * alpha_i) * np.matmul(S.T, fh)
+                H[np.ix_(vi, vi)] += np.asarray(diag, dtype=np.float64).reshape(len(vi), len(vi))
                 j = ind
 
                 while self.robot.get_parent_id(j) > -1:
@@ -2986,18 +3115,16 @@ class RBDReference(
                     j = self.robot.get_parent_id(j)
                     S = self.robot.get_S_by_id(j)
                     alpha_j = self._mimic_multiplier(j)
-                    vj = self.robot.get_joint_index_v(j)
-                    contribution = alpha_i * alpha_j * float(
-                        np.asarray(np.matmul(S.T, fh)).reshape(-1)[0]
-                    )
-                    # Off-diagonal chain pair (ind, j) represents the
-                    # symmetric M_full[ind,j] + M_full[j,ind] coupling. Both
-                    # halves contribute to the reduced model H[v_i, v_j] and
-                    # H[v_j, v_i]. When v_i == v_j (mimic-ancestor sharing a
-                    # v-slot) both writes land in the same cell, so the cell
-                    # correctly accumulates 2 * alpha_i * alpha_j * (S^T fh).
-                    H[vi, vj] += contribution
-                    H[vj, vi] += contribution
+                    vj = self._as_index_list(self.robot.get_joint_index_v(j))
+                    # (N_j x N_i) coupling block H[v_j, v_i] = S_j^T (chain) S_i.
+                    block = (alpha_i * alpha_j) * np.asarray(
+                        np.matmul(S.T, fh), dtype=np.float64
+                    ).reshape(len(vj), len(vi))
+                    # Off-diagonal chain pair (ind, j): both halves contribute to
+                    # H[v_i, v_j] and H[v_j, v_i]. When v_i == v_j (mimic-ancestor
+                    # sharing a slot) both writes land in the same cell.
+                    H[np.ix_(vj, vi)] += block
+                    H[np.ix_(vi, vj)] += block.T
 
         return self._denormalize_qv_matrix_output(H, row_space="v", col_space="v")
 
