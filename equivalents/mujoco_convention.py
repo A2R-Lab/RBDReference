@@ -79,9 +79,17 @@ class FloatingRootLayout:
 FIXED_BASE = FloatingRootLayout(floating=False)
 
 
+def _real_or_complex(x):
+    """np.asarray that PRESERVES a complex dtype (for complex-step differentiation)
+    but promotes real input to float64."""
+    x = np.asarray(x)
+    return x if np.iscomplexobj(x) else x.astype(np.float64)
+
+
 def skew(v) -> np.ndarray:
     x, y, z = v
-    return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
+    return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]],
+                    dtype=np.result_type(np.asarray(v), np.float64))
 
 
 def rotation_from_quat_xyzw(quat_xyzw) -> np.ndarray:
@@ -112,8 +120,10 @@ def base_rotation(q, layout: FloatingRootLayout = FloatingRootLayout()) -> np.nd
 def g_matrix(R, nv: int, layout: FloatingRootLayout = FloatingRootLayout()) -> np.ndarray:
     """``G = blockdiag(R, I_3, I_{nv-6})`` — identity except the base-linear 3x3
     block, which is ``R``. Maps a pin tangent to the mjx tangent: ``v_mjx = G v_pin``.
+    (dtype follows ``R`` so complex-step differentiation propagates through it.)
     """
-    G = np.eye(nv)
+    R = np.asarray(R)
+    G = np.eye(nv, dtype=R.dtype if np.iscomplexobj(R) else np.float64)
     if layout.floating:
         G[layout.lin_slice, layout.lin_slice] = R
     return G
@@ -127,7 +137,8 @@ def g_dot(R, a: int, nv: int, layout: FloatingRootLayout = FloatingRootLayout())
     ``dR/dxi_{ang+a} = R [e_a]_x``, so ``dot G_a`` is zero except the base-linear
     block, which equals ``R [e_a]_x``. (Validated by finite difference.)
     """
-    Gd = np.zeros((nv, nv))
+    R = np.asarray(R)
+    Gd = np.zeros((nv, nv), dtype=R.dtype if np.iscomplexobj(R) else np.float64)
     if layout.floating:
         e_a = np.zeros(3)
         e_a[a] = 1.0
@@ -327,8 +338,8 @@ def _cross_cols(vec, sign, nv, layout):
     """``nv x nv`` matrix whose base-ROTATION columns ``a`` are ``sign * (e_a x vec)``
     in the base-LINEAR rows (everything else zero). Building block for the
     velocity/accel input Jacobians wrt a base-rotation perturbation."""
-    out = np.zeros((nv, nv))
-    vec = np.asarray(vec, dtype=np.float64)
+    vec = np.asarray(vec)
+    out = np.zeros((nv, nv), dtype=vec.dtype if np.iscomplexobj(vec) else np.float64)
     for a in range(3):
         e_a = np.zeros(3); e_a[a] = 1.0
         out[layout.lin_slice, layout.ang_start + a] = sign * np.cross(e_a, vec)
@@ -345,21 +356,23 @@ def id_gradient_pin_to_mjx(dtau_dq, dtau_dqd, M, tau_pin, qd_pin, qdd_pin, R,
     Needs ``M``, ``tau_pin`` (value) and the pin-frame inputs ``qd_pin``/``qdd_pin``.
     Fixed base: returned unchanged.
     """
-    dtau_dq = np.asarray(dtau_dq, dtype=np.float64)
-    dtau_dqd = np.asarray(dtau_dqd, dtype=np.float64)
+    dtau_dq = _real_or_complex(dtau_dq)
+    dtau_dqd = _real_or_complex(dtau_dqd)
     if not layout.floating:
         return dtau_dq.copy(), dtau_dqd.copy()
     nv = dtau_dq.shape[0]
     G = g_matrix(R, nv, layout)
     Ginv = G.T                                   # G^{-1}
-    M = np.asarray(M, dtype=np.float64)
-    tau_pin = np.asarray(tau_pin, dtype=np.float64)
-    v_lin = np.asarray(qd_pin, dtype=np.float64)[layout.lin_slice]
-    omega = np.asarray(qd_pin, dtype=np.float64)[layout.ang_slice]
-    qdd_lin = np.asarray(qdd_pin, dtype=np.float64)[layout.lin_slice]
+    M = _real_or_complex(M)
+    tau_pin = _real_or_complex(tau_pin)
+    qd_pin = _real_or_complex(qd_pin); qdd_pin = _real_or_complex(qdd_pin)
+    v_lin = qd_pin[layout.lin_slice]
+    omega = qd_pin[layout.ang_slice]
+    qdd_lin = qdd_pin[layout.lin_slice]
+    cdt = np.result_type(G, M, tau_pin, qd_pin, qdd_pin)   # complex if any input is
 
     # --- output prefactor derivative: column ang+a = Gdot_a tau_pin ---
-    pref = np.zeros((nv, nv))
+    pref = np.zeros((nv, nv), dtype=cdt)
     for a in range(3):
         pref[:, layout.ang_start + a] = g_dot(R, a, nv, layout) @ tau_pin
 
@@ -375,7 +388,7 @@ def id_gradient_pin_to_mjx(dtau_dq, dtau_dqd, M, tau_pin, qd_pin, qdd_pin, R,
 
     # --- wrt qd: Jvv = G^{-1}; Ja_v from accel's velocity dependence ---
     Jvv = Ginv
-    Ja_v = np.zeros((nv, nv))
+    Ja_v = np.zeros((nv, nv), dtype=cdt)
     for a in range(3):
         e_a = np.zeros(3); e_a[a] = 1.0
         # base-linear qvel col: d qdd_pin/d v_lin = -omega x (R^T e_a)
@@ -470,4 +483,204 @@ def mjx_retract(q, xi, ref, layout: FloatingRootLayout = FloatingRootLayout()):
     q_new[layout.pos_slice] = q[layout.pos_slice] + xi[layout.lin_slice]   # GLOBAL add
     q_new[layout.quat_slice] = ref._spherical_retract(q[layout.quat_slice], xi[layout.ang_slice])
     return q_new
+
+
+# ---------------------------------------------------------------------------
+# Second order (idsva_so / fdsva_so)
+# ---------------------------------------------------------------------------
+#
+# idsva_so returns (d2tau/dq2, d2tau/dqd2, d2tau/dqd-dq, dM/dq). All four are
+# transformed to the mjx frame here and validated to FD precision (and, on a
+# matched model, vs FD-of-FD of mj_inverse).
+#
+# KEY SIMPLIFICATION (no retract-curvature term needed): the mjx second derivative
+# is the SINGLE derivative of the *already-MuJoCo-correct* analytic FIRST-order mjx
+# gradient. Differentiating an exact first-order quantity once more needs only the
+# FIRST-order sensitivities of that gradient's inputs (the pin SO tensors contracted
+# with the input-conversion Jacobians + the frame derivative) -- the second-order
+# behaviour of the retract never enters, because we are not composing two retract
+# steps, we are differentiating a function whose value already matches MuJoCo. So
+# d2tau/dq2 = d/dxi [ id_gradient_pin_to_mjx(...) ], evaluated by COMPLEX-STEP through
+# the validated first-order assembly (exact, and it sidesteps hand-expanding the
+# messy acceleration-coupling derivative). dM/dq is a first-order quantity (gradient
+# of M) with its own clean closed form. See `second_order_id_pin_to_mjx`.
+#
+# For the jax / torch surfaces the equivalent (and simplest) path is AUTODIFF THROUGH
+# THE VALUE TRANSFORM -- differentiating the validated value map twice gives the mjx
+# SO tensors for free; the complex-step here is the numpy-surface analogue.
+
+
+def dM_dq_pin_to_mjx(dM_dq, M, R, layout: FloatingRootLayout = FloatingRootLayout()):
+    """Transform the mass-matrix gradient tensor ``dM/dq`` pin->mjx (one of the four
+    ``idsva_so`` outputs; also drives ``fdsva_so``). Index convention
+    ``dM_dq[i,l,k] = d M_il / d q_k`` (RBDReference / GRiD order). Needs the VALUE
+    ``M``. Fixed base: returned unchanged. Validated to ~1e-8 vs FD of the mjx mass
+    matrix along the mjx retract.
+    """
+    dM_dq = np.asarray(dM_dq, dtype=np.float64)
+    if not layout.floating:
+        return dM_dq.copy()
+    nv = dM_dq.shape[0]
+    M = np.asarray(M, dtype=np.float64)
+    G = g_matrix(R, nv, layout)
+    Ginv = G.T
+    # transport: reframe the q-index (config tangent) by G^{-1}, congruence by G.
+    tmp = np.einsum('ilm,mk->ilk', dM_dq, Ginv)
+    out = np.einsum('ai,ijk,bj->abk', G, tmp, G)
+    # frame terms on the base-rotation columns: d(G)/dxi_a M G^T + G M d(G^T)/dxi_a
+    for a in range(3):
+        k = layout.ang_start + a
+        Gd = g_dot(R, a, nv, layout)
+        out[:, :, k] += Gd @ M @ G.T + G @ M @ Gd.T
+    return out
+
+
+def _id_input_xi_jacobians(qd_pin, qdd_pin, R, nv, layout):
+    """The base-point first derivatives of the mjx->pin INPUT conversions wrt a
+    q-perturbation xi (Jv_q = d qd_pin/dxi, Ja_q = d qdd_pin/dxi). Mirrors the
+    couplings inside :func:`id_gradient_pin_to_mjx`."""
+    v_lin = np.asarray(qd_pin, dtype=np.float64)[layout.lin_slice]
+    omega = np.asarray(qd_pin, dtype=np.float64)[layout.ang_slice]
+    qdd_lin = np.asarray(qdd_pin, dtype=np.float64)[layout.lin_slice]
+    Jv_q = _cross_cols(v_lin, -1.0, nv, layout)
+    Ja_q = _cross_cols(qdd_lin, -1.0, nv, layout)
+    for a in range(3):
+        e_a = np.zeros(3); e_a[a] = 1.0
+        Ja_q[layout.lin_slice, layout.ang_start + a] += (
+            -np.cross(e_a, np.cross(omega, v_lin)) + np.cross(omega, np.cross(e_a, v_lin)))
+    return Jv_q, Ja_q
+
+
+def d2tau_dq2_pin_to_mjx(d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq,
+                         dtau_dq, dtau_dqd, M, tau_pin, qd_pin, qdd_pin, R,
+                         layout: FloatingRootLayout = FloatingRootLayout(), h=1e-30):
+    """MuJoCo-parity second derivative ``d2tau/dq2`` (the headline idsva_so tensor),
+    holding qvel/qacc fixed in the mjx frame. Index convention
+    ``d2tau_dq[i,j,k] = d2 tau_i / dq_j dq_k`` matching ``RBDReference.idsva_so``
+    ``(di2_dq, di2_dqd, di2_dvdq, dm_dq)`` (so pass ``d2tau_cross = di2_dvdq`` with
+    ``[i, qd, q]`` order). Needs the first-order gradients + ``M`` + the value
+    ``tau_pin`` + the pin-frame inputs.
+
+    Implemented by COMPLEX-STEP differentiating the validated analytic first-order
+    transform (:func:`id_gradient_pin_to_mjx`) along the mjx perturbation: the SO
+    tensor is a single derivative of the (MuJoCo-matched) first-order gradient, so it
+    needs only the first-order sensitivities of that gradient's inputs (the pin SO
+    tensors contracted with the input-conversion Jacobians + the frame derivative) --
+    NOT a retract-curvature term. Validated to FD precision vs the mjx d/dq gradient.
+    Fixed base: returned unchanged.
+    """
+    d2tau_dq = np.asarray(d2tau_dq, dtype=np.float64)
+    if not layout.floating:
+        return d2tau_dq.copy()
+    nv = d2tau_dq.shape[0]
+    d2tau_dqd = np.asarray(d2tau_dqd, dtype=np.float64)
+    d2tau_cross = np.asarray(d2tau_cross, dtype=np.float64)
+    dM_dq = np.asarray(dM_dq, dtype=np.float64)
+    dtau_dq = np.asarray(dtau_dq, dtype=np.float64)
+    dtau_dqd = np.asarray(dtau_dqd, dtype=np.float64)
+    M = np.asarray(M, dtype=np.float64)
+    tau_pin = np.asarray(tau_pin, dtype=np.float64)
+    qd_pin = np.asarray(qd_pin, dtype=np.float64)
+    qdd_pin = np.asarray(qdd_pin, dtype=np.float64)
+    G = g_matrix(R, nv, layout); Jq = G.T
+    Jv_q, Ja_q = _id_input_xi_jacobians(qd_pin, qdd_pin, R, nv, layout)
+
+    out = np.zeros((nv, nv, nv))
+    for k in range(nv):
+        jqk, jvk, jak = Jq[:, k], Jv_q[:, k], Ja_q[:, k]
+        # first-order sensitivities of id_gradient's inputs along xi_k:
+        d_dtau_dq = (np.einsum('ijm,m->ij', d2tau_dq, jqk)
+                     + np.einsum('inj,n->ij', d2tau_cross, jvk)
+                     + np.einsum('ilj,l->ij', dM_dq, jak))
+        d_dtau_dqd = (np.einsum('ijm,m->ij', d2tau_cross, jqk)
+                      + np.einsum('ijn,n->ij', d2tau_dqd, jvk))
+        d_M = np.einsum('ilm,m->il', dM_dq, jqk)
+        d_tau = dtau_dq @ jqk + dtau_dqd @ jvk + M @ jak
+        d_R = np.zeros((3, 3))
+        if layout.lin_start <= 0 and layout.ang_start <= k < layout.ang_start + 3:
+            e_a = np.zeros(3); e_a[k - layout.ang_start] = 1.0
+            d_R = R @ skew(e_a)
+        # complex-step: imag(first_order(inputs + i h dinputs))/h = d(first_order)/dxi_k
+        g = id_gradient_pin_to_mjx(
+            dtau_dq + 1j * h * d_dtau_dq, dtau_dqd + 1j * h * d_dtau_dqd,
+            M + 1j * h * d_M, tau_pin + 1j * h * d_tau,
+            qd_pin + 1j * h * jvk, qdd_pin + 1j * h * jak,
+            R + 1j * h * d_R, layout)[0]
+        out[:, :, k] = np.imag(g) / h
+    return out
+
+
+def _id_qd_xi_jacobians(qd_pin, R, nv, layout):
+    """Base-point first derivatives of the input conversions wrt a qvel (v_mjx)
+    perturbation: Jvv = d qd_pin/d v_mjx = G^{-1}; Ja_v = d qdd_pin/d v_mjx (the
+    acceleration's velocity dependence). Mirrors :func:`id_gradient_pin_to_mjx`."""
+    v_lin = np.asarray(qd_pin, dtype=np.float64)[layout.lin_slice]
+    omega = np.asarray(qd_pin, dtype=np.float64)[layout.ang_slice]
+    Jvv = g_matrix(R, nv, layout).T
+    Ja_v = np.zeros((nv, nv))
+    for a in range(3):
+        e_a = np.zeros(3); e_a[a] = 1.0
+        Ja_v[layout.lin_slice, layout.lin_start + a] = -np.cross(omega, R.T @ e_a)
+        Ja_v[layout.lin_slice, layout.ang_start + a] = -np.cross(e_a, v_lin)
+    return Jvv, Ja_v
+
+
+def second_order_id_pin_to_mjx(so_tensors, dtau_dq, dtau_dqd, M, tau_pin,
+                               qd_pin, qdd_pin, R,
+                               layout: FloatingRootLayout = FloatingRootLayout(), h=1e-30):
+    """Transform ALL FOUR idsva_so tensors pin->mjx for MuJoCo-native parity.
+
+    ``so_tensors`` is the RBDReference/GRiD tuple ``(d2tau_dq, d2tau_dqd, d2tau_cross,
+    dM_dq)`` with ``d2tau_cross = di2_dvdq`` (``[i, qd, q]``). Returns the same
+    4-tuple in the mjx frame. The three genuine second derivatives are computed by
+    complex-step differentiating the validated first-order transform (no
+    retract-curvature term needed -- it is a single derivative of the MuJoCo-matched
+    first-order gradient); ``dM/dq`` uses its clean closed form. Validated to FD
+    precision vs FD of the mjx first-order gradients and, on a matched model, vs
+    FD-of-FD of ``mj_inverse``. Fixed base: returned unchanged.
+    """
+    d2tau_dq, d2tau_dqd, d2tau_cross, dM_dq = (np.asarray(t, dtype=np.float64) for t in so_tensors)
+    if not layout.floating:
+        return d2tau_dq.copy(), d2tau_dqd.copy(), d2tau_cross.copy(), dM_dq.copy()
+    nv = d2tau_dq.shape[0]
+    dtau_dq = np.asarray(dtau_dq, dtype=np.float64); dtau_dqd = np.asarray(dtau_dqd, dtype=np.float64)
+    M = np.asarray(M, dtype=np.float64); tau_pin = np.asarray(tau_pin, dtype=np.float64)
+    qd_pin = np.asarray(qd_pin, dtype=np.float64); qdd_pin = np.asarray(qdd_pin, dtype=np.float64)
+    G = g_matrix(R, nv, layout); Jq = G.T
+    Jv_q, Ja_q = _id_input_xi_jacobians(qd_pin, qdd_pin, R, nv, layout)
+    Jvv, Ja_v = _id_qd_xi_jacobians(qd_pin, R, nv, layout)
+
+    d2q = np.zeros((nv, nv, nv)); cross = np.zeros((nv, nv, nv)); d2qd = np.zeros((nv, nv, nv))
+    for k in range(nv):
+        # --- q-perturbation (for d2tau/dq2 = d(g0)/dq and cross = d(g1)/dq) ---
+        jqk, jvk, jak = Jq[:, k], Jv_q[:, k], Ja_q[:, k]
+        d_dtau_dq = (np.einsum('ijm,m->ij', d2tau_dq, jqk)
+                     + np.einsum('inj,n->ij', d2tau_cross, jvk)
+                     + np.einsum('ilj,l->ij', dM_dq, jak))
+        d_dtau_dqd = (np.einsum('ijm,m->ij', d2tau_cross, jqk)
+                      + np.einsum('ijn,n->ij', d2tau_dqd, jvk))
+        d_M = np.einsum('ilm,m->il', dM_dq, jqk)
+        d_tau = dtau_dq @ jqk + dtau_dqd @ jvk + M @ jak
+        d_R = np.zeros((3, 3))
+        if layout.ang_start <= k < layout.ang_start + 3:
+            e_a = np.zeros(3); e_a[k - layout.ang_start] = 1.0; d_R = R @ skew(e_a)
+        g0, g1 = id_gradient_pin_to_mjx(
+            dtau_dq + 1j * h * d_dtau_dq, dtau_dqd + 1j * h * d_dtau_dqd,
+            M + 1j * h * d_M, tau_pin + 1j * h * d_tau,
+            qd_pin + 1j * h * jvk, qdd_pin + 1j * h * jak, R + 1j * h * d_R, layout)
+        d2q[:, :, k] = np.imag(g0) / h
+        cross[:, :, k] = np.imag(g1) / h
+        # --- qvel-perturbation (for d2tau/dqd2 = d(g1)/dqd) ---
+        jvvk, javk = Jvv[:, k], Ja_v[:, k]
+        dv_dtau_dq = (np.einsum('inj,n->ij', d2tau_cross, jvvk)
+                      + np.einsum('ilj,l->ij', dM_dq, javk))
+        dv_dtau_dqd = np.einsum('ijn,n->ij', d2tau_dqd, jvvk)
+        dv_tau = dtau_dqd @ jvvk + M @ javk
+        g1v = id_gradient_pin_to_mjx(
+            dtau_dq + 1j * h * dv_dtau_dq, dtau_dqd + 1j * h * dv_dtau_dqd,
+            M.astype(complex), tau_pin + 1j * h * dv_tau,
+            qd_pin + 1j * h * jvvk, qdd_pin + 1j * h * javk, R.astype(complex), layout)[1]
+        d2qd[:, :, k] = np.imag(g1v) / h
+    dM_mjx = dM_dq_pin_to_mjx(dM_dq, M, R, layout)
+    return d2q, d2qd, cross, dM_mjx
 

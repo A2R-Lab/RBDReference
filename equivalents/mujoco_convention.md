@@ -76,37 +76,33 @@ boundary needs:** the matching first-order `d/dqd` gradient (already returned wi
 `d/dq`), the mass matrix `M` / its inverse `Minv`, and the pin-frame inputs. No
 codegen/kernel change — pure binding-side.
 
-## Second order (idsva_so / fdsva_so) — scope (phase 5)
+## Second order (idsva_so) — DONE + validated
 
-`idsva_so` returns `(d²τ/dq², d²τ/dqd², d²τ/dqd∂q, dM/dq)`; `fdsva_so` the forward
-analogues. The mjx second-order tensor is `d/dξ` of the first-order mjx gradient,
-so the chain rule applies **twice**:
+`idsva_so` returns `(d²τ/dq², d²τ/dqd², d²τ/dqd∂q, dM/dq)`. All four are transformed
+to the mjx frame by `second_order_id_pin_to_mjx`, validated to FD precision vs FD of
+the first-order mjx gradients and, on a matched model, vs **FD-of-FD of `mj_inverse`**
+(~8e-6 relative, the double-FD floor).
 
-```
-∂²_{jk} y_mjx = Tout · ∂²_{jk} y_pin                        (transport of pin SO tensor)
-             + (∂_j Tout)(∂_k y_pin) + (∂_k Tout)(∂_j y_pin) (first-order × frame-deriv cross terms)
-             + (∂²_{jk} Tout) y_pin                          (second-order frame term)
-             + [ all the same structure applied through Jq, Jv, Ja and THEIR
-                 first/second derivatives — including the ω×v acceleration
-                 couplings differentiated once more ]
-```
+**Key simplification — no retract-curvature term.** I initially expected the genuine
+second derivatives to need a connection/curvature correction (MuJoCo's global-linear
+retract vs pin's SE(3) retract differ at second order). They do **not**, because the
+mjx SO tensor is the **single** derivative of the *already-MuJoCo-correct* analytic
+first-order gradient. Differentiating an exact first-order quantity once more needs
+only the **first-order** sensitivities of that gradient's inputs — the second-order
+retract behaviour never enters (we differentiate a function whose value already
+matches MuJoCo, we do not compose two retract steps).
 
-Required GRiD quantities: the pin SO tensors, the pin first-order gradients, `M`,
-`Minv`, the values, and the inputs. **Localization:** a tensor entry `[i,j,k]`
-differs from pure transport only when `j` or `k` touches a base DOF; the genuinely
-new second-order frame/accel terms live in the `{0..5}×{0..5}` base-tangent corner.
-`∂²R/∂ξ²` needs the right-trivialised SO(3) Hessian `R[e_b]_×[e_a]_×` (symmetrised
-per the `d2Integrate` retract).
+Implementation: `d²τ/dq²`, the cross tensor, and `d²τ/dqd²` are obtained by
+**complex-step differentiating** `id_gradient_pin_to_mjx` along the mjx perturbation,
+feeding it the pin SO tensors contracted with the input-conversion Jacobians + the
+frame derivative. Complex-step is exact and sidesteps hand-expanding the messy
+acceleration-coupling derivative. `dM/dq` (a first-order quantity) uses its clean
+closed form. For jax/torch the same result comes for free by autodiffing the value
+transform twice.
 
-**Status: scoped, not yet closed-form.** The first-order turned out materially more
-complex than the original doc assumed (the acceleration/Coriolis coupling was
-missing entirely), and those corrections propagate into — and compound in — the SO
-terms. So the SO closed form must be derived with the same empirical FD-vs-MuJoCo
-care, not transcribed from the (now-known-incomplete) doc. Validation path is ready:
-central-difference the **validated analytic first-order mjx gradient** along the mjx
-retract (holding mjx inputs fixed) to get the reference SO tensors, then match the
-closed form column-corner by column-corner. Most early mjx adopters need value +
-first-order; SO is a deliberate follow-up.
+**`fdsva_so`** (forward-dynamics SO) follows the identical pattern — complex-step
+`fd_gradient_pin_to_mjx` — and is the one remaining mechanical extension (it also
+needs `Minv` and the `dM/dq`/SO plumbing that `RBDReference.fdsva_so` already composes).
 
 ## Performance cost & the "native-frame" question
 

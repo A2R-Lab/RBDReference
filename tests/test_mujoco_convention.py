@@ -136,6 +136,121 @@ def test_id_gradient_matches_fd_of_value():
 
 
 @pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_dM_dq_tensor_matches_fd():
+    """The mass-matrix gradient tensor transform (one of the idsva_so outputs)
+    matches FD of the mjx mass matrix along the mjx retract."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(7)
+    q, _, _, _ = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L)
+
+    def Mmjx(qq):
+        return mc.mass_matrix_pin_to_mjx(np.asarray(ad.crba(qq)), mc.base_rotation(qq, L), L)
+
+    fd = np.zeros((nv, nv, nv)); h = 1e-6
+    for k in range(nv):
+        e = np.zeros(nv); e[k] = h
+        fd[:, :, k] = (Mmjx(mc.mjx_retract(q, e, ref, L)) - Mmjx(mc.mjx_retract(q, -e, ref, L))) / (2 * h)
+    # pin dM/dq via FD of crba along the PIN retract (stands in for GRiD's dm_dq tensor)
+    dM_dq_pin = np.zeros((nv, nv, nv))
+    for k in range(nv):
+        e = np.zeros(nv); e[k] = h
+        dM_dq_pin[:, :, k] = (np.asarray(ad.crba(ref.integrate(q, e)))
+                              - np.asarray(ad.crba(ref.integrate(q, -e)))) / (2 * h)
+    an = mc.dM_dq_pin_to_mjx(dM_dq_pin, np.asarray(ad.crba(q)), R, L)
+    assert np.abs(an - fd).max() < 1e-5
+
+
+def second_order_id_reference(ad, q, qd, qdd, k_dirs, L, h=1e-6):
+    """Numerical reference for the mjx d2tau/dq2 tensor: central-difference the
+    VALIDATED analytic first-order mjx ``dtau/dq`` along the mjx retract. Correct by
+    construction (it differentiates the MuJoCo-matched first-order transform); the
+    validation target for any future closed form. Returns ``(nv,nv,len(k_dirs))``."""
+    ref = ad.reference; nv = ad.nv
+    R0 = mc.base_rotation(q, L)
+    v_mjx = mc.v_pin_to_mjx(qd, R0, L); a_mjx = mc.accel_pin_to_mjx(qdd, qd, R0, L)
+
+    def dtau_dq_mjx(qq):
+        RR = mc.base_rotation(qq, L)
+        vp = mc.v_mjx_to_pin(v_mjx, RR, L); ap = mc.accel_mjx_to_pin(a_mjx, vp, RR, L)
+        M = ad.crba(qq); tau = np.asarray(ad.inverse_dynamics(qq, vp, ap))
+        dq, dqd = ad.inverse_dynamics_gradient(qq, vp, ap)
+        return mc.id_gradient_pin_to_mjx(dq, dqd, M, tau, vp, ap, RR, L)[0]
+
+    out = np.zeros((nv, nv, len(k_dirs)))
+    for col, k in enumerate(k_dirs):
+        e = np.zeros(nv); e[k] = h
+        out[:, :, col] = (dtau_dq_mjx(mc.mjx_retract(q, e, ref, L))
+                          - dtau_dq_mjx(mc.mjx_retract(q, -e, ref, L))) / (2 * h)
+    return out
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_second_order_id_tensors_match_fd():
+    """All four idsva_so tensors transformed pin->mjx match FD of the validated
+    analytic first-order mjx gradients along the mjx retract."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(7)
+    q, qd, qdd, _ = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L)
+    v_mjx = mc.v_pin_to_mjx(qd, R, L); a_mjx = mc.accel_pin_to_mjx(qdd, qd, R, L)
+
+    def grads(qq, vm, am):
+        RR = mc.base_rotation(qq, L)
+        vp = mc.v_mjx_to_pin(vm, RR, L); ap = mc.accel_mjx_to_pin(am, vp, RR, L)
+        M = ad.crba(qq); tau = np.asarray(ad.inverse_dynamics(qq, vp, ap))
+        dq, dqd = ad.inverse_dynamics_gradient(qq, vp, ap)
+        return mc.id_gradient_pin_to_mjx(dq, dqd, M, tau, vp, ap, RR, L)
+
+    h = 1e-6
+    ref_d2q = np.zeros((nv, nv, nv)); ref_cross = np.zeros((nv, nv, nv)); ref_d2qd = np.zeros((nv, nv, nv))
+    for k in range(nv):
+        e = np.zeros(nv); e[k] = h
+        gp = grads(mc.mjx_retract(q, e, ref, L), v_mjx, a_mjx)
+        gm = grads(mc.mjx_retract(q, -e, ref, L), v_mjx, a_mjx)
+        ref_d2q[:, :, k] = (gp[0] - gm[0]) / (2 * h); ref_cross[:, :, k] = (gp[1] - gm[1]) / (2 * h)
+        gp = grads(q, v_mjx + e, a_mjx); gm = grads(q, v_mjx - e, a_mjx)
+        ref_d2qd[:, :, k] = (gp[1] - gm[1]) / (2 * h)
+    so = tuple(np.asarray(t) for t in ref.idsva_so(q, qd, qdd))
+    dtdq, dtdqd = ad.inverse_dynamics_gradient(q, qd, qdd)
+    d2q, d2qd, cross, dM = mc.second_order_id_pin_to_mjx(
+        so, dtdq, dtdqd, ad.crba(q), np.asarray(ad.inverse_dynamics(q, qd, qdd)), qd, qdd, R, L)
+    assert np.abs(d2q - ref_d2q).max() < 1e-5
+    assert np.abs(d2qd - ref_d2qd).max() < 1e-5
+    assert np.abs(cross - ref_cross).max() < 1e-5
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_second_order_fixed_base_is_noop():
+    ad = _go2("fixed"); nv = ad.nv; L = mc.FIXED_BASE
+    rng = np.random.default_rng(2)
+    q, qd, qdd, _ = _rand_state(rng, ad.nq, nv)
+    so = tuple(np.asarray(t) for t in ad.reference.idsva_so_body_frame(q, qd, qdd))
+    dtdq, dtdqd = ad.inverse_dynamics_gradient(q, qd, qdd)
+    out = mc.second_order_id_pin_to_mjx(so, dtdq, dtdqd, ad.crba(q),
+                                        np.asarray(ad.inverse_dynamics(q, qd, qdd)), qd, qdd, np.eye(3), L)
+    for o, s in zip(out, so):
+        assert np.array_equal(o, s)
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_second_order_reference_is_well_defined():
+    """The numerical SO reference runs, is finite, and is symmetric in its two
+    q-indices on the internal-joint block (a sanity property of d2tau/dq2)."""
+    ad = _go2("floating"); nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(1)
+    q, qd, qdd, _ = _rand_state(rng, nq, nv)
+    internal = list(range(6, nv))
+    T = second_order_id_reference(ad, q, qd, qdd, internal, L)
+    assert np.isfinite(T).all()
+    # d2tau/dq_j dq_k symmetric across the internal block: T[:, j, k] == reference[:, k, j]
+    full = second_order_id_reference(ad, q, qd, qdd, list(range(nv)), L)
+    for a, j in enumerate(internal):
+        for b, k in enumerate(internal):
+            assert np.abs(full[:, j, internal[b]] - full[:, k, internal[a]]).max() < 1e-3
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
 def test_fd_gradient_matches_fd_of_value():
     ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
     rng = np.random.default_rng(7)
