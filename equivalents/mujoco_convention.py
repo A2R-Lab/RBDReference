@@ -267,6 +267,86 @@ def fd_qdd_pin_to_mjx(qdd, qd_pin, R, layout: FloatingRootLayout = FloatingRootL
 
 
 # ---------------------------------------------------------------------------
+# Row / column / congruence value transforms (the recurring shapes)
+# ---------------------------------------------------------------------------
+#
+# Three families cover almost every floating output (see the convention map in
+# ``docs/open-tasks/mjx_codegen_fusion_master_plan.md`` §2):
+#   * base_rotate (covector OUT, row map ``G``)      -- gravity, id_regressor, ...
+#   * column_reframe (Jacobian ``J G^{-1}``)         -- frame_jacobian, J_com, ccrba, ...
+#   * congruence (``G X G^T``)                        -- mass matrix, Minv, coriolis_matrix
+# All are NO-OP on a fixed base.
+
+
+def base_rotate_pin_to_mjx(y, R, layout: FloatingRootLayout = FloatingRootLayout()) -> np.ndarray:
+    """Covector/contravector OUTPUT row map ``y_mjx = G y_pin`` -- rotate the
+    base-LINEAR rows (0:3) by ``R``. Works on a vector (``generalized_gravity``,
+    ``inverse_dynamics``) or a matrix whose ROWS are tangent-indexed
+    (``inverse_dynamics_regressor`` ``Y``, ``forward_dynamics_parameter_gradient``):
+    ``Y_mjx[0:3] = R Y_pin[0:3]``. (Same base-linear-row rotation as
+    :func:`id_tau_pin_to_mjx`, generalised to extra trailing axes.)"""
+    y = _real_or_complex(y).copy()
+    if layout.floating:
+        y[layout.lin_slice] = np.tensordot(R, y[layout.lin_slice], axes=(1, 0))
+    return y
+
+
+def jacobian_pin_to_mjx(J, R, layout: FloatingRootLayout = FloatingRootLayout()) -> np.ndarray:
+    """Jacobian column reframe ``J_mjx = J_pin G^{-1}`` -- right-multiply the
+    base-LINEAR COLUMNS (0:3) by ``R^T``. The output rows are a frame-invariant
+    geometric quantity (a spatial velocity / momentum / pose rate); only the
+    *input* tangent basis changes (mjx base-linear velocity is global). Covers
+    ``frame_jacobian``, ``frame_jacobian_dot``, ``jacobian_com``, the CCRBA matrix
+    ``A`` (``h = A qd`` is invariant), ``cmm_time_variation`` and
+    ``end_effector_pose_gradient``. Validated vs ``mj_jacBody`` to ~4e-16."""
+    J = _real_or_complex(J).copy()
+    if layout.floating:
+        # columns 0:3 <- J[:, 0:3] @ R^T
+        J[:, layout.lin_slice] = J[:, layout.lin_slice] @ R.T
+    return J
+
+
+def coriolis_matrix_pin_to_mjx(C, R, layout: FloatingRootLayout = FloatingRootLayout()) -> np.ndarray:
+    """Coriolis matrix similarity ``C_mjx = G C_pin G^{-1} = G C_pin G^T`` (``G``
+    orthogonal). ``C`` is NOT symmetric (so this is a similarity, not a symmetric
+    congruence) but the code is identical to :func:`mass_matrix_pin_to_mjx`: rows
+    0:3 rotate by ``R`` (covector output), columns 0:3 reframe by ``R^T`` (the
+    ``qd`` it multiplies is reframed). ``C qd`` is then a covector matching
+    :func:`id_tau_pin_to_mjx`. The ``qd`` INPUT must already be mjx->pin converted."""
+    if not layout.floating:
+        return _real_or_complex(C)
+    nv = C.shape[0]
+    G = g_matrix(R, nv, layout)
+    return G @ _real_or_complex(C) @ G.T
+
+
+def nonlinear_effects_pin_to_mjx(nle_pin, M, qd_pin, R,
+                                 layout: FloatingRootLayout = FloatingRootLayout()) -> np.ndarray:
+    """Bias force ``nle = ID(q, qd, qacc=0)`` pin->mjx (MuJoCo ``qfrc_bias``).
+
+    REVISED (the ``omega x v`` trap): "qacc = 0" is NOT frame-invariant. MuJoCo's
+    bias holds ``qacc_mjx = 0``, which in the pin frame is
+    ``a_pin = accel_mjx_to_pin(0, v_pin) = (-omega x v_lin) on the base-linear block``
+    (NOT zero). So the correct bias in the pin frame is ``ID(q, qd_pin, a_pin)``,
+    i.e. the pin bias ``nle_pin = ID(q,qd,0)`` PLUS ``M . delta_a`` where
+    ``delta_a`` carries that base-linear ``-omega x v`` term; then the covector
+    base-rotate ``G .``. Naively treating ``nle`` as a plain covector ``G nle_pin``
+    is O(1) wrong (1.68 abs error on go2); with the coupling it matches MuJoCo
+    ``qfrc_bias`` to ~5e-16. Needs the mass matrix ``M`` and the pin-frame ``qd``."""
+    nle = _real_or_complex(nle_pin).copy()
+    if not layout.floating:
+        return nle
+    nv = nle.shape[0]
+    qd_pin = _real_or_complex(qd_pin)
+    v_lin = qd_pin[layout.lin_slice]
+    omega = qd_pin[layout.ang_slice]
+    delta_a = np.zeros(nv, dtype=nle.dtype)
+    delta_a[layout.lin_slice] = -np.cross(omega, v_lin)
+    nle_at_mjx_zero = nle + _real_or_complex(M) @ delta_a
+    return id_tau_pin_to_mjx(nle_at_mjx_zero, R, layout)
+
+
+# ---------------------------------------------------------------------------
 # First-order gradient transforms pin->mjx (Phase B1)
 # ---------------------------------------------------------------------------
 #

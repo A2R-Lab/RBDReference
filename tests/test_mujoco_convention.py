@@ -82,6 +82,42 @@ def test_fixed_base_is_noop():
     assert np.array_equal(g_dq, dtdq) and np.array_equal(g_dqd, dtdqd)
 
 
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_value_transforms_match_fd_and_consistency():
+    """The row / column / congruence value transforms (jacobian column-reframe,
+    coriolis similarity, regressor row-rotate, nonlinear-effects accel-couple)
+    each satisfy their defining relationship to machine / FD precision."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(7)
+    q, qd, qdd, _ = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L)
+    tgt = ad.joint_names[-1]
+
+    # column-reframe: ee_pose_gradient = d(invariant ee_pose)/dxi_mjx (FD along mjx retract)
+    g_mjx = mc.jacobian_pin_to_mjx(np.asarray(ad.end_effector_pose_gradient(q, tgt)), R, L)
+    fd = _fd_jac_q(lambda qq: np.asarray(ad.end_effector_pose(qq, tgt)), q, ref, nv, L)
+    assert np.abs(g_mjx - fd).max() < 1e-5
+
+    # nonlinear-effects: REVISED accel-couple == G . ID(q, qd, accel_mjx_to_pin(0))
+    nle = np.asarray(ad.nonlinear_effects(q, qd)); M = np.asarray(ad.crba(q))
+    a_pin0 = mc.accel_mjx_to_pin(np.zeros(nv), qd, R, L)
+    nle_ref = mc.id_tau_pin_to_mjx(np.asarray(ad.inverse_dynamics(q, qd, a_pin0)), R, L)
+    assert np.abs(mc.nonlinear_effects_pin_to_mjx(nle, M, qd, R, L) - nle_ref).max() < 1e-9
+    # and the naive covector treatment is grossly wrong (the trap this guards)
+    assert np.abs(mc.id_tau_pin_to_mjx(nle, R, L) - nle_ref).max() > 1.0
+
+    # coriolis similarity: C qd is a covector matching the tau transform
+    C = np.asarray(ad.coriolis_matrix(q, qd))
+    lhs = mc.coriolis_matrix_pin_to_mjx(C, R, L) @ mc.v_pin_to_mjx(qd, R, L)
+    assert np.abs(lhs - mc.id_tau_pin_to_mjx(C @ qd, R, L)).max() < 1e-10
+
+    # regressor row-rotate: G . (Y pi) == (G Y) pi  for any params pi
+    Y = np.asarray(ad.inverse_dynamics_regressor(q, qd, qdd))
+    x = rng.standard_normal(Y.shape[1])
+    assert np.abs(mc.id_tau_pin_to_mjx(Y @ x, R, L)
+                  - mc.base_rotate_pin_to_mjx(Y, R, L) @ x).max() < 1e-10
+
+
 # ---------------------------------------------------------------------------
 # First-order gradient FD self-consistency along the mjx retract
 # ---------------------------------------------------------------------------
@@ -336,3 +372,18 @@ def test_value_matches_real_mujoco(tmp_path):
     mujoco.mj_forward(m, d); acc_mj = d.qacc.copy(); d.qfrc_applied[:] = 0
     acc_grid = mc.fd_qdd_pin_to_mjx(np.asarray(ref.forward_dynamics(q_pin, qd, u)), qd, R, L)
     assert np.abs(acc_grid - acc_mj).max() < 1e-9
+
+    # nonlinear effects (bias force) vs mj_forward qfrc_bias (the accel-couple revision)
+    d.qpos[:] = q_mjx; d.qvel[:] = v_mjx; d.qacc[:] = 0; mujoco.mj_forward(m, d)
+    nle_pin = np.asarray(ref.nonlinear_effects(q_pin, qd))
+    if nle_pin.ndim > 1:
+        nle_pin = nle_pin[0]
+    nle_grid = mc.nonlinear_effects_pin_to_mjx(nle_pin, np.asarray(ref.crba(q_pin)), qd, R, L)
+    assert np.abs(nle_grid - d.qfrc_bias).max() < 1e-9
+
+    # frame jacobian (base-linear column reframe) vs mj_jacBody
+    jacp = np.zeros((3, nv)); jacr = np.zeros((3, nv))
+    bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "l1")
+    mujoco.mj_jacBody(m, d, jacp, jacr, bid)
+    J_grid = mc.jacobian_pin_to_mjx(np.asarray(ref.frame_jacobian(q_pin, "j1")), R, L)
+    assert np.abs(J_grid - np.vstack([jacp, jacr])).max() < 1e-9
