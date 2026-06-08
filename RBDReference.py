@@ -3158,9 +3158,13 @@ class RBDReference(
                 da_dq[:,:,ind] = np.matmul(Xmat,da_dq[:,:,parent_ind])
             for c in range(n):
                 if parent_ind == -1 and self.robot.floating_base:
-                    # dv_dq should be all 0s => this results in all 0s
-                    for ii in range(len(idx)):
-                        da_dq[:,c,ii] += self._mxS(S[ii],dv_dq[:,c,ii],qd[ii]) # dv/du x S*q
+                    # Floating root: its own velocity derivative dv_dq[:,:,ind] is
+                    # identically zero (no parent / v_base = 0), so the
+                    # mxS_onCols(dv_dq)*qd term contributes nothing. (The previous
+                    # code indexed the BODY axis with a root v-DOF index, which only
+                    # avoided an IndexError on NB>6 robots and otherwise relied on
+                    # this term being zero — fixed: skip it explicitly.)
+                    pass
                 else:
                     # qd[idx] for this body is the (alpha-scaled) joint velocity.
                     da_dq[:,c,ind] += self._mxS(S,dv_dq[:,c,ind], alpha * qd[idx]) # replace with new mxS
