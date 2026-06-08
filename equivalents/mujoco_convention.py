@@ -535,6 +535,74 @@ def fd_gradient_pin_to_mjx(dqdd_dq, dqdd_dqd, Minv, qdd_pin, qd_pin, u_pin, R,
 
 
 # ---------------------------------------------------------------------------
+# Centroidal-derivative (dccrba) and end-effector Hessian transforms
+# ---------------------------------------------------------------------------
+
+
+def dccrba_dh_dq_pin_to_mjx(dh_dq, A, qd_pin, R,
+                            layout: FloatingRootLayout = FloatingRootLayout()):
+    """Transform the centroidal-momentum config-gradient ``dh/dq`` pin->mjx
+    (the first of ``centroidal_dynamics_derivatives``). The momentum ``h = A qd``
+    is INVARIANT (geometric), so holding ``qd`` fixed *in the mjx frame* and
+    perturbing the base ORIENTATION rotates the pin-frame ``qd`` the kernel saw:
+
+    ``dh_dq_mjx = dh_dq_pin G^{-1} + A_pin Jv_q``,  ``Jv_q = _cross_cols(v_lin, -1)``.
+
+    REVISED (vel-couple): the column reframe ``dh_dq G^{-1}`` alone is O(1) wrong
+    (off by ~24 on go2); the ``A Jv_q`` velocity-coupling term (nonzero only on the
+    3 base-rotation columns) brings it to ~2e-8 vs FD of ``h`` along the mjx retract.
+    Needs the CCRBA matrix ``A`` and the pin-frame ``qd``. Companion partials:
+    ``dh/dqd = A G^{-1}`` (a plain :func:`jacobian_pin_to_mjx` column reframe, ``h``
+    invariant in ``qd``); the ``hdot`` (momentum-rate) partials additionally carry
+    the ``omega x v`` acceleration coupling (same family as the ID gradient).
+    Fixed base: returned unchanged."""
+    dh_dq = _real_or_complex(dh_dq).copy()
+    if not layout.floating:
+        return dh_dq
+    nv = dh_dq.shape[1]
+    A = _real_or_complex(A)
+    qd_pin = _real_or_complex(qd_pin)
+    G = g_matrix(R, nv, layout); Ginv = G.T
+    Jv_q = _cross_cols(qd_pin[layout.lin_slice], -1.0, nv, layout)
+    return dh_dq @ Ginv + A @ Jv_q
+
+
+def ee_pose_hessian_pin_to_mjx(H_pin, dpose_pin, R,
+                               layout: FloatingRootLayout = FloatingRootLayout()):
+    """Transform the end-effector pose Hessian ``H_pin[i,a,k] = d2 pose_i / dxi_a dxi_k``
+    pin->mjx (the symmetric coordinate Hessian along the retract).
+
+    The pose VALUE is invariant; its first derivative reframes columns by ``G^{-1}``
+    (:func:`jacobian_pin_to_mjx`). The second derivative is a DOUBLE column reframe
+    plus a frame-correction from the q-dependence of ``G^{-1}``:
+
+        H_mjx[i,a,k] = sum_{b,c} H_pin[i,b,c] G^{-1}[b,a] G^{-1}[c,k]
+                       + sym_{a,k}( dpose_pin . d(G^{-1})/dtheta_k )
+
+    where ``d(G^{-1})/dtheta_k`` (k a base-rotation DOF) has base-linear block
+    ``-[e_k]_x R^T``. The raw "differentiate the gradient" expression carries the
+    correction on the ``k`` index only and is NOT symmetric; GRiD's analytic Hessian
+    IS symmetric, so we SYMMETRIZE in the two tangent indices. Validated to the FD
+    floor vs the symmetric coordinate Hessian of the (invariant) pose along the mjx
+    retract (the column-reframe-only term is off by ~0.5). Needs the value gradient
+    ``dpose_pin`` (``end_effector_pose_gradient``). Fixed base: returned unchanged."""
+    H = _real_or_complex(H_pin).copy()
+    if not layout.floating:
+        return H
+    nout, nv = H.shape[0], H.shape[1]
+    dpose = _real_or_complex(dpose_pin)
+    G = g_matrix(R, nv, layout); Ginv = G.T
+    out = np.einsum('ibc,ba,ck->iak', H, Ginv, Ginv)
+    term = np.zeros((nout, nv, nv), dtype=out.dtype)
+    for a in range(3):
+        k = layout.ang_start + a
+        e_a = np.zeros(3); e_a[a] = 1.0
+        dGinv = -skew(e_a) @ R.T                      # d(G^{-1})/dtheta_k, base-linear block
+        term[:, layout.lin_slice, k] = dpose[:, layout.lin_slice] @ dGinv
+    return out + 0.5 * (term + term.transpose(0, 2, 1))
+
+
+# ---------------------------------------------------------------------------
 # Retracts (for finite-difference validation)
 # ---------------------------------------------------------------------------
 

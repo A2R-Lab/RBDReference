@@ -118,6 +118,65 @@ def test_value_transforms_match_fd_and_consistency():
                   - mc.base_rotate_pin_to_mjx(Y, R, L) @ x).max() < 1e-10
 
 
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_dccrba_dh_dq_vel_couple_matches_fd():
+    """The centroidal dh/dq transform (vel-couple revision) matches FD of the
+    (invariant) centroidal momentum wrt q along the mjx retract."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(3)
+    q, qd, qdd, _ = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L)
+    A = np.asarray(ad.ccrba(q, qd)[0])
+    dh_dq = np.asarray(ref.centroidal_dynamics_derivatives(q, qd, qdd)[0])
+    an = mc.dccrba_dh_dq_pin_to_mjx(dh_dq, A, qd, R, L)
+    v_mjx = mc.v_pin_to_mjx(qd, R, L)
+
+    def h_q(qq):
+        RR = mc.base_rotation(qq, L)
+        return np.asarray(ad.centroidal_momentum(qq, mc.v_mjx_to_pin(v_mjx, RR, L)))
+
+    fd = _fd_jac_q(h_q, q, ref, nv, L)
+    assert np.abs(an - fd).max() < 1e-5
+    # column-reframe alone (no vel-couple) is O(1) wrong
+    assert np.abs(mc.jacobian_pin_to_mjx(dh_dq, R, L) - fd).max() > 1.0
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_ee_pose_hessian_symmetrized_matches_coord_hess():
+    """The EE-pose Hessian transform (symmetrized frame-correction revision) matches
+    the symmetric coordinate Hessian of the invariant pose along the mjx retract, to
+    the same FD floor as GRiD's own analytic-vs-coordinate pin Hessian check."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(11)
+    q, _, _, _ = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L); tgt = ad.joint_names[-1]
+    H_pin = np.asarray(ad.end_effector_pose_hessian(q, tgt))
+    dpose = np.asarray(ad.end_effector_pose_gradient(q, tgt))
+
+    def ee(qq):
+        return np.asarray(ad.end_effector_pose(qq, tgt))
+
+    def coord_hess(retract, h=1e-4):
+        Hd = np.zeros((H_pin.shape[0], nv, nv)); f0 = ee(q)
+        for a in range(nv):
+            for k in range(a, nv):
+                ea = np.zeros(nv); ea[a] = h; ek = np.zeros(nv); ek[k] = h
+                val = (ee(retract(q, ea + ek)) - ee(retract(q, ea)) - ee(retract(q, ek))
+                       + 2 * f0 - ee(retract(q, -ea)) - ee(retract(q, -ek))
+                       + ee(retract(q, -(ea + ek)))) / (2 * h * h)
+                Hd[:, a, k] = val; Hd[:, k, a] = val
+        return Hd
+
+    floor = np.abs(H_pin - coord_hess(lambda qq, xi: ref.integrate(qq, xi))).max()
+    an = mc.ee_pose_hessian_pin_to_mjx(H_pin, dpose, R, L)
+    mjx_fd = coord_hess(lambda qq, xi: mc.mjx_retract(qq, xi, ref, L))
+    # the transform adds no error beyond the shared FD-truncation floor
+    assert np.abs(an - mjx_fd).max() < floor + 1e-6
+    # double-reframe alone (no symmetrized frame correction) is materially wrong
+    G = mc.g_matrix(R, nv, L); Ginv = G.T
+    assert np.abs(np.einsum('ibc,ba,ck->iak', H_pin, Ginv, Ginv) - mjx_fd).max() > 0.1
+
+
 # ---------------------------------------------------------------------------
 # First-order gradient FD self-consistency along the mjx retract
 # ---------------------------------------------------------------------------
