@@ -257,6 +257,52 @@ def test_dM_dq_tensor_matches_fd():
 
 
 @pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_ee_pos_cost_transform_matches_fd_and_direct():
+    """ee_pos_cost (q-block GN cost): value invariant; grad reframes as a covector
+    (G·) — checked vs FD of the value along the mjx retract; GN hess reframes by
+    congruence (G·Gᵀ) — checked vs an independent mjx-frame recompute JᵀWJ with the
+    reframed EE Jacobian."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(31)
+    q, _, _, _ = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L)
+    W = rng.standard_normal(3) ** 2 + 0.1
+    p_des = rng.standard_normal(3)
+    _, grad_pin, hess_pin = ref.ee_pos_cost(q, p_des, W)
+    g_mjx, H_mjx = mc.quadratic_tracking_cost_pin_to_mjx(grad_pin, hess_pin, R, 0, nv, L)
+    # grad vs FD of the invariant value along the mjx retract
+    fd = _fd_jac_q(lambda qq: np.array([ref.ee_pos_cost(qq, p_des, W)[0]]), q, ref, nv, L)
+    assert np.abs(g_mjx[:nv] - fd[0]).max() < 1e-5
+    # GN hess vs independent mjx-frame recompute Jp_mjx^T diag(W) Jp_mjx
+    tgt = ref._ee_target_name(0)
+    Jfull = np.asarray(ref.end_effector_pose_gradient(q, ee_joint_names=tgt)[0])
+    Jp_mjx = mc.jacobian_pin_to_mjx(Jfull, R, L)[:3]
+    assert np.abs(H_mjx[:nv, :nv] - Jp_mjx.T @ (W[:, None] * Jp_mjx)).max() < 1e-9
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_momentum_cost_transform_matches_direct():
+    """momentum_cost (qd-block GN cost): h invariant ⇒ value invariant; the qd-block
+    grad/hess reframe by the CMM column map (A_mjx = A_pin G^{-1}), i.e. covector G·
+    on the grad and congruence on the hess. Checked vs an independent mjx-frame
+    recompute with the reframed CMM."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(33)
+    q, qd, _, _ = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L)
+    W = rng.standard_normal(6) ** 2 + 0.1
+    h_des = rng.standard_normal(6)
+    _, grad_pin, hess_pin = ref.momentum_cost(q, qd, h_des, W)
+    g_mjx, H_mjx = mc.quadratic_tracking_cost_pin_to_mjx(grad_pin, hess_pin, R, nq, nv, L)
+    # independent mjx recompute: A_mjx = A_pin G^{-1}; r invariant (h, h_des fixed).
+    A_pin, h = ref.ccrba(q, qd)
+    A_mjx = mc.jacobian_pin_to_mjx(np.asarray(A_pin), R, L)
+    r = np.asarray(h).reshape(-1) - h_des
+    assert np.abs(g_mjx[nq:nq + nv] - A_mjx.T @ (W * r)).max() < 1e-9
+    assert np.abs(H_mjx[nq:nq + nv, nq:nq + nv] - A_mjx.T @ (W[:, None] * A_mjx)).max() < 1e-9
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
 def test_dccrba_dA_dq_tensor_matches_fd():
     """The CMM gradient TENSOR dA/dq transform (GRiD ``dccrba``) matches FD of the
     mjx CMM (A_mjx = A_pin G^{-1}) along the mjx retract."""

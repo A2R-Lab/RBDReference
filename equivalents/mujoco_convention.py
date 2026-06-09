@@ -720,6 +720,36 @@ def dccrba_dA_dq_pin_to_mjx(dA_dq, A, R, layout: FloatingRootLayout = FloatingRo
     return out
 
 
+def quadratic_tracking_cost_pin_to_mjx(grad_x, hess_x, R, block_start, nv,
+                                       layout: FloatingRootLayout = FloatingRootLayout()):
+    """Transform a Gauss-Newton tracking cost's (grad_x, hess_x) pin->mjx.
+
+    Covers ``ee_pos_cost`` / ``com_cost`` (q-block, ``block_start=0``) and
+    ``momentum_cost`` (qd-block, ``block_start=nq``). The tracked quantity (EE/CoM
+    position, centroidal momentum) is geometrically INVARIANT, so the cost VALUE is
+    unchanged. The single nonzero tangent block of size ``nv`` (the gradient is
+    ``Jᵀ(W·r)``, the GN hessian ``JᵀWJ``, with ``J`` the value-Jacobian) reframes by
+    the value-Jacobian's column map ``J_mjx = J_pin G^{-1}``:
+
+        grad_mjx[block] = G @ grad_pin[block]            (covector, G^{-T}=G)
+        hess_mjx[block,block] = G @ hess_pin[block,block] @ G^T   (congruence)
+
+    The GN hessian DROPS the value-curvature term, so -- unlike the true coordinate
+    ``ee_pose_hessian`` -- there is NO frame-correction term here; the congruence is
+    exact. ``block_start`` is the offset of the active tangent block in the
+    ``nx = nq+nv`` state-gradient layout (0 = q-tangent in [:nv]; nq = qd-tangent).
+    Fixed base: returned unchanged."""
+    grad_x = np.asarray(grad_x, dtype=np.float64).copy()
+    hess_x = np.asarray(hess_x, dtype=np.float64).copy()
+    if not layout.floating:
+        return grad_x, hess_x
+    G = g_matrix(R, nv, layout)
+    sl = slice(block_start, block_start + nv)
+    grad_x[sl] = G @ grad_x[sl]
+    hess_x[sl, sl] = G @ hess_x[sl, sl] @ G.T
+    return grad_x, hess_x
+
+
 def _id_input_xi_jacobians(qd_pin, qdd_pin, R, nv, layout):
     """The base-point first derivatives of the mjx->pin INPUT conversions wrt a
     q-perturbation xi (Jv_q = d qd_pin/dxi, Ja_q = d qdd_pin/dxi). Mirrors the
