@@ -752,6 +752,48 @@ def quadratic_tracking_cost_pin_to_mjx(grad_x, hess_x, R, block_start, nv,
     return grad_x, hess_x
 
 
+def quadratic_state_cost_pin_to_mjx(grad_x, hess_x, R, nq, nv,
+                                    layout: FloatingRootLayout = FloatingRootLayout()):
+    """Transform ``quadratic_state_cost``'s ``(grad_x, hess_x)`` pin->mjx.
+
+    ``quadratic_state_cost(x, x_des, Q)`` with ``x = [q(nq); qd(nv)]`` forms the
+    plain weighted residual ``r = x - x_des`` (``value = ½ rᵀ diag(Q) r``,
+    ``grad_x = Q ⊙ r`` of size ``nx = nq+nv``, ``hess_x = diag(Q)``).
+
+    UNLIKE the geometric tracking costs, the VALUE is NOT a frame invariant: the
+    GRiD kernel evaluates the cost on the PIN-frame state, so the mjx kernel
+    input-converts the velocity block ``qd_pin = G⁻¹ qd_mjx`` (base-linear GLOBAL->
+    LOCAL) before differencing against the user-supplied (mjx-frame) ``x_des``/``Q``.
+    The cost value therefore depends on the convention. Both state blocks are live:
+
+      * **q-block** (raw config coords ``[0:nq]``): UNCHANGED. ``grad = Q⊙(q-q_des)``
+        and the ``q``-rows/cols of ``hess`` are convention-INVARIANT raw coordinates
+        (base position is the same world point; the quaternion is only relabelled;
+        joints are shared). No ``G`` acts here.
+      * **qd-block** (``[nq:nq+nv]``): the residual is measured in the pin velocity
+        tangent, which reframes by ``G = blockdiag(R, I)``. The gradient block is a
+        covector (``G·``) and the hessian block reframes by congruence (``G·Gᵀ``):
+
+            grad_mjx[nq:]      = G @ grad_pin[nq:]
+            hess_mjx[nq:, nq:] = G @ hess_pin[nq:, nq:] @ Gᵀ
+
+    The ``hess`` cross blocks (``q``-``qd``) are exactly zero (``hess = diag(Q)``
+    does not couple ``q`` and ``qd``), so no cross-reframe is needed. This is the
+    same qd-block reframe as :func:`quadratic_tracking_cost_pin_to_mjx` with
+    ``block_start = nq`` (momentum cost), with the q-block additionally carried
+    through untouched. Fixed base: returned unchanged.
+    """
+    grad_x = np.asarray(grad_x, dtype=np.float64).copy()
+    hess_x = np.asarray(hess_x, dtype=np.float64).copy()
+    if not layout.floating:
+        return grad_x, hess_x
+    G = g_matrix(R, nv, layout)
+    sl = slice(nq, nq + nv)
+    grad_x[sl] = G @ grad_x[sl]
+    hess_x[sl, sl] = G @ hess_x[sl, sl] @ G.T
+    return grad_x, hess_x
+
+
 def _id_input_xi_jacobians(qd_pin, qdd_pin, R, nv, layout):
     """The base-point first derivatives of the mjx->pin INPUT conversions wrt a
     q-perturbation xi (Jv_q = d qd_pin/dxi, Ja_q = d qdd_pin/dxi). Mirrors the

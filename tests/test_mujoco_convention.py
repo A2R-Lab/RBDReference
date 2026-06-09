@@ -303,6 +303,72 @@ def test_momentum_cost_transform_matches_direct():
 
 
 @pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_quadratic_state_cost_transform_matches_fd_and_direct():
+    """quadratic_state_cost (BOTH state blocks live; value convention-DEPENDENT).
+
+    The GRiD kernel evaluates the cost on the PIN-frame state, so under mjx it
+    input-converts the velocity block ``qd_pin = G⁻¹ qd_mjx`` before differencing
+    against the user's mjx ``x_des``/``Q``. The qd-block of (grad, hess) then
+    reframes back by ``G`` (covector / congruence); the q-block is untouched.
+
+    * grad qd-block vs FD of the value w.r.t. the (plain) mjx velocity tangent.
+    * hess qd-block vs FD of the value w.r.t. the mjx velocity tangent.
+    * q-block grad == ``Q⊙(q-q_des)`` exactly (convention-invariant raw coords).
+    * value is convention-dependent (pin-frame qd != mjx-frame qd).
+    """
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    nx = nq + nv
+    rng = np.random.default_rng(41)
+    q, _, _, _ = _rand_state(rng, nq, nv)
+    v_mjx = rng.standard_normal(nv)
+    R = mc.base_rotation(q, L)
+    x_des = rng.standard_normal(nx)
+    Q = rng.standard_normal(nx) ** 2 + 0.1
+
+    # the cost the mjx kernel computes: qd input-converted to pin, residual vs x_des.
+    def value(qq, vv_mjx):
+        RR = mc.base_rotation(qq, L)
+        v_pin = mc.v_mjx_to_pin(vv_mjx, RR, L)
+        r = np.concatenate([qq, v_pin]) - x_des
+        return 0.5 * float(np.sum(Q * r * r))
+
+    v_pin = mc.v_mjx_to_pin(v_mjx, R, L)
+    _, grad_pin, hess_pin = ref.quadratic_state_cost(np.concatenate([q, v_pin]), x_des, Q)
+    g_mjx, H_mjx = mc.quadratic_state_cost_pin_to_mjx(grad_pin, hess_pin, R, nq, nv, L)
+
+    # qd-block grad vs FD of the value wrt the mjx velocity (a plain tangent: exact).
+    h = 1e-6
+    fd_qd = np.zeros(nv)
+    for k in range(nv):
+        e = np.zeros(nv); e[k] = h
+        fd_qd[k] = (value(q, v_mjx + e) - value(q, v_mjx - e)) / (2 * h)
+    assert np.abs(g_mjx[nq:nx] - fd_qd).max() < 1e-5
+
+    # qd-block hess vs FD of the value wrt the mjx velocity.
+    fd_H = np.zeros((nv, nv)); hh = 1e-5
+    for a in range(nv):
+        for b in range(nv):
+            ea = np.zeros(nv); ea[a] = hh; eb = np.zeros(nv); eb[b] = hh
+            fd_H[a, b] = (value(q, v_mjx + ea + eb) - value(q, v_mjx + ea - eb)
+                          - value(q, v_mjx - ea + eb) + value(q, v_mjx - ea - eb)) / (4 * hh * hh)
+    assert np.abs(H_mjx[nq:nx, nq:nx] - fd_H).max() < 1e-4
+
+    # q-block is the untouched raw-coordinate gradient; cross/q-q hess blocks unchanged.
+    assert np.abs(g_mjx[:nq] - Q[:nq] * (q - x_des[:nq])).max() < 1e-12
+    assert np.abs(H_mjx[:nq, :nq] - np.diag(Q[:nq])).max() < 1e-12
+    assert np.abs(H_mjx[:nq, nq:nx]).max() < 1e-12 and np.abs(H_mjx[nq:nx, :nq]).max() < 1e-12
+
+    # value is convention-dependent (pin qd != mjx qd) -- a defining property.
+    r_pin = np.concatenate([q, v_pin]) - x_des
+    r_mjx = np.concatenate([q, v_mjx]) - x_des
+    assert abs(0.5 * np.sum(Q * r_pin * r_pin) - 0.5 * np.sum(Q * r_mjx * r_mjx)) > 1e-6
+
+    # fixed-base no-op
+    g0, H0 = mc.quadratic_state_cost_pin_to_mjx(grad_pin, hess_pin, R, nq, nv, mc.FIXED_BASE)
+    assert np.array_equal(g0, np.asarray(grad_pin)) and np.array_equal(H0, np.asarray(hess_pin))
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
 def test_dccrba_dA_dq_tensor_matches_fd():
     """The CMM gradient TENSOR dA/dq transform (GRiD ``dccrba``) matches FD of the
     mjx CMM (A_mjx = A_pin G^{-1}) along the mjx retract."""
