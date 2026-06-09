@@ -1035,3 +1035,102 @@ def second_order_fd_pin_to_mjx(so_tensors, dqdd_dq, dqdd_dqd, Minv, qdd_pin,
         d2tdq[:, :, k] = np.imag(g0u) / h
     return d2q, cross, d2qd, d2tdq
 
+
+# ---------------------------------------------------------------------------
+# Integrator gradient (discrete state-transition Jacobian dAB = [A | B])
+# ---------------------------------------------------------------------------
+
+def integrator_gradient_pin_to_mjx(dAB_pin, Minv, qdd_pin, qd_pin, u_pin, R, dt,
+                                   integrator_type="euler",
+                                   layout: FloatingRootLayout = FloatingRootLayout()):
+    """Transform the integrator gradient (discrete state-transition Jacobian)
+    ``dAB = [A | B] = d x_{k+1} / d[q; qd; u]`` pin->mjx for MuJoCo-native parity.
+
+    ``dAB_pin`` is the ``(2*nv, 3*nv)`` pin gradient from
+    :meth:`RBDReference.integrator_gradient` — output rows ``[q_{k+1} tangent(nv);
+    qd_{k+1}(nv)]``, input columns ``[dq(nv) | dqd(nv) | du(nv)]``, all in the PIN
+    tangent. The matching mjx gradient reparameterizes BOTH the input tangent (mjx
+    base-linear velocity is GLOBAL) and the output tangent (the q-block uses the mjx
+    GLOBAL-add retract, not pin's SE(3) ``V(phi)`` coupling). Supports ``"euler"``
+    and ``"semi_implicit_euler"`` / ``"si_euler"``. Fixed base: returned unchanged.
+
+    Assembly (validated to the FD floor ~1e-9 vs FD of the mjx integrator value
+    along the mjx retract, both integrators, multiple seeds):
+
+      * BOTTOM rows  ``qd_{k+1,mjx} = G qd_{k+1,pin}`` — a VELOCITY output (plain
+        ``G``; NO ``omega x v`` accel term). ``qd_{k+1,pin} = qd_pin + dt*qdd_pin``;
+        its pin gradient is the pin dAB BOTTOM block. The columns reframe by the
+        (validated) input-conversion Jacobians shared with
+        :func:`fd_gradient_pin_to_mjx` (``Jq=G^{-1}``; the velocity/force inputs
+        ``qd_pin/u_pin`` track ``R``, so their q-perturbation Jacobians are the
+        ``_cross_cols`` couplings). The 3 base-rotation q-columns additionally pick
+        up the output-map's q-dependence ``g_dot(q) @ qd_{k+1,pin}``.
+
+      * TOP rows  ``q_{k+1}`` config-tangent. The ANGULAR + JOINT output rows
+        coincide with the pin retract (mjx only changes the base-linear position),
+        so they are the pin TOP block with columns reframed by the same input
+        Jacobians. The base-LINEAR 3 output rows follow the mjx GLOBAL add
+        ``q_lin += dt*W_mjx[lin]`` (``W = qd`` for euler, ``W = v_new = qd_{k+1}``
+        for si): identity on the base-linear q column, plus ``dt`` times the
+        velocity used (the qd base-linear input cols for euler, the bottom mjx
+        base-linear rows for si).
+
+    Needs the mass-matrix inverse ``Minv`` (unused for the assembly but accepted for
+    signature symmetry with the other fd transforms — the pin dAB already contains
+    ``dt*Minv``), the fd value ``qdd_pin``, the pin-frame inputs ``qd_pin``/``u_pin``,
+    the base rotation ``R``, and the timestep ``dt``.
+    """
+    dAB_pin = _real_or_complex(dAB_pin)
+    if not layout.floating:
+        return dAB_pin.copy()
+    si = integrator_type in ("semi_implicit_euler", "si_euler")
+    nv = np.asarray(qd_pin).shape[0]
+    G = g_matrix(R, nv, layout); Ginv = G.T
+    lin0, ang0 = layout.lin_start, layout.ang_start
+    qd_pin = _real_or_complex(qd_pin); u_pin = _real_or_complex(u_pin)
+    qdd_pin = _real_or_complex(qdd_pin)
+    v_lin = qd_pin[layout.lin_slice]; u_lin = u_pin[layout.lin_slice]
+
+    # pin dAB blocks (2nv x 3nv -> six nv x nv blocks)
+    Tq = dAB_pin[:nv, 0:nv];        Tv = dAB_pin[:nv, nv:2*nv];        Tu = dAB_pin[:nv, 2*nv:3*nv]
+    Bq = dAB_pin[nv:2*nv, 0:nv];    Bv = dAB_pin[nv:2*nv, nv:2*nv];    Bu = dAB_pin[nv:2*nv, 2*nv:3*nv]
+
+    # input-conversion Jacobians (mjx perturbation -> pin input), shared with the
+    # fd/id gradient transforms. Jq/Jvv/Ju_u = G^{-1}; the q-perturbation of the
+    # velocity/force inputs is the _cross_cols coupling (they track R).
+    Jq = Ginv
+    Jv_q = _cross_cols(v_lin, -1.0, nv, layout)   # d qd_pin / d xi_q
+    Ju_q = _cross_cols(u_lin, -1.0, nv, layout)   # d u_pin  / d xi_q
+
+    # === BOTTOM rows: velocity output (plain G) ===
+    qdkp1_pin = qd_pin + dt * qdd_pin
+    botq = G @ (Bq @ Jq + Bv @ Jv_q + Bu @ Ju_q)
+    botv = G @ (Bv @ Ginv)
+    botu = G @ (Bu @ Ginv)
+    for a in range(3):
+        botq[:, ang0 + a] = botq[:, ang0 + a] + g_dot(R, a, nv, layout) @ qdkp1_pin
+
+    # === TOP rows: config-tangent ===
+    # angular + joint rows: pin top block reframed by the input Jacobians.
+    topq = (Tq @ Jq + Tv @ Jv_q + Tu @ Ju_q)
+    topv = (Tv @ Ginv)
+    topu = (Tu @ Ginv)
+    # overwrite the base-LINEAR 3 output rows with the mjx GLOBAL-add tangent.
+    topq[layout.lin_slice, :] = 0.0
+    topv[layout.lin_slice, :] = 0.0
+    topu[layout.lin_slice, :] = 0.0
+    for a in range(3):
+        topq[lin0 + a, lin0 + a] = 1.0                 # identity on base-linear q col
+    if si:
+        for a in range(3):                              # W_mjx = qd_{k+1,mjx} = bottom_mjx
+            topq[lin0 + a, :] = topq[lin0 + a, :] + dt * botq[lin0 + a, :]
+            topv[lin0 + a, :] = topv[lin0 + a, :] + dt * botv[lin0 + a, :]
+            topu[lin0 + a, :] = topu[lin0 + a, :] + dt * botu[lin0 + a, :]
+    else:
+        for a in range(3):                              # W_mjx = v_mjx (input qd)
+            topv[lin0 + a, lin0 + a] = dt
+
+    top = np.hstack([topq, topv, topu])
+    bot = np.hstack([botq, botv, botu])
+    return np.vstack([top, bot])
+

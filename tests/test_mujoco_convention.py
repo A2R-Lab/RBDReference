@@ -565,6 +565,97 @@ def test_second_order_fd_fixed_base_is_noop():
 
 
 # ---------------------------------------------------------------------------
+# Integrator gradient (discrete state-transition Jacobian dAB = [A | B])
+# ---------------------------------------------------------------------------
+
+def _quat_log_rel(ref, qref_xyzw, qc_xyzw):
+    """omega s.t. _spherical_retract(qref, omega) ~= qc; = 2*log(qref^{-1} (x) qc)."""
+    qref = np.asarray(qref_xyzw, float); qc = np.asarray(qc_xyzw, float)
+    qref_inv = np.array([-qref[0], -qref[1], -qref[2], qref[3]])
+    dq = ref._quat_mul_xyzw(qref_inv, qc)
+    v = dq[:3]; w = dq[3]; nrm = np.linalg.norm(v)
+    if nrm < 1e-14:
+        return 2.0 * v
+    return (2.0 * np.arctan2(nrm, w)) * v / nrm
+
+
+def _mjx_integrator_value(ad, q_mjx, v_mjx, u_mjx, dt, it, L):
+    """Run the integrator in the mjx convention. Returns (q_kp1_full(nq),
+    qd_kp1_mjx(nv)). Mirrors the _integrator.py mjx codegen: mjx inputs -> pin,
+    pin integrator, then mjx GLOBAL base-position step + qd output reframe by G."""
+    ref = ad.reference; nq = ad.nq
+    q_pin = mc.q_mjx_to_pin(q_mjx, L); R = mc.base_rotation(q_pin, L)
+    v_pin = mc.v_mjx_to_pin(v_mjx, R, L); u_pin = mc.force_mjx_to_pin(u_mjx, R, L)
+    x_kp1 = np.asarray(ref.integrator(q_pin, v_pin, u_pin, dt, integrator_type=it), float)
+    q_kp1 = x_kp1[:nq].copy(); qd_kp1_mjx = mc.v_pin_to_mjx(x_kp1[nq:], R, L)
+    w_lin = v_mjx[L.lin_slice] if it == "euler" else qd_kp1_mjx[L.lin_slice]
+    q_kp1[L.pos_slice] = q_mjx[L.pos_slice] + dt * w_lin   # mjx GLOBAL add
+    return q_kp1, qd_kp1_mjx
+
+
+def _fd_mjx_dAB(ad, q_mjx, v_mjx, u_mjx, dt, it, L, h=1e-6):
+    ref = ad.reference; nq, nv = ad.nq, ad.nv
+    q_ref = _mjx_integrator_value(ad, q_mjx, v_mjx, u_mjx, dt, it, L)[0][:nq]
+
+    def out_tangent(qc_full, qd_mjx_out):
+        xi = np.zeros(nv)
+        xi[6:] = qc_full[7:] - q_ref[7:]                              # revolute joints
+        xi[L.lin_slice] = qc_full[L.pos_slice] - q_ref[L.pos_slice]   # base pos (global)
+        xi[L.ang_slice] = _quat_log_rel(ref, q_ref[3:7], qc_full[3:7])
+        return np.concatenate([xi, qd_mjx_out])
+
+    cols = []
+    for k in range(nv):                                              # dq_mjx
+        e = np.zeros(nv); e[k] = h
+        qp = mc.q_pin_to_mjx(mc.mjx_retract(mc.q_mjx_to_pin(q_mjx, L), e, ref, L), L)
+        qm = mc.q_pin_to_mjx(mc.mjx_retract(mc.q_mjx_to_pin(q_mjx, L), -e, ref, L), L)
+        tp = out_tangent(*_mjx_integrator_value(ad, qp, v_mjx, u_mjx, dt, it, L))
+        tm = out_tangent(*_mjx_integrator_value(ad, qm, v_mjx, u_mjx, dt, it, L))
+        cols.append((tp - tm) / (2 * h))
+    for k in range(nv):                                              # dqd_mjx
+        e = np.zeros(nv); e[k] = h
+        tp = out_tangent(*_mjx_integrator_value(ad, q_mjx, v_mjx + e, u_mjx, dt, it, L))
+        tm = out_tangent(*_mjx_integrator_value(ad, q_mjx, v_mjx - e, u_mjx, dt, it, L))
+        cols.append((tp - tm) / (2 * h))
+    for k in range(nv):                                              # du_mjx
+        e = np.zeros(nv); e[k] = h
+        tp = out_tangent(*_mjx_integrator_value(ad, q_mjx, v_mjx, u_mjx + e, dt, it, L))
+        tm = out_tangent(*_mjx_integrator_value(ad, q_mjx, v_mjx, u_mjx - e, dt, it, L))
+        cols.append((tp - tm) / (2 * h))
+    return np.array(cols).T
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+@pytest.mark.parametrize("it", ["euler", "si_euler"])
+def test_integrator_gradient_matches_fd_of_value(it):
+    """The transformed mjx integrator gradient dAB = [A|B] matches FD of the mjx
+    integrator VALUE along the mjx retract (q/qd/u perturbations, output q-tangent
+    coordinate-differenced via the mjx retract at the next state)."""
+    ad = _go2("floating"); nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(7)
+    q, qd, _, u = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L); dt = 0.01
+    q_mjx = mc.q_pin_to_mjx(q, L); v_mjx = mc.v_pin_to_mjx(qd, R, L); u_mjx = mc.v_pin_to_mjx(u, R, L)
+    fd = _fd_mjx_dAB(ad, q_mjx, v_mjx, u_mjx, dt, it, L)
+    dAB_pin = np.asarray(ad.reference.integrator_gradient(q, qd, u, dt, it), float)
+    Minv = ad.minv(q); qdd = np.asarray(ad.forward_dynamics(q, qd, u))
+    an = mc.integrator_gradient_pin_to_mjx(dAB_pin, Minv, qdd, qd, u, R, dt, it, L)
+    assert np.abs(an - fd).max() < 1e-5
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_integrator_gradient_fixed_base_is_noop():
+    ad = _go2("fixed"); nv = ad.nv; L = mc.FIXED_BASE
+    rng = np.random.default_rng(2)
+    q, qd, _, u = _rand_state(rng, ad.nq, nv); dt = 0.01
+    Minv = ad.minv(q); qdd = np.asarray(ad.forward_dynamics(q, qd, u))
+    for it in ("euler", "si_euler"):
+        dAB = np.asarray(ad.reference.integrator_gradient(q, qd, u, dt, it), float)
+        out = mc.integrator_gradient_pin_to_mjx(dAB, Minv, qdd, qd, u, np.eye(3), dt, it, L)
+        assert np.array_equal(out, dAB)
+
+
+# ---------------------------------------------------------------------------
 # Direct MuJoCo cross-check on a minimal matched model (skipped if no mujoco)
 # ---------------------------------------------------------------------------
 
