@@ -490,19 +490,21 @@ def fd_gradient_pin_to_mjx(dqdd_dq, dqdd_dqd, Minv, qdd_pin, qd_pin, u_pin, R,
     ``d/dq`` / ``d/dqvel``. Needs ``Minv``, ``qdd_pin`` (value) and the pin-frame
     inputs ``qd_pin``/``u_pin``. Fixed base: returned unchanged.
     """
-    dqdd_dq = np.asarray(dqdd_dq, dtype=np.float64)
-    dqdd_dqd = np.asarray(dqdd_dqd, dtype=np.float64)
+    dqdd_dq = _real_or_complex(dqdd_dq)
+    dqdd_dqd = _real_or_complex(dqdd_dqd)
     if not layout.floating:
         return dqdd_dq.copy(), dqdd_dqd.copy()
     nv = dqdd_dq.shape[0]
     G = g_matrix(R, nv, layout)
     Ginv = G.T
-    Minv = np.asarray(Minv, dtype=np.float64)
-    qdd_pin = np.asarray(qdd_pin, dtype=np.float64)
-    v_lin = np.asarray(qd_pin, dtype=np.float64)[layout.lin_slice]
-    omega = np.asarray(qd_pin, dtype=np.float64)[layout.ang_slice]
-    u_lin = np.asarray(u_pin, dtype=np.float64)[layout.lin_slice]
+    Minv = _real_or_complex(Minv)
+    qdd_pin = _real_or_complex(qdd_pin)
+    qd_pin = _real_or_complex(qd_pin); u_pin = _real_or_complex(u_pin)
+    v_lin = qd_pin[layout.lin_slice]
+    omega = qd_pin[layout.ang_slice]
+    u_lin = u_pin[layout.lin_slice]
     qdd_lin = qdd_pin[layout.lin_slice]
+    cdt = np.result_type(G, dqdd_dq, dqdd_dqd, Minv, qdd_pin, qd_pin, u_pin)
 
     # The output map O(a_pin, v_pin, R)_lin = R (a_pin_lin + omega x v_lin); its
     # partials: dO/da_pin = G ; dO/dR|val = R[e_a]x(a_pin_lin + omega x v_lin) ;
@@ -512,7 +514,7 @@ def fd_gradient_pin_to_mjx(dqdd_dq, dqdd_dqd, Minv, qdd_pin, qd_pin, u_pin, R,
     Jv_q = _cross_cols(v_lin, -1.0, nv, layout)        # d qd_pin/d theta_a
     Ju_q = _cross_cols(u_lin, -1.0, nv, layout)        # d u_pin/d theta_a
     dqddpin_dq = dqdd_dq @ Ginv + dqdd_dqd @ Jv_q + Minv @ Ju_q
-    out_R = np.zeros((nv, nv)); out_vq = np.zeros((nv, nv))
+    out_R = np.zeros((nv, nv), dtype=cdt); out_vq = np.zeros((nv, nv), dtype=cdt)
     for a in range(3):
         e_a = np.zeros(3); e_a[a] = 1.0
         out_R[layout.lin_slice, layout.ang_start + a] = (
@@ -523,7 +525,7 @@ def fd_gradient_pin_to_mjx(dqdd_dq, dqdd_dqd, Minv, qdd_pin, qd_pin, u_pin, R,
 
     # wrt qd: inner pin-accel gradient + output map's explicit v dependence ---
     dqddpin_dqd = dqdd_dqd @ Ginv
-    out_vd = np.zeros((nv, nv))
+    out_vd = np.zeros((nv, nv), dtype=cdt)
     for a in range(3):
         e_a = np.zeros(3); e_a[a] = 1.0
         # qvel-linear col: dv_pin = Ginv[:,lin_a] = [R^T e_a (lin); 0]
@@ -898,4 +900,96 @@ def second_order_id_pin_to_mjx(so_tensors, dtau_dq, dtau_dqd, M, tau_pin,
         d2qd[:, :, k] = np.imag(g1v) / h
     dM_mjx = dM_dq_pin_to_mjx(dM_dq, M, R, layout)
     return d2q, d2qd, cross, dM_mjx
+
+
+def _fd_u_xi_jacobians(R, nv, layout):
+    """Base-point first derivatives of the input conversions wrt an applied-force
+    (u_mjx) perturbation, holding q and v_mjx fixed: Ju_u = d u_pin/d u_mjx = G^{-1}
+    (the force is a covector, reframes inversely to velocity). The q/qd inputs are
+    independent of u, so their input-Jacobians are zero; the qdd VALUE moves by
+    Minv @ Ju_u (handled by the caller)."""
+    return g_matrix(R, nv, layout).T
+
+
+def second_order_fd_pin_to_mjx(so_tensors, dqdd_dq, dqdd_dqd, Minv, qdd_pin,
+                               qd_pin, u_pin, R,
+                               layout: FloatingRootLayout = FloatingRootLayout(), h=1e-30):
+    """Transform ALL FOUR fdsva_so tensors pin->mjx for MuJoCo-native parity.
+
+    ``so_tensors`` is the RBDReference/GRiD tuple ``(d2a_dq, d2a_cross, d2a_dqd,
+    d2a_dtdq)`` = ``(daba_dqdq, daba_dvdq, daba_dvdv, daba_dtdq)`` from
+    :meth:`RBDReference.fdsva_so`, with the cross ``daba_dvdq[i, qd, q]`` and the
+    torque-config tensor ``daba_dtdq[i, u, q] = d Minv[i,u]/dq`` (since
+    ``dqdd/du = Minv``). Returns the same 4-tuple in the mjx frame.
+
+    The EXACT analog of :func:`second_order_id_pin_to_mjx` for forward dynamics:
+    complex-step differentiate the validated first-order transform
+    :func:`fd_gradient_pin_to_mjx` along the mjx perturbation. The fd transform uses
+    the SAME q/qd input-conversion Jacobians as the id transform (q/qd convert
+    identically); the differences are (1) the OUTPUT map is the acceleration
+    transform (a CONTRAVECTOR ``fd_qdd_pin_to_mjx``, carrying the ``omega x v`` term
+    and its derivative), (2) ``Minv`` reframes by congruence (``G Minv G^T``) like
+    ``M``, and (3) the applied force ``u`` adds a 4th perturbation family
+    (``daba_dtdq``: hold q/v_mjx fixed, perturb u_mjx). Validated to FD precision vs
+    FD of the mjx first-order gradients. Fixed base: returned unchanged.
+    """
+    d2a_dq, d2a_cross, d2a_dqd, d2a_dtdq = (np.asarray(t, dtype=np.float64) for t in so_tensors)
+    if not layout.floating:
+        return d2a_dq.copy(), d2a_cross.copy(), d2a_dqd.copy(), d2a_dtdq.copy()
+    nv = d2a_dq.shape[0]
+    dqdd_dq = np.asarray(dqdd_dq, dtype=np.float64); dqdd_dqd = np.asarray(dqdd_dqd, dtype=np.float64)
+    Minv = np.asarray(Minv, dtype=np.float64); qdd_pin = np.asarray(qdd_pin, dtype=np.float64)
+    qd_pin = np.asarray(qd_pin, dtype=np.float64); u_pin = np.asarray(u_pin, dtype=np.float64)
+    G = g_matrix(R, nv, layout); Jq = G.T
+    # q/qd input-conversion Jacobians (shared with the id transform):
+    Jv_q, Ja_q = _id_input_xi_jacobians(qd_pin, qdd_pin, R, nv, layout)
+    Ju_q = _cross_cols(u_pin[layout.lin_slice], -1.0, nv, layout)   # d u_pin/dxi (force)
+    Jvv, Ja_v = _id_qd_xi_jacobians(qd_pin, R, nv, layout)
+    Ju_u = _fd_u_xi_jacobians(R, nv, layout)                       # d u_pin/d u_mjx
+
+    d2q = np.zeros((nv, nv, nv)); cross = np.zeros((nv, nv, nv))
+    d2qd = np.zeros((nv, nv, nv)); d2tdq = np.zeros((nv, nv, nv))
+    for k in range(nv):
+        # --- q-perturbation (for d2a/dq2 = d(g0)/dq and cross = d(g1)/dq) ---
+        jqk, jvk, jak, juk = Jq[:, k], Jv_q[:, k], Ja_q[:, k], Ju_q[:, k]
+        # sensitivities of fd_gradient's inputs along xi_k:
+        #   dqdd_dq <- daba_dqdq(.q) + daba_dvdq(.qd) + daba_dtdq(.u)
+        d_dqdd_dq = (np.einsum('ijm,m->ij', d2a_dq, jqk)
+                     + np.einsum('inj,n->ij', d2a_cross, jvk)
+                     + np.einsum('ilj,l->ij', d2a_dtdq, juk))
+        #   dqdd_dqd <- cross(.q) + d2a_dqd(.qd)   (independent of u)
+        d_dqdd_dqd = (np.einsum('ijm,m->ij', d2a_cross, jqk)
+                      + np.einsum('ijn,n->ij', d2a_dqd, jvk))
+        d_Minv = np.einsum('ijm,m->ij', d2a_dtdq, jqk)            # d Minv/dq (= daba_dtdq . q)
+        d_qdd = dqdd_dq @ jqk + dqdd_dqd @ jvk + Minv @ juk        # value: dqdd/du = Minv
+        d_R = np.zeros((3, 3))
+        if layout.ang_start <= k < layout.ang_start + 3:
+            e_a = np.zeros(3); e_a[k - layout.ang_start] = 1.0; d_R = R @ skew(e_a)
+        g0, g1 = fd_gradient_pin_to_mjx(
+            dqdd_dq + 1j * h * d_dqdd_dq, dqdd_dqd + 1j * h * d_dqdd_dqd,
+            Minv + 1j * h * d_Minv, qdd_pin + 1j * h * d_qdd,
+            qd_pin + 1j * h * jvk, u_pin + 1j * h * juk, R + 1j * h * d_R, layout)
+        d2q[:, :, k] = np.imag(g0) / h
+        cross[:, :, k] = np.imag(g1) / h
+        # --- qvel-perturbation (for d2a/dqd2 = d(g1)/dqd) ---
+        jvvk, javk = Jvv[:, k], Ja_v[:, k]
+        dv_dqdd_dq = (np.einsum('inj,n->ij', d2a_cross, jvvk))
+        dv_dqdd_dqd = np.einsum('ijn,n->ij', d2a_dqd, jvvk)
+        dv_qdd = dqdd_dqd @ jvvk                                   # value moves via qd only
+        g1v = fd_gradient_pin_to_mjx(
+            dqdd_dq + 1j * h * dv_dqdd_dq, dqdd_dqd + 1j * h * dv_dqdd_dqd,
+            Minv.astype(complex), qdd_pin + 1j * h * dv_qdd,
+            qd_pin + 1j * h * jvvk, u_pin.astype(complex), R.astype(complex), layout)[1]
+        d2qd[:, :, k] = np.imag(g1v) / h
+        # --- applied-force perturbation (for d2a/du dq = d(g0)/du) ---
+        juuk = Ju_u[:, k]                                          # d u_pin/d u_mjx col
+        # dqdd_dq depends on u: d(dqdd_dq[i,j])/du_l = d Minv[i,l]/dq_j = daba_dtdq[i,l,j]
+        du_dqdd_dq = np.einsum('ilj,l->ij', d2a_dtdq, juuk)
+        du_qdd = Minv @ juuk                                       # value: dqdd/du = Minv
+        g0u = fd_gradient_pin_to_mjx(
+            dqdd_dq + 1j * h * du_dqdd_dq, dqdd_dqd.astype(complex),
+            Minv.astype(complex), qdd_pin + 1j * h * du_qdd,
+            qd_pin.astype(complex), u_pin + 1j * h * juuk, R.astype(complex), layout)[0]
+        d2tdq[:, :, k] = np.imag(g0u) / h
+    return d2q, cross, d2qd, d2tdq
 

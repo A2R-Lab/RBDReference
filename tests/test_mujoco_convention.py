@@ -444,6 +444,60 @@ def test_fd_gradient_matches_fd_of_value():
     assert np.abs(an_dqd - fd_dqd).max() < 1e-5
 
 
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_second_order_fd_tensors_match_fd():
+    """All four fdsva_so tensors transformed pin->mjx match FD of the validated
+    analytic first-order mjx forward-dynamics gradients along the mjx retract
+    (q/qvel/applied-force perturbations)."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(7)
+    q, qd, _, u = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L)
+    v_mjx = mc.v_pin_to_mjx(qd, R, L); uf_mjx = mc.v_pin_to_mjx(u, R, L)
+
+    def grads(qq, vm, um):
+        RR = mc.base_rotation(qq, L)
+        vp = mc.v_mjx_to_pin(vm, RR, L); up = mc.force_mjx_to_pin(um, RR, L)
+        Minv = ad.minv(qq); qdd = np.asarray(ad.forward_dynamics(qq, vp, up))
+        dq, dqd = ad.forward_dynamics_gradient(qq, vp, up)
+        return mc.fd_gradient_pin_to_mjx(dq, dqd, Minv, qdd, vp, up, RR, L)
+
+    h = 1e-6
+    ref_d2q = np.zeros((nv, nv, nv)); ref_cross = np.zeros((nv, nv, nv))
+    ref_d2qd = np.zeros((nv, nv, nv)); ref_d2tdq = np.zeros((nv, nv, nv))
+    for k in range(nv):
+        e = np.zeros(nv); e[k] = h
+        gp = grads(mc.mjx_retract(q, e, ref, L), v_mjx, uf_mjx)
+        gm = grads(mc.mjx_retract(q, -e, ref, L), v_mjx, uf_mjx)
+        ref_d2q[:, :, k] = (gp[0] - gm[0]) / (2 * h); ref_cross[:, :, k] = (gp[1] - gm[1]) / (2 * h)
+        gp = grads(q, v_mjx + e, uf_mjx); gm = grads(q, v_mjx - e, uf_mjx)
+        ref_d2qd[:, :, k] = (gp[1] - gm[1]) / (2 * h)
+        gp = grads(q, v_mjx, uf_mjx + e); gm = grads(q, v_mjx, uf_mjx - e)
+        ref_d2tdq[:, :, k] = (gp[0] - gm[0]) / (2 * h)
+    so = tuple(np.asarray(t) for t in ref.fdsva_so(q, qd, u))
+    Minv = ad.minv(q); qdd_val = np.asarray(ad.forward_dynamics(q, qd, u))
+    ddq, ddqd = ad.forward_dynamics_gradient(q, qd, u)
+    d2q, cross, d2qd, d2tdq = mc.second_order_fd_pin_to_mjx(
+        so, ddq, ddqd, Minv, qdd_val, qd, u, R, L)
+    assert np.abs(d2q - ref_d2q).max() < 1e-5
+    assert np.abs(cross - ref_cross).max() < 1e-5
+    assert np.abs(d2qd - ref_d2qd).max() < 1e-5
+    assert np.abs(d2tdq - ref_d2tdq).max() < 1e-5
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_second_order_fd_fixed_base_is_noop():
+    ad = _go2("fixed"); nv = ad.nv; L = mc.FIXED_BASE
+    rng = np.random.default_rng(2)
+    q, qd, _, u = _rand_state(rng, ad.nq, nv)
+    so = tuple(np.asarray(t) for t in ad.reference.fdsva_so(q, qd, u))
+    Minv = ad.minv(q); qdd_val = np.asarray(ad.forward_dynamics(q, qd, u))
+    ddq, ddqd = ad.forward_dynamics_gradient(q, qd, u)
+    out = mc.second_order_fd_pin_to_mjx(so, ddq, ddqd, Minv, qdd_val, qd, u, np.eye(3), L)
+    for o, s in zip(out, so):
+        assert np.array_equal(o, s)
+
+
 # ---------------------------------------------------------------------------
 # Direct MuJoCo cross-check on a minimal matched model (skipped if no mujoco)
 # ---------------------------------------------------------------------------
