@@ -683,6 +683,43 @@ def dM_dq_pin_to_mjx(dM_dq, M, R, layout: FloatingRootLayout = FloatingRootLayou
     return out
 
 
+def dccrba_dA_dq_pin_to_mjx(dA_dq, A, R, layout: FloatingRootLayout = FloatingRootLayout()):
+    """Transform the CMM config-gradient TENSOR ``dA/dq`` pin->mjx (GRiD ``dccrba``).
+
+    Index convention ``dA_dq[i,l,m] = d A_il / d q_m`` (RBDReference ``dccrba`` order
+    ``dA_dq[:, k, i]``). The CMM ``A`` maps ``qd -> h`` and the centroidal momentum
+    ``h`` lives in the world-aligned CoM frame, so the OUTPUT (momentum-row) index is
+    INVARIANT -- only the velocity/config tangent reparameterization ``G`` acts.
+
+    The value map is the plain column reframe ``A_mjx = A_pin G^{-1}``
+    (:func:`jacobian_pin_to_mjx`, ``h`` invariant). Differentiating along the mjx
+    retract gives a DOUBLE ``G^{-1}`` reframe (the qd-column index ``l`` AND the
+    q-tangent index ``m``) plus a frame term from the q-dependence of ``G^{-1}`` on the
+    3 base-rotation columns::
+
+        out[i,a,k] = sum_{l,m} dA_dq[i,l,m] G^{-1}[l,a] G^{-1}[m,k]
+                     + (k = ang_start+c)  A_pin @ (dG/dtheta_c)^T
+
+    Needs the VALUE ``A`` (ccrba). Validated to ~1e-5 vs FD of the mjx CMM along the
+    mjx retract; the column-reframe-only term is O(1) wrong on the base-rotation cols.
+    Fixed base: returned unchanged."""
+    dA_dq = np.asarray(dA_dq, dtype=np.float64)
+    if not layout.floating:
+        return dA_dq.copy()
+    nv = dA_dq.shape[2]
+    A = np.asarray(A, dtype=np.float64)
+    G = g_matrix(R, nv, layout); Ginv = G.T
+    # reframe the q-tangent index m, then the qd-column index l, both by G^{-1}.
+    tmp = np.einsum('ilm,mk->ilk', dA_dq, Ginv)
+    out = np.einsum('la,ilk->iak', Ginv, tmp)
+    # frame term on the base-rotation columns: A d(G^{-1})/dtheta_c = A (dG/dtheta_c)^T.
+    for c in range(3):
+        k = layout.ang_start + c
+        Gd = g_dot(R, c, nv, layout)
+        out[:, :, k] += A @ Gd.T
+    return out
+
+
 def _id_input_xi_jacobians(qd_pin, qdd_pin, R, nv, layout):
     """The base-point first derivatives of the mjx->pin INPUT conversions wrt a
     q-perturbation xi (Jv_q = d qd_pin/dxi, Ja_q = d qdd_pin/dxi). Mirrors the

@@ -256,6 +256,33 @@ def test_dM_dq_tensor_matches_fd():
     assert np.abs(an - fd).max() < 1e-5
 
 
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_dccrba_dA_dq_tensor_matches_fd():
+    """The CMM gradient TENSOR dA/dq transform (GRiD ``dccrba``) matches FD of the
+    mjx CMM (A_mjx = A_pin G^{-1}) along the mjx retract."""
+    ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(9)
+    q, qd, _, _ = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L)
+
+    def Amjx(qq):
+        A = np.asarray(ref.ccrba(qq, qd)[0])
+        return mc.jacobian_pin_to_mjx(A, mc.base_rotation(qq, L), L)
+
+    fd = np.zeros((6, nv, nv)); h = 1e-6
+    for k in range(nv):
+        e = np.zeros(nv); e[k] = h
+        fd[:, :, k] = (Amjx(mc.mjx_retract(q, e, ref, L)) - Amjx(mc.mjx_retract(q, -e, ref, L))) / (2 * h)
+    dA_dq_pin = np.asarray(ref.dccrba(q))                 # [i, l, m] = dA_il/dq_m
+    A_pin = np.asarray(ref.ccrba(q, qd)[0])
+    an = mc.dccrba_dA_dq_pin_to_mjx(dA_dq_pin, A_pin, R, L)
+    assert np.abs(an - fd).max() < 1e-5
+    # the double-reframe WITHOUT the base-rotation frame term is O(1) wrong.
+    G = mc.g_matrix(R, nv, L); Ginv = G.T
+    no_frame = np.einsum('ilm,la,mk->iak', dA_dq_pin, Ginv, Ginv)
+    assert np.abs(no_frame - fd).max() > 0.1
+
+
 def second_order_id_reference(ad, q, qd, qdd, k_dirs, L, h=1e-6):
     """Numerical reference for the mjx d2tau/dq2 tensor: central-difference the
     VALIDATED analytic first-order mjx ``dtau/dq`` along the mjx retract. Correct by
