@@ -656,6 +656,76 @@ def test_integrator_gradient_fixed_base_is_noop():
 
 
 # ---------------------------------------------------------------------------
+# Integrator hessian (2nd-order discrete state-transition tensor d2AB)
+# ---------------------------------------------------------------------------
+
+def _mjx_integrator_grad_an(ad, q_mjx, v_mjx, u_mjx, dt, it, L):
+    """Analytic mjx integrator GRADIENT dAB = [A|B] at the mjx state (the function
+    the 2nd derivative differentiates). mjx inputs -> pin, pin gradient, pin->mjx."""
+    ref = ad.reference
+    q_pin = mc.q_mjx_to_pin(q_mjx, L); R = mc.base_rotation(q_pin, L)
+    v_pin = mc.v_mjx_to_pin(v_mjx, R, L); u_pin = mc.force_mjx_to_pin(u_mjx, R, L)
+    dAB_pin = np.asarray(ref.integrator_gradient(q_pin, v_pin, u_pin, dt, it), float)
+    Minv = ad.minv(q_pin); qdd = np.asarray(ref.forward_dynamics(q_pin, v_pin, u_pin))
+    return mc.integrator_gradient_pin_to_mjx(dAB_pin, Minv, qdd, v_pin, u_pin, R, dt, it, L)
+
+
+def _fd_mjx_d2AB(ad, q_mjx, v_mjx, u_mjx, dt, it, L, h=1e-6):
+    """FD d2AB[o,a,b] = d/dz_mjx[a] ( integrator_gradient_mjx[o,b] ) — central
+    difference of the validated analytic mjx gradient along the mjx retract
+    (q/qd/u perturbations), mirroring test_second_order_*_tensors_match_fd."""
+    ref = ad.reference; nv = ad.nv; nz = 3 * nv
+    H = np.zeros((2 * nv, nz, nz))
+    for k in range(nv):                                              # dq_mjx
+        e = np.zeros(nv); e[k] = h
+        qp = mc.q_pin_to_mjx(mc.mjx_retract(mc.q_mjx_to_pin(q_mjx, L), e, ref, L), L)
+        qm = mc.q_pin_to_mjx(mc.mjx_retract(mc.q_mjx_to_pin(q_mjx, L), -e, ref, L), L)
+        H[:, k, :] = (_mjx_integrator_grad_an(ad, qp, v_mjx, u_mjx, dt, it, L)
+                      - _mjx_integrator_grad_an(ad, qm, v_mjx, u_mjx, dt, it, L)) / (2 * h)
+    for k in range(nv):                                              # dqd_mjx
+        e = np.zeros(nv); e[k] = h
+        H[:, nv + k, :] = (_mjx_integrator_grad_an(ad, q_mjx, v_mjx + e, u_mjx, dt, it, L)
+                           - _mjx_integrator_grad_an(ad, q_mjx, v_mjx - e, u_mjx, dt, it, L)) / (2 * h)
+    for k in range(nv):                                              # du_mjx
+        e = np.zeros(nv); e[k] = h
+        H[:, 2 * nv + k, :] = (_mjx_integrator_grad_an(ad, q_mjx, v_mjx, u_mjx + e, dt, it, L)
+                               - _mjx_integrator_grad_an(ad, q_mjx, v_mjx, u_mjx - e, dt, it, L)) / (2 * h)
+    return H
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+@pytest.mark.parametrize("it", ["euler", "si_euler"])
+def test_integrator_hessian_matches_fd(it):
+    """The transformed mjx integrator Hessian d2AB matches FD of the validated mjx
+    integrator GRADIENT along the mjx retract (q/qd/u perturbations), both
+    integrators -- the 2nd-order analogue of test_integrator_gradient_matches_fd."""
+    ad = _go2("floating"); nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
+    rng = np.random.default_rng(7)
+    q, qd, _, u = _rand_state(rng, nq, nv)
+    R = mc.base_rotation(q, L); dt = 0.01
+    q_mjx = mc.q_pin_to_mjx(q, L); v_mjx = mc.v_pin_to_mjx(qd, R, L); u_mjx = mc.v_pin_to_mjx(u, R, L)
+    fd = _fd_mjx_d2AB(ad, q_mjx, v_mjx, u_mjx, dt, it, L)
+    d2AB_pin = np.asarray(ad.reference.plant_step_hessian(q, qd, u, dt, it), float)
+    dAB_pin = np.asarray(ad.reference.integrator_gradient(q, qd, u, dt, it), float)
+    qdd = np.asarray(ad.forward_dynamics(q, qd, u))
+    an = mc.integrator_hessian_pin_to_mjx(d2AB_pin, dAB_pin, qdd, qd, u, R, dt, it, L)
+    assert np.abs(an - fd).max() < 1e-5
+
+
+@pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
+def test_integrator_hessian_fixed_base_is_noop():
+    ad = _go2("fixed"); nv = ad.nv; L = mc.FIXED_BASE
+    rng = np.random.default_rng(2)
+    q, qd, _, u = _rand_state(rng, ad.nq, nv); dt = 0.01
+    qdd = np.asarray(ad.forward_dynamics(q, qd, u))
+    for it in ("euler", "si_euler"):
+        d2AB = np.asarray(ad.reference.plant_step_hessian(q, qd, u, dt, it), float)
+        dAB = np.asarray(ad.reference.integrator_gradient(q, qd, u, dt, it), float)
+        out = mc.integrator_hessian_pin_to_mjx(d2AB, dAB, qdd, qd, u, np.eye(3), dt, it, L)
+        assert np.array_equal(out, d2AB)
+
+
+# ---------------------------------------------------------------------------
 # Direct MuJoCo cross-check on a minimal matched model (skipped if no mujoco)
 # ---------------------------------------------------------------------------
 

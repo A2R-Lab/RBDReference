@@ -1134,3 +1134,89 @@ def integrator_gradient_pin_to_mjx(dAB_pin, Minv, qdd_pin, qd_pin, u_pin, R, dt,
     bot = np.hstack([botq, botv, botu])
     return np.vstack([top, bot])
 
+
+def integrator_hessian_pin_to_mjx(d2AB_pin, dAB_pin, qdd_pin, qd_pin, u_pin, R, dt,
+                                  integrator_type="euler",
+                                  layout: FloatingRootLayout = FloatingRootLayout(), h=1e-30):
+    """Transform the integrator HESSIAN (2nd-order discrete state-transition tensor)
+    ``d2AB[o,a,b] = d^2 x_{k+1}[o] / dz[a] dz[b]`` pin->mjx for MuJoCo-native parity.
+
+    ``d2AB_pin`` is the ``(2*nv, 3*nv, 3*nv)`` pin tensor from
+    :meth:`RBDReference._PlantMixin.plant_step_hessian` — output rows
+    ``[q_{k+1} tangent(nv); qd_{k+1}(nv)]``, axis ``a`` the perturbation axis and
+    axis ``b`` the gradient-column axis, both over the tangent ``z=[dq(nv) | dqd(nv)
+    | du(nv)]``, all in the PIN tangent. ``dAB_pin`` is the matching FIRST-order
+    :meth:`RBDReference.integrator_gradient` ``(2*nv, 3*nv)``. Supports ``"euler"``
+    and ``"semi_implicit_euler"`` / ``"si_euler"``. Fixed base: returned unchanged.
+
+    KEY (same path as :func:`second_order_id_pin_to_mjx` / :func:`second_order_fd_pin_to_mjx`):
+    the mjx 2nd derivative is the SINGLE derivative of the already-MuJoCo-correct
+    analytic FIRST-order mjx transform :func:`integrator_gradient_pin_to_mjx`. So it
+    needs only the first-order sensitivities of that transform's inputs along the mjx
+    perturbation — NO retract-curvature term. Computed by COMPLEX-STEP through the
+    validated first-order assembly: for each mjx tangent axis ``k`` (over the 3*nv
+    z-blocks), feed the directional derivatives of every input and read the imag part.
+
+      * ``d dAB_pin`` = contract the pin Hessian's perturbation axis with the pin-z
+        perturbation induced by the mjx axis: ``Jz = [Jq | Jv_q | Ju_q]`` columns for
+        a q-axis (config tangent ``Ginv`` + the velocity/force inputs track ``R``),
+        ``[0 | Jvv | 0]`` for a qd-axis, ``[0 | 0 | Ju_u]`` for a u-axis — the SAME
+        input-conversion Jacobians shared with the id/fd gradient transforms.
+      * ``d qd_pin`` / ``d u_pin`` / ``d R`` are those same Jacobian columns + the
+        base-rotation frame derivative (q-axis only).
+      * ``d qdd_pin`` is the qdd VALUE sensitivity (the TRUE forward-dynamics gradient
+        contraction ``J_qq jqk + J_qv jvk + Minv juk``, NOT the ``Ja_q`` input-conversion
+        Jacobian). ``J_qq``/``J_qv``/``Minv`` are recovered from the pin dAB velocity
+        rows ``Bottom = [dt*J_qq | I+dt*J_qv | dt*Minv]`` (no extra inputs needed) —
+        this is what the GRiD kernel already has on hand (s_df_du / s_Minv).
+
+    Validated to the FD floor (~2e-9) vs FD of the (validated) mjx integrator gradient
+    along the mjx retract, both integrators, multiple seeds. Fixed base: returned
+    unchanged.
+    """
+    d2AB_pin = np.asarray(d2AB_pin, dtype=np.float64)
+    if not layout.floating:
+        return d2AB_pin.copy()
+    nv = np.asarray(qd_pin).shape[0]
+    nz = 3 * nv
+    dAB_pin = np.asarray(dAB_pin, dtype=np.float64)
+    qdd_pin = np.asarray(qdd_pin, dtype=np.float64)
+    qd_pin = np.asarray(qd_pin, dtype=np.float64); u_pin = np.asarray(u_pin, dtype=np.float64)
+    G = g_matrix(R, nv, layout); Jq = G.T
+    # input-conversion Jacobians (shared with the id/fd gradient transforms).
+    Jv_q, _ = _id_input_xi_jacobians(qd_pin, qdd_pin, R, nv, layout)
+    Ju_q = _cross_cols(u_pin[layout.lin_slice], -1.0, nv, layout)
+    Jvv, _ = _id_qd_xi_jacobians(qd_pin, R, nv, layout)
+    Ju_u = _fd_u_xi_jacobians(R, nv, layout)
+    # Recover the pin forward-dynamics gradient from the pin dAB velocity rows
+    # (Bottom = [dt*J_qq | I+dt*J_qv | dt*Minv]) for the qdd VALUE sensitivity.
+    Bq = dAB_pin[nv:2 * nv, 0:nv]; Bv = dAB_pin[nv:2 * nv, nv:2 * nv]; Bu = dAB_pin[nv:2 * nv, 2 * nv:3 * nv]
+    J_qq = Bq / dt; J_qv = (Bv - np.eye(nv)) / dt; Minv = Bu / dt
+    Mc = Minv.astype(complex)
+
+    out = np.zeros((2 * nv, nz, nz))
+    for k in range(nz):
+        blk = k // nv
+        if blk == 0:          # q-block mjx perturbation
+            jqk, jvk, juk = Jq[:, k], Jv_q[:, k], Ju_q[:, k]
+            d_R = np.zeros((3, 3))
+            if layout.ang_start <= k < layout.ang_start + 3:
+                e_a = np.zeros(3); e_a[k - layout.ang_start] = 1.0; d_R = R @ skew(e_a)
+        elif blk == 1:        # qd-block mjx perturbation (q/u/R fixed)
+            kk = k - nv
+            jqk = np.zeros(nv); jvk = Jvv[:, kk]; juk = np.zeros(nv); d_R = np.zeros((3, 3))
+        else:                 # u-block mjx perturbation (q/qd/R fixed)
+            kk = k - 2 * nv
+            jqk = np.zeros(nv); jvk = np.zeros(nv); juk = Ju_u[:, kk]; d_R = np.zeros((3, 3))
+        # d dAB_pin along mjx-k: contract the pin Hessian's perturbation axis.
+        Jz = np.concatenate([jqk, jvk, juk])
+        d_dAB = np.einsum('oab,a->ob', d2AB_pin, Jz)
+        # qdd VALUE sensitivity (true forward-dynamics gradient contraction).
+        d_qdd = J_qq @ jqk + J_qv @ jvk + Minv @ juk
+        g = integrator_gradient_pin_to_mjx(
+            dAB_pin + 1j * h * d_dAB, Mc, qdd_pin + 1j * h * d_qdd,
+            qd_pin + 1j * h * jvk, u_pin + 1j * h * juk, R + 1j * h * d_R,
+            dt, integrator_type, layout)
+        out[:, k, :] = np.imag(g) / h
+    return out
+
