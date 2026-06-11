@@ -4028,7 +4028,17 @@ class RBDReference(
                             # S_d @ IC[j] is just T1
                             # self.dual_cross_operator(S_d) @ IC[j] is first part of D1
                             # Reuse these in CUDA
-                            d2tau_dqd[cc,dd,dd] = (S_d.T @ IC[j] @ self.cross_operator(S_c) + S_c.T @ self.dual_cross_operator(S_d) @ IC[j] )  @ S_d
+                            # Scatter into every (cc, dd, ee) cell where e is a
+                            # DoF-column of the SAME joint j as d: the trailing
+                            # motion-subspace factor is S_e (the third tensor
+                            # axis), distinct from the row factor S_d for a
+                            # multi-DoF (spherical/ball) joint. For a 1-DoF joint
+                            # this loop runs once with ee==dd, S_e==S_d, exactly
+                            # reproducing the original diagonal write.
+                            for e in range(S[j].shape[1]):
+                                ee = body_v_inds[j][e]
+                                S_e = S[j][:, e]
+                                d2tau_dqd[cc,dd,ee] = (S_d.T @ IC[j] @ self.cross_operator(S_c) + S_c.T @ self.dual_cross_operator(S_d) @ IC[j] )  @ S_e
                             
                             dM_dq[cc,st_j_inds,dd] = t8.T @ D4[:, st_j_inds]
                             dM_dq[st_j_inds,cc,dd] = dM_dq[cc,st_j_inds,dd]

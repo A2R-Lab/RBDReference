@@ -421,14 +421,9 @@ def _so3_log_xyzw(qr):
 # WHICH BLOCKS THE VALUE-FD VERIFIES (see the per-block status below):
 #  - daba_dvdq (qd-q) and daba_dtdq (u-q): match the value-FD to ~1e-5 (FD floor)
 #    for BOTH fixtures -- asserted here.
-#  - daba_dvdv (qd-qd): pure-velocity (no manifold), matches for the ROOT-ball
-#    fixture (spherical_arm) but NOT for the MID-CHAIN ball (mixed_spherical_arm),
-#    where ref.idsva_so's d2tau_dqd carries a spurious cross term inside the ball
-#    velocity sub-block (robust ~0.5-0.9 abs across seeds). That is an
-#    idsva_so/RBDReference-level oracle issue (NOT the fdsva_so contract, which is
-#    dimension-agnostic, and NOT the CUDA routing, which reproduces ref.fdsva_so
-#    exactly) -- so daba_dvdv is asserted only for the root-ball fixture and
-#    structurally (jk-symmetry) for the mid-chain one, pending the idsva_so fix.
+#  - daba_dvdv (qd-qd): pure-velocity (no manifold), matches the value-FD to the
+#    FD floor for BOTH the ROOT-ball fixture (spherical_arm) and the MID-CHAIN
+#    ball (mixed_spherical_arm) -- asserted here for both.
 #  - daba_dqdq (q-q): the SO(3)-tangent second derivative does NOT equal a naive
 #    double-integrate value-FD (consecutive non-commuting retractions add a
 #    connection/curvature term the analytic path includes) -- the same effect
@@ -448,10 +443,9 @@ def test_spherical_fdsva_so_matches_value_finite_difference(
     second-derivative blocks match a 4-point finite difference of the
     forward_dynamics VALUE (q perturbed in the SO(3) tangent via ref.integrate)
     to the FD floor, for BOTH the root-ball and mid-chain-ball fixtures. The
-    qd-qd block is value-FD-verified for the root-ball fixture; all four blocks
-    are checked structurally (finite + the expected jk-symmetry). See the module
-    note above for the mid-chain daba_dvdv idsva_so caveat and the SO(3)-tangent
-    daba_dqdq curvature note."""
+    qd-qd block is value-FD-verified for both fixtures; all four blocks are
+    checked structurally (finite + the expected jk-symmetry). See the module
+    note above for the SO(3)-tangent daba_dqdq curvature note."""
     robot = _grid(fixture)
     ref = RBDReference(robot)
     h = 1e-5
@@ -503,9 +497,8 @@ def test_spherical_fdsva_so_matches_value_finite_difference(
                                    err_msg=f"{fixture} daba_dvdq vs value-FD")
         np.testing.assert_allclose(dtdq, fd_dtdq, atol=2e-3, rtol=0,
                                    err_msg=f"{fixture} daba_dtdq vs value-FD")
-        # daba_dvdv: value-FD-exact for the ROOT-ball fixture; the mid-chain ball
-        # carries the known idsva_so d2tau_dqd cross-term (see module note), so it
-        # is only asserted (against the value-FD) where the oracle currently agrees.
-        if fixture == "spherical_arm.urdf":
-            np.testing.assert_allclose(dvdv, fd_dvdv, atol=2e-3, rtol=0,
-                                       err_msg=f"{fixture} daba_dvdv vs value-FD")
+        # daba_dvdv: value-FD-exact for BOTH the root-ball and mid-chain-ball
+        # fixtures (the mid-chain ball d2tau_dqd off-diagonal cells are now
+        # populated correctly -- see idsva_so_body_frame).
+        np.testing.assert_allclose(dvdv, fd_dvdv, atol=2e-3, rtol=0,
+                                   err_msg=f"{fixture} daba_dvdv vs value-FD")
