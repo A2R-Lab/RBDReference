@@ -34,8 +34,9 @@ class RBDReference(
             (tau += damping*qd + friction*sign(qd)). DEFAULT False to stay
             consistent with bare Pinocchio's `pin.rnea`/`pin.aba`, which IGNORE
             `model.damping`/`model.friction` in the value path — making this the
-            authoritative-oracle-preserving default. Mirror of the existing
-            opt-in `USE_VELOCITY_DAMPING` on the id-gradient side.
+            authoritative-oracle-preserving default. The id/fd GRADIENTS follow
+            this same flag: when True they add the damping diagonal
+            (d(damping*qd)/dqd) to dc_dqd / qdd_dqd (friction's subgradient is 0).
 
         Returns
         -------
@@ -2620,15 +2621,24 @@ class RBDReference(
         """
         if normalize_input:
             q = self._normalize_q_input(q)
-        # Mimic-aware fast path: the ABA-based recursion below uses per-body
-        # (S, U, d) that diverge by alpha/alpha^2 factors for mimic joints
-        # (see _has_mimic_joints docstring and OPEN ISSUE for `aba`).
-        # Pinocchio's reduced-model inverse is (G^T M_full G)^{-1}, which is
-        # NOT equal to G^T M_full^{-1} G in general -- so the only correct
-        # general handling is to invert the reduced M directly. CRBA already
-        # produces the reduced M (G^T M_full G) via its mimic-aware += pattern,
-        # so for mimic robots we simply invert that.
-        if self._has_mimic_joints():
+        # CRBA-invert fast path. Two cases route here:
+        #  (1) MIMIC: the ABA-based recursion below uses per-body (S, U, d) that
+        #      diverge by alpha/alpha^2 factors for mimic joints (see
+        #      _has_mimic_joints docstring and OPEN ISSUE for `aba`).
+        #      Pinocchio's reduced-model inverse is (G^T M_full G)^{-1}, which is
+        #      NOT equal to G^T M_full^{-1} G in general -- so the only correct
+        #      general handling is to invert the reduced M directly. CRBA already
+        #      produces the reduced M (G^T M_full G) via its mimic-aware +=
+        #      pattern, so we simply invert that.
+        #  (2) MULTI-DoF non-floating joint (SPHERICAL/planar mid-chain): the
+        #      minv_bpass/fpass ABA recursion is scalar-per-DoF (it assumes a
+        #      single-column motion subspace) and raises / mis-handles a body
+        #      that owns a 6x3 S. CRBA handles the multi-column block correctly,
+        #      so invert the dense reduced M for these robots too. The else ABA
+        #      recursion (the cardinal single-DoF case) is untouched, so its
+        #      behavior is unchanged -- this only ADDS coverage for spherical,
+        #      unblocking the fd / SO oracle paths that compose minv.
+        if self._has_mimic_joints() or self._robot_has_multidof_nonfloating_joint():
             M = self.crba(q, normalize_input=False)
             Minv = np.linalg.inv(M)
             if public_output:
@@ -3315,7 +3325,7 @@ class RBDReference(
 
         return dc_dq
 
-    def inverse_dynamics_gradient_bpass_dqd(self, q, df_dqd, USE_VELOCITY_DAMPING = False):
+    def inverse_dynamics_gradient_bpass_dqd(self, q, df_dqd):
         """Backward pass gradient with respect to joint velocities for RNEA.
 
         Parameters
@@ -3351,14 +3361,28 @@ class RBDReference(
                 df_dqd[:,:,parent_ind] += np.matmul(np.transpose(Xmat),df_dqd[:,:,ind])
 
 
-        # add in the damping and simplify this expression later
-        # suggestion: have a getter function that automatically indexes and allocates for floating base functions
-        if USE_VELOCITY_DAMPING:
-            for ind in range(NB):
-                if self.robot.floating_base and self.robot.get_parent_id(ind) == -1:
-                    dc_dqd[ind:ind+5, ind:ind+5] += self.robot.get_damping_by_id(ind)
-                else:
-                    dc_dqd[ind,ind] += self.robot.get_damping_by_id(ind)
+        # Joint-local viscous damping contributes a diagonal term to dc_dqd:
+        # the value bias folds c += alpha*damping*qd_v into each joint's v-slot
+        # (see _joint_dynamics_bias), so d(c)/d(qd_v) = alpha*damping on the
+        # diagonal. Coulomb friction (alpha*f*sign(qd)) has zero (sub)gradient
+        # a.e., so it contributes NOTHING here -- gate on damping only. Mirrors
+        # _joint_dynamics_bias exactly: iterate bodies, map to the reduced
+        # v-slot via get_joint_index_v + the mimic multiplier, skip the floating
+        # root (it carries no damping), and ACCUMULATE so mimic joints sharing a
+        # slot sum. Gated on use_joint_dynamics (connected to the value path),
+        # NOT a separate kwarg.
+        if self.use_joint_dynamics and self.robot.robot_has_joint_damping():
+            for jid in range(NB):
+                if self.robot.floating_base and self.robot.get_parent_id(jid) == -1:
+                    continue  # floating root carries no damping
+                b = float(self.robot.get_damping_by_id(jid))
+                if b == 0.0:
+                    continue
+                idx = self.robot.get_joint_index_v(jid)
+                alpha = self._mimic_multiplier(jid)
+                idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+                for k in idx_list:
+                    dc_dqd[k, k] += alpha * b
 
         return dc_dqd
 
@@ -3368,7 +3392,6 @@ class RBDReference(
         qd,
         qdd = None,
         GRAVITY = -9.81,
-        USE_VELOCITY_DAMPING = False,
         f_ext=None,
         public_output=True,
         normalize_input=True,
@@ -3421,8 +3444,10 @@ class RBDReference(
         # backward pass, dq
         dc_dq = self.inverse_dynamics_gradient_bpass_dq(q, f, df_dq)
 
-        # backward pass, dqd
-        dc_dqd = self.inverse_dynamics_gradient_bpass_dqd(q, df_dqd, USE_VELOCITY_DAMPING)
+        # backward pass, dqd (joint-damping gradient gated internally on
+        # self.use_joint_dynamics, so it follows the value path automatically --
+        # forward_dynamics_gradient inherits it with no extra plumbing).
+        dc_dqd = self.inverse_dynamics_gradient_bpass_dqd(q, df_dqd)
 
         if public_output:
             return self._denormalize_inverse_dynamics_gradient_output(dc_dq, dc_dqd)
