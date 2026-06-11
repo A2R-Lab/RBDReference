@@ -3156,6 +3156,14 @@ class RBDReference(
             # da_du = x*da_du_parent + mxS_onCols(dv_du)*qd + (if c == ind){mxS(Xap)}
             if parent_ind != -1: # note that a_base is constant gravity so da_du parent contribution is 0
                 da_dq[:,:,ind] = np.matmul(Xmat,da_dq[:,:,parent_ind])
+            # Per-DoF columns of the motion subspace. For a 1-DoF (revolute/
+            # prismatic) joint this is a single column and the loop collapses
+            # to the scalar case (byte-identical to before). For a multi-DoF
+            # joint (k=3 spherical, k=6 floating root) S has k columns and the
+            # v-block idx has k entries — the mxS_onCols(dv_dq)*qd term is the
+            # SUM over the k columns, each scaled by qd[idx[j]].
+            idx_cols = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+            S_cols = np.asarray(S).reshape(6, -1)
             for c in range(n):
                 if parent_ind == -1 and self.robot.floating_base:
                     # Floating root: its own velocity derivative dv_dq[:,:,ind] is
@@ -3166,8 +3174,9 @@ class RBDReference(
                     # this term being zero — fixed: skip it explicitly.)
                     pass
                 else:
-                    # qd[idx] for this body is the (alpha-scaled) joint velocity.
-                    da_dq[:,c,ind] += self._mxS(S,dv_dq[:,c,ind], alpha * qd[idx]) # replace with new mxS
+                    # da_dq[:,c,ind] += sum_j (alpha*qd[idx[j]]) * (dv_dq x S[:,j]).
+                    for j, vcol in enumerate(idx_cols):
+                        da_dq[:,c,ind] += self._mxS(S_cols[:,j], dv_dq[:,c,ind], alpha * qd[vcol])
 
             if parent_ind != -1: # note that a_base is just gravity
                 da_dq[:,idx,ind] += alpha * self._mxS(S,np.matmul(Xmat,a[:,parent_ind])) # replace with new mxS
@@ -3230,13 +3239,18 @@ class RBDReference(
             # da_du = x*da_du_parent + mxS_onCols(dv_du)*qd + (if c == ind){mxS(v)}
             if parent_ind != -1: # note that a_base is constant gravity so da_du parent contribution is 0
                 da_dqd[:,:,ind] = np.matmul(Xmat,da_dqd[:,:,parent_ind])
+            # mxS_onCols(dv_dqd)*qd is the SUM over the joint's k DoF columns,
+            # each scaled by qd[idx[j]]. For a 1-DoF joint this is the single
+            # scalar term (byte-identical to before); for a multi-DoF joint
+            # (k=3 spherical, k=6 floating root) it sums the k columns. (This
+            # also replaces the old floating-root special-case, which indexed
+            # S by ROW S[ii] — only coincidentally correct for the identity
+            # root subspace — with the uniform column form S[:,j].)
+            idx_cols = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+            S_cols = np.asarray(S).reshape(6, -1)
             for c in range(n):
-                if parent_ind == -1 and self.robot.floating_base:
-                    for ii in range(len(idx)):
-                        da_dqd[:,c,ind] += self._mxS(S[ii],dv_dqd[:,c,ind],qd[ii])
-                else:
-                    da_dqd[:,c,ind] += self._mxS(S,dv_dqd[:,c,ind], alpha * qd[idx])
-
+                for j, vcol in enumerate(idx_cols):
+                    da_dqd[:,c,ind] += self._mxS(S_cols[:,j], dv_dqd[:,c,ind], alpha * qd[vcol])
 
             da_dqd[:,idx,ind] += alpha * self._mxS(S,v[:,ind])
             # df_du = I*da_du + fx_onCols(dv_du)*Iv + fx(v)*I*dv_du
@@ -3288,9 +3302,15 @@ class RBDReference(
                 _q = self.robot.q_for_joint(ind, q)
                 Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
                 df_dq[:,:,parent_ind] += np.matmul(np.transpose(Xmat),df_dq[:,:,ind])
-                delta_dq = np.matmul(np.transpose(Xmat),self.fxS(S,f[:,ind]))
-                for entry in range(6):
-                    df_dq[entry,idx,parent_ind] += alpha * delta_dq[entry]
+                # X^T * fxS(S, f[ind]) scattered into the parent's own v-columns.
+                # One column per DoF: df_dq[:, idx[j], parent] += X^T fxS(S[:,j], f).
+                # For a 1-DoF joint this is the single-column scalar case
+                # (byte-identical); for k>1 each column j uses S[:,j].
+                idx_cols = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+                S_cols = np.asarray(S).reshape(6, -1)
+                for j, vcol in enumerate(idx_cols):
+                    delta_dq = np.matmul(np.transpose(Xmat), self.fxS(S_cols[:,j], f[:,ind]))
+                    df_dq[:,vcol,parent_ind] += alpha * delta_dq
 
 
         return dc_dq

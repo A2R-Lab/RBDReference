@@ -265,6 +265,68 @@ def test_spherical_dynamics_match_pinocchio(fixture, build_pin, random_q, nq, nv
                      algorithm="forward_dynamics", robot_id=fixture)
 
 
+def _split_id_gradient(out, nv):
+    """RBDReference.inverse_dynamics_gradient returns hstack([dc_dq | dc_dqd])
+    (nv x 2nv); split it into the two nv x nv tangent-space blocks."""
+    return out[:, :nv], out[:, nv:]
+
+
+@pytest.mark.parametrize(("fixture", "build_pin", "random_q", "nq", "nv"), CASES)
+def test_spherical_id_gradient_match_pinocchio(fixture, build_pin, random_q, nq, nv):
+    """inverse_dynamics_gradient (dRNEA/dq, dRNEA/dqd) matches Pinocchio's
+    computeRNEADerivatives (dtau_dq, dtau_dv) for a JointModelSpherical model,
+    covering BOTH the root-spherical (spherical_arm) and the mid-chain-spherical
+    (mixed_spherical_arm, the real NQ!=NV multi-column test) fixtures to ~1e-9.
+
+    dtau_dq / dtau_dv live in the nv-tangent (the SO(3) tangent for the spherical
+    block), so they compare directly against GRiD's nv x nv dc_dq / dc_dqd."""
+    robot = _grid(fixture)
+    ref = RBDReference(robot)
+    pmodel = build_pin()
+    pdata = pmodel.createData()
+    rng = np.random.default_rng(0)
+    for _ in range(25):
+        q = random_q(rng)
+        qd = rng.uniform(-1, 1, nv)
+        qdd = rng.uniform(-1, 1, nv)
+
+        dc_dq, dc_dqd = _split_id_gradient(
+            ref.inverse_dynamics_gradient(q, qd, qdd, normalize_input=False), nv)
+        pin.computeRNEADerivatives(pmodel, pdata, q, qd, qdd)
+
+        assert_close(dc_dq, pdata.dtau_dq,
+                     algorithm="inverse_dynamics", robot_id=fixture)
+        assert_close(dc_dqd, pdata.dtau_dv,
+                     algorithm="inverse_dynamics", robot_id=fixture)
+
+
+def test_floating_spherical_id_gradient_match_pinocchio():
+    """inverse_dynamics_gradient for a free-flyer ROOT + spherical mid-chain
+    (nv=11, TWO NQ!=NV joints: the root quat AND the spherical quat) matches
+    Pinocchio's free-flyer + JointModelSpherical computeRNEADerivatives. This
+    exercises a multi-column da/df term on a non-root body simultaneously with
+    the floating root's own k=6 column block."""
+    robot = _grid_floating("mixed_spherical_arm.urdf")
+    ref = RBDReference(robot)
+    pmodel = _build_pin_floating_mixed()
+    pdata = pmodel.createData()
+    nv = pmodel.nv
+    rng = np.random.default_rng(3)
+    for _ in range(25):
+        q = _q_floating_mixed(rng)
+        qd = rng.uniform(-1, 1, nv)
+        qdd = rng.uniform(-1, 1, nv)
+
+        dc_dq, dc_dqd = _split_id_gradient(
+            ref.inverse_dynamics_gradient(q, qd, qdd, normalize_input=False), nv)
+        pin.computeRNEADerivatives(pmodel, pdata, q, qd, qdd)
+
+        assert_close(dc_dq, pdata.dtau_dq,
+                     algorithm="inverse_dynamics", robot_id="floating_mixed_spherical")
+        assert_close(dc_dqd, pdata.dtau_dv,
+                     algorithm="inverse_dynamics", robot_id="floating_mixed_spherical")
+
+
 @pytest.mark.parametrize(("fixture", "build_pin", "random_q", "nq", "nv"), CASES)
 def test_spherical_integrate_match_pinocchio(fixture, build_pin, random_q, nq, nv):
     """integrate / dIntegrate(ARG0, ARG1) match pin.integrate / pin.dIntegrate;
