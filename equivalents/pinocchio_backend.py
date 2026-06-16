@@ -1301,6 +1301,27 @@ class PinocchioModelAdapter:
         bottom = np.hstack([Z_n, I_n, Z_n]) + dt * sum_b_D
         return np.vstack([top, bottom])
 
+    def _resolve_frame_id(self, target_name: str) -> int:
+        """getFrameId, but deterministic when a URDF reuses one name across frame
+        types. A fixed joint named X whose child link is also X (e.g. baxter's
+        right_hand_camera_axis) yields BOTH a FIXED_JOINT frame and a BODY frame
+        named X, so bare getFrameId raises "Several frames match the filter".
+        GRiD anchors a named fixed target at the joint flange, whose placement is
+        identical to that child BODY frame — so either matching frame gives the
+        same oMf. Prefer FIXED_JOINT, then JOINT, then BODY, else the first match.
+        Unique names hit the single-match fast path (== getFrameId), so this never
+        changes resolution for non-colliding robots."""
+        import pinocchio as pin
+
+        matches = [i for i, f in enumerate(self.model.frames) if f.name == target_name]
+        if len(matches) <= 1:
+            return self.model.getFrameId(target_name)  # 0 or 1 -> let pin handle it
+        for ftype in (pin.FrameType.FIXED_JOINT, pin.FrameType.JOINT, pin.FrameType.BODY):
+            for i in matches:
+                if self.model.frames[i].type == ftype:
+                    return i
+        return matches[0]
+
     def end_effector_pose(self, q, target_name: str, offset=None):
         import pinocchio as pin
 
@@ -1311,7 +1332,7 @@ class PinocchioModelAdapter:
         pin.forwardKinematics(self.model, self.data, q_pin)
         pin.updateFramePlacements(self.model, self.data)
 
-        frame_id = self.model.getFrameId(target_name)
+        frame_id = self._resolve_frame_id(target_name)
         placement = self.data.oMf[frame_id]
         point_local = np.asarray(offset[:3], dtype=np.float64)
         point_world = placement.translation + placement.rotation @ point_local
@@ -1333,7 +1354,7 @@ class PinocchioModelAdapter:
             joint_id = self.model.getJointId(target_name)
             return normalize_matrix(np.asarray(self.data.oMi[joint_id].rotation, dtype=np.float64))
 
-        frame_id = self.model.getFrameId(target_name)
+        frame_id = self._resolve_frame_id(target_name)
         return normalize_matrix(np.asarray(self.data.oMf[frame_id].rotation, dtype=np.float64))
 
     # ----- General-frame Jacobians + operational-space inertia (E2) -----
@@ -1364,7 +1385,7 @@ class PinocchioModelAdapter:
             jid = self.model.getJointId(frame_name)
             J = pin.getJointJacobian(self.model, self.data, jid, ref)
         else:
-            fid = self.model.getFrameId(frame_name)
+            fid = self._resolve_frame_id(frame_name)
             J = pin.getFrameJacobian(self.model, self.data, fid, ref)
         J = np.asarray(J, dtype=np.float64)
         if self.mimic_info is not None and not self.mimic_info.is_empty():
@@ -1387,7 +1408,7 @@ class PinocchioModelAdapter:
             jid = self.model.getJointId(frame_name)
             dJ = pin.getJointJacobianTimeVariation(self.model, self.data, jid, ref)
         else:
-            fid = self.model.getFrameId(frame_name)
+            fid = self._resolve_frame_id(frame_name)
             dJ = pin.getFrameJacobianTimeVariation(self.model, self.data, fid, ref)
         dJ = np.asarray(dJ, dtype=np.float64)
         if self.mimic_info is not None and not self.mimic_info.is_empty():
