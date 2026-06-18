@@ -29,7 +29,7 @@ from RBDReference.tests.model_sources import iter_robot_cases, resolve_robot_spe
 from RBDReference.equivalents.reference_backend import build_project_adapter
 
 
-_INTEGRATORS = ("euler", "semi_implicit_euler", "midpoint", "rk3", "rk4")
+_INTEGRATORS = ("euler", "semi_implicit_euler", "midpoint", "rk3", "rk4", "trapezoidal")
 
 
 def _robot_ids():

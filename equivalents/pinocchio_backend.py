@@ -1218,6 +1218,12 @@ class PinocchioModelAdapter:
             v_new = qd + dt * qdd1
             q_new = self._pin_integrate(q, dt * v_new)
             return np.concatenate([q_new, v_new])
+        if integrator_type == "trapezoidal":
+            # Single-stage: v reads qdd Euler-style; q retracts the combined tangent
+            # dt*qd + 0.5*dt^2*qdd in ONE pin.integrate (SE(3) Lie retract for floating).
+            v_new = qd + dt * qdd1
+            q_new = self._pin_integrate(q, dt * qd + 0.5 * dt * dt * qdd1)
+            return np.concatenate([q_new, v_new])
         c_list, b_list = self._butcher(integrator_type)
         N = len(b_list)
         qdd_list = [qdd1]
@@ -1274,6 +1280,24 @@ class PinocchioModelAdapter:
                               dt_dInt_v @ dvdv,
                               dt_dInt_v @ dvdu])
             bottom = np.hstack([dvdq, dvdv, dvdu])
+            return np.vstack([top, bottom])
+        if integrator_type == "trapezoidal":
+            # v_new = qd + dt*qdd;  q_new = integrate(q, w), w = dt*qd + dt2h*qdd
+            # (dt2h = 0.5*dt^2). Bottom (v) rows match Euler/SI; top (q) rows weight the
+            # FD gradient by dt2h. dInt blocks are taken at w (SE(3) for floating). This
+            # mirrors RBDReference.integrator_gradient via pin.dIntegrate -> independent oracle.
+            J_qq, J_qv, Minv = fd_grad_at(q, qd)
+            qdd_t = self.aba(q, qd, u)
+            dt2h = 0.5 * dt * dt
+            w = dt * qd + dt2h * qdd_t
+            dInt_q, dInt_v = q_top_blocks(w)
+            dwdq = dt2h * J_qq
+            dwdv = dt * I_n + dt2h * J_qv
+            dwdu = dt2h * Minv
+            top = np.hstack([dInt_q + dInt_v @ dwdq,
+                             dInt_v @ dwdv,
+                             dInt_v @ dwdu])
+            bottom = np.hstack([dt * J_qq, I_n + dt * J_qv, dt * Minv])
             return np.vstack([top, bottom])
         c_list, b_list = self._butcher(integrator_type)
         N = len(b_list)

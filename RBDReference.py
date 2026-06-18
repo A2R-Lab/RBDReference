@@ -524,10 +524,10 @@ class RBDReference(
             q_new = self.integrate(q, dt * v_new)
             return np.concatenate([q_new, v_new])
         if integrator_type == "trapezoidal":
-            # GATO/GRiD trapezoidal (single-stage, fixed-base only): v reads qdd
-            # Euler-style; q reads the OLD qd plus the +0.5*dt^2*qdd accel term
-            # (q_new = q + dt*qd + 0.5*dt^2*qdd). Floating trapezoidal is
-            # codegen-refused, so this path is exercised fixed-base only.
+            # GATO/GRiD trapezoidal (single-stage): v reads qdd Euler-style; q
+            # retracts the combined tangent dt*qd + 0.5*dt^2*qdd in ONE step. For
+            # fixed-base this is q + dt*qd + 0.5*dt^2*qdd; for floating-base
+            # self.integrate applies the SE(3) Lie retract of the combined tangent.
             v_new = qd + dt * qdd1
             q_new = self.integrate(q, dt * qd + 0.5 * dt * dt * qdd1)
             return np.concatenate([q_new, v_new])
@@ -613,7 +613,8 @@ class RBDReference(
             # v_new = qd + dt*qdd(q,qd,u);  q_new = integrate(q, dt*qd + dt2h*qdd),
             # dt2h = 0.5*dt*dt. Bottom (v) rows match Euler/SI (dt*); the top (q)
             # rows weight the FD gradient by dt2h (the +0.5*dt^2*qdd accel term).
-            # Fixed-base only (dInt_q/dInt_v collapse to I).
+            # General for both bases: dInt_q/dInt_v collapse to I/dt*I fixed-base,
+            # and carry the SE(3) free-flyer blocks (at tangent w) floating-base.
             J_qq, J_qv, Minv = fd_grad_at(q, qd)
             qdd_t = np.asarray(self.forward_dynamics(q, qd, u, f_ext=f_ext)).reshape(-1)
             dt2h = 0.5 * dt * dt
