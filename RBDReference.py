@@ -497,19 +497,24 @@ class RBDReference(
             return [0.5, 0.5, 1.0], [1.0 / 6.0, 2.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0]
         raise ValueError(f"Unknown integrator_type: {integrator_type}")
 
-    def integrator(self, q, qd, u, dt, integrator_type: str = "euler"):
+    def integrator(self, q, qd, u, dt, integrator_type: str = "euler", f_ext=None):
         """One time-integration step: x_{k+1} = integrator(x_k, u_k, dt).
 
         Returns x_kp1 of shape (nq + nv,) — concatenated [q_new, v_new] in the
         user-facing q/v convention. Supports 'euler', 'semi_implicit_euler',
-        'midpoint', 'rk3', 'rk4'. For floating-base robots the q-update uses
-        `self.integrate` (Lie-group retract); for fixed-base this collapses
-        to `q + dt*v`.
+        'trapezoidal', 'midpoint', 'rk3', 'rk4'. For floating-base robots the
+        q-update uses `self.integrate` (Lie-group retract); for fixed-base this
+        collapses to `q + dt*v`.
+
+        `f_ext` (optional, body-major local-frame [angular; linear], one 6-vector
+        per body) is threaded into every forward-dynamics evaluation so the step
+        is taken at the f_ext-perturbed operating point (matches GRiD threading
+        d_f_ext through the integrator's FD inner). None => no external forces.
         """
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
         u = np.asarray(u, dtype=np.float64)
-        qdd1 = np.asarray(self.forward_dynamics(q, qd, u)).reshape(-1)
+        qdd1 = np.asarray(self.forward_dynamics(q, qd, u, f_ext=f_ext)).reshape(-1)
         if integrator_type == "euler":
             q_new = self.integrate(q, dt * qd)
             v_new = qd + dt * qdd1
@@ -517,6 +522,14 @@ class RBDReference(
         if integrator_type in ("semi_implicit_euler", "si_euler"):
             v_new = qd + dt * qdd1
             q_new = self.integrate(q, dt * v_new)
+            return np.concatenate([q_new, v_new])
+        if integrator_type == "trapezoidal":
+            # GATO/GRiD trapezoidal (single-stage, fixed-base only): v reads qdd
+            # Euler-style; q reads the OLD qd plus the +0.5*dt^2*qdd accel term
+            # (q_new = q + dt*qd + 0.5*dt^2*qdd). Floating trapezoidal is
+            # codegen-refused, so this path is exercised fixed-base only.
+            v_new = qd + dt * qdd1
+            q_new = self.integrate(q, dt * qd + 0.5 * dt * dt * qdd1)
             return np.concatenate([q_new, v_new])
         # Multi-stage RK family — TrajoptPlant convention: each stage uses the
         # ORIGINAL v for its xdot.v term (only qdd is refined across stages).
@@ -528,7 +541,7 @@ class RBDReference(
             c_prev = c_list[stage_idx - 1]
             p_q  = self.integrate(q, c_prev * dt * qd)
             p_qd = qd + c_prev * dt * prev_qdd
-            stage_qdd = np.asarray(self.forward_dynamics(p_q, p_qd, u)).reshape(-1)
+            stage_qdd = np.asarray(self.forward_dynamics(p_q, p_qd, u, f_ext=f_ext)).reshape(-1)
             qdd_list.append(stage_qdd)
             prev_qdd = stage_qdd
         accel = sum(b * qdd for b, qdd in zip(b_list, qdd_list))
@@ -536,11 +549,16 @@ class RBDReference(
         v_new = qd + dt * accel
         return np.concatenate([q_new, v_new])
 
-    def integrator_gradient(self, q, qd, u, dt, integrator_type: str = "euler"):
+    def integrator_gradient(self, q, qd, u, dt, integrator_type: str = "euler", f_ext=None):
         """Return [A | B] of shape (2*nv, 3*nv) — the Jacobian of the integrator
         step in tangent space. Column order is [d/dq | d/dqd | d/du] where
         d/dq is the nv-tangent perturbation of q (NOT the nq scalar
         perturbation). For fixed-base this matches the historical layout.
+
+        `f_ext` (optional, body-major local-frame) is threaded into every FD value
+        and FD-gradient evaluation, so the gradient is linearized at the
+        f_ext-perturbed operating point (matches GRiD threading d_f_ext into the
+        integrator gradient's vaf/ID linearization). None => no external forces.
         """
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
@@ -550,7 +568,7 @@ class RBDReference(
         Z_n = np.zeros((nv, nv))
 
         def fd_grad_at(pq, pqd):
-            J_qq, J_qv = self.forward_dynamics_gradient(pq, pqd, u)
+            J_qq, J_qv = self.forward_dynamics_gradient(pq, pqd, u, f_ext=f_ext)
             return (np.asarray(J_qq, dtype=np.float64),
                     np.asarray(J_qv, dtype=np.float64),
                     np.asarray(self.minv(pq), dtype=np.float64))
@@ -579,7 +597,7 @@ class RBDReference(
             # ∂q_new/∂q  = dInt_q(dt*v_new) + dt*dInt_v(dt*v_new) @ ∂v_new/∂q
             # ∂q_new/∂qd = dt*dInt_v(dt*v_new) @ ∂v_new/∂qd
             # ∂q_new/∂u  = dt*dInt_v(dt*v_new) @ ∂v_new/∂u
-            qdd_si = np.asarray(self.forward_dynamics(q, qd, u)).reshape(-1)
+            qdd_si = np.asarray(self.forward_dynamics(q, qd, u, f_ext=f_ext)).reshape(-1)
             v_new = qd + dt * qdd_si
             dInt_q, dInt_v = q_top_blocks(dt * v_new)
             dvdq = dt * J_qq
@@ -591,13 +609,33 @@ class RBDReference(
                               dt_dInt_v @ dvdu])
             bottom = np.hstack([dvdq, dvdv, dvdu])
             return np.vstack([top, bottom])
+        if integrator_type == "trapezoidal":
+            # v_new = qd + dt*qdd(q,qd,u);  q_new = integrate(q, dt*qd + dt2h*qdd),
+            # dt2h = 0.5*dt*dt. Bottom (v) rows match Euler/SI (dt*); the top (q)
+            # rows weight the FD gradient by dt2h (the +0.5*dt^2*qdd accel term).
+            # Fixed-base only (dInt_q/dInt_v collapse to I).
+            J_qq, J_qv, Minv = fd_grad_at(q, qd)
+            qdd_t = np.asarray(self.forward_dynamics(q, qd, u, f_ext=f_ext)).reshape(-1)
+            dt2h = 0.5 * dt * dt
+            w = dt * qd + dt2h * qdd_t
+            dInt_q, dInt_v = q_top_blocks(w)
+            # q_new = integrate(q, w):  dw/dq = dt2h*J_qq, dw/dqd = dt*I + dt2h*J_qv,
+            # dw/du = dt2h*Minv. top = dInt_q + dInt_v @ dw/d*.
+            dwdq = dt2h * J_qq
+            dwdv = dt * I_n + dt2h * J_qv
+            dwdu = dt2h * Minv
+            top = np.hstack([dInt_q + dInt_v @ dwdq,
+                             dInt_v @ dwdv,
+                             dInt_v @ dwdu])
+            bottom = np.hstack([dt * J_qq, I_n + dt * J_qv, dt * Minv])
+            return np.vstack([top, bottom])
         # ----- Multi-stage chain rule (Midpoint / RK3 / RK4) -----
         c_list, b_list = self._integrator_butcher(integrator_type)
         N = len(b_list)
         qdd_list = []
         D_qdd_list = []
         # Stage 1: FD at the original (q, qd).
-        qdd_list.append(np.asarray(self.forward_dynamics(q, qd, u)).reshape(-1))
+        qdd_list.append(np.asarray(self.forward_dynamics(q, qd, u, f_ext=f_ext)).reshape(-1))
         J_qq, J_qv, Minv = fd_grad_at(q, qd)
         D_qdd_list.append(np.hstack([J_qq, J_qv, Minv]))  # (nv, 3*nv)
         # Subsequent stages: chain rule through self.integrate at the
@@ -607,7 +645,7 @@ class RBDReference(
             prev_qdd = qdd_list[-1]
             p_q = self.integrate(q, c_prev * dt * qd)
             p_qd = qd + c_prev * dt * prev_qdd
-            stage_qdd = np.asarray(self.forward_dynamics(p_q, p_qd, u)).reshape(-1)
+            stage_qdd = np.asarray(self.forward_dynamics(p_q, p_qd, u, f_ext=f_ext)).reshape(-1)
             qdd_list.append(stage_qdd)
             J_qq_i, J_qv_i, Minv_i = fd_grad_at(p_q, p_qd)
             # ∂p_i.q / ∂(q, v, u) — block structure (each (nv, nv)):
