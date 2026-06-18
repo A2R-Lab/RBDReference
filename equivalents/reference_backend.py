@@ -191,15 +191,18 @@ class ProjectModelAdapter:
     # forward_dynamics, minv, etc.). Floating-base support is implemented
     # in RBDReference via Lie-group retract + SO(3) right-Jacobian.
 
-    def integrator(self, q, qd, u, dt, integrator_type: str = "euler"):
-        return normalize_vector(self.reference.integrator(q, qd, u, dt, integrator_type=integrator_type))
+    def integrator(self, q, qd, u, dt, integrator_type: str = "euler", f_ext=None):
+        return normalize_vector(
+            self.reference.integrator(q, qd, u, dt, integrator_type=integrator_type, f_ext=f_ext)
+        )
 
-    def integrator_gradient(self, q, qd, u, dt, integrator_type: str = "euler"):
+    def integrator_gradient(self, q, qd, u, dt, integrator_type: str = "euler", f_ext=None):
         """Return [A | B] of shape (2*nv, 3*nv) in tangent-space column order
         [d/dq | d/dqd | d/du]. For floating-base the d/dq columns are in the
-        nv-tangent of q (not the nq scalar perturbation)."""
+        nv-tangent of q (not the nq scalar perturbation). `f_ext` (optional,
+        body-major local-frame) is threaded into every FD value/gradient eval."""
         return normalize_matrix(
-            self.reference.integrator_gradient(q, qd, u, dt, integrator_type=integrator_type)
+            self.reference.integrator_gradient(q, qd, u, dt, integrator_type=integrator_type, f_ext=f_ext)
         )
 
     # ----- General-frame Jacobians + operational-space inertia (E2) -----
