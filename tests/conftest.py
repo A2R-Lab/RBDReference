@@ -166,6 +166,41 @@ def require_developer_dependencies():
         )
 
 
+def _model_has_mimic(model):
+    """Robustly detect a mimic robot from either a pinocchio adapter (carries
+    ``mimic_info``) or a project adapter (carries the underlying URDFParser robot)."""
+    mi = getattr(model, "mimic_info", None)
+    if mi is not None:
+        return not mi.is_empty()
+    ref = getattr(model, "reference", None)
+    robot = getattr(ref, "robot", None) or getattr(model, "robot", None)
+    if robot is not None:
+        if hasattr(robot, "robot_has_mimic_joints"):
+            return bool(robot.robot_has_mimic_joints())
+        joints = getattr(robot, "joints", None)
+        if joints:
+            return any(getattr(j, "is_mimic", False) for j in joints)
+    return False
+
+
+def xfail_if_mimic(request, spec, model, *, reason):
+    """Gate the T4-owned mimic-folding gaps. If the robot has mimic joints, mark
+    the current test xfail with ``strict=False`` — the test still RUNS, so when the
+    T4 mimic fix lands it surfaces as XPASS instead of staying silently red/green.
+
+    The project reduced-model paths are not yet mimic-folding aware in three places
+    this gates: f_ext gradient builds 6*num_bodies wrench columns vs pinocchio's
+    6*nv reduced; the floating two-convention cross-check; and Minv-amplified
+    gradients (integrator_gradient). Tracked: PINOCCHIO_ALIGNMENT_BACKLOG
+    ("f_ext not threaded through the mimic FD fast path"), owner T4. Non-mimic
+    robots are unaffected (the guard is a no-op). ``model`` may be a pinocchio
+    adapter or a project adapter (both are handled)."""
+    if _model_has_mimic(model):
+        request.applymarker(
+            pytest.mark.xfail(reason=f"{spec.robot_id} (mimic): {reason}", strict=False)
+        )
+
+
 def build_case_params(base_mode=None):
     params = []
     for case in iter_robot_cases(MANIFEST_PATH, base_mode=base_mode):
