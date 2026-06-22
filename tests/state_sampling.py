@@ -59,6 +59,41 @@ def _make_zero_state(adapter) -> DynamicsSample:
     return DynamicsSample(name="zero", q=q, qd=qd, qdd=qdd)
 
 
+def _make_nominal_state(adapter) -> DynamicsSample:
+    """Small, deterministic, NON-singular near-home pose (qd = qdd = 0).
+
+    Replaces exact zero as the *primary* low-energy sample: q = 0 puts many
+    robots in a kinematic singularity (aligned/parallel axes, gimbal lock,
+    coincident frames) that masks real bugs and amplifies conditioning noise on
+    near-singular models. A small offset (|q| ~ 0.1 rad/m, clamped to joint
+    limits) keeps the same static-gravity regime (zero velocity/acceleration)
+    while stepping off the singular config. Deterministic (no RNG draw) so the
+    subsequent random samples stay byte-identical to before this sample existed.
+    """
+    q = np.zeros(adapter.nq, dtype=np.float64)
+    qd = np.zeros(adapter.nv, dtype=np.float64)
+    qdd = np.zeros(adapter.nv, dtype=np.float64)
+
+    if adapter.base_mode == "floating":
+        q[0:3] = np.array([0.05, -0.05, 0.05], dtype=np.float64)
+        quat_xyzw = np.array([0.05, 0.05, 0.05, 1.0], dtype=np.float64)  # a little off identity
+        q[3:7] = quat_xyzw / np.linalg.norm(quat_xyzw)
+        joint_offset, skip_joint_ids = 7, 1
+    else:
+        joint_offset, skip_joint_ids = 0, 0
+    joint_count = adapter.nq - joint_offset
+
+    if joint_count:
+        bounds = _joint_ranges(
+            adapter.robot, joint_count, -0.1, 0.1, skip_joint_ids=skip_joint_ids,
+        )
+        # deterministic alternating +/-0.1, clamped into each joint's range
+        base = 0.1 * np.where(np.arange(joint_count) % 2 == 0, 1.0, -1.0)
+        q[joint_offset:] = np.clip(base, bounds[:, 0], bounds[:, 1]).astype(np.float64)
+
+    return DynamicsSample(name="nominal", q=q, qd=qd, qdd=qdd)
+
+
 def _make_conservative_state(adapter, rng: np.random.Generator) -> DynamicsSample:
     q = np.zeros(adapter.nq, dtype=np.float64)
     qd = rng.uniform(-1.0, 1.0, size=adapter.nv).astype(np.float64)
@@ -129,7 +164,9 @@ def _make_energetic_state(
 
 def build_dynamics_samples(adapter) -> List[DynamicsSample]:
     rng = np.random.default_rng(RNG_SEED)
-    samples = [_make_zero_state(adapter), _make_conservative_state(adapter, rng)]
+    # Lead with a small non-singular pose (not exact zero, which is singular for
+    # many robots); keep the exact-zero degenerate case but no longer first.
+    samples = [_make_nominal_state(adapter), _make_conservative_state(adapter, rng)]
     # High-energy samples. These expose velocity-/acceleration-scaled coupling
     # bugs that the low-energy "conservative" sample (|qd|<=1, |qdd|<=2) misses.
     # float64-vs-float64 comparisons stay exact for correct algorithms, so any
@@ -139,4 +176,6 @@ def build_dynamics_samples(adapter) -> List[DynamicsSample]:
     samples.append(_make_energetic_state(adapter, rng, "high_velocity_accel", qd_scale=10.0, qdd_scale=50.0))
     samples.append(_make_energetic_state(adapter, rng, "energetic_random_0",  qd_scale=6.0,  qdd_scale=20.0))
     samples.append(_make_energetic_state(adapter, rng, "energetic_random_1",  qd_scale=6.0,  qdd_scale=20.0))
+    # Exact-zero degenerate case retained for coverage, but last (not primary).
+    samples.append(_make_zero_state(adapter))
     return samples
