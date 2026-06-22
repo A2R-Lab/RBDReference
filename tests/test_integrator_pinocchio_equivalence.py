@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from RBDReference.tests.conftest import MANIFEST_PATH, xfail_if_mimic
+from RBDReference.tests.conftest import MANIFEST_PATH
 from RBDReference.tests.comparators import assert_close
 from RBDReference.tests.model_sources import iter_robot_cases
 from RBDReference.tests.state_sampling import build_dynamics_samples
@@ -68,12 +68,6 @@ def build_case_params(base_mode: str):
 def test_fixed_base_integrator_matches_pinocchio(
     spec, base_mode, integrator_type, project_model, pinocchio_model, request
 ):
-    xfail_if_mimic(
-        request, spec, pinocchio_model,
-        reason="integrator_gradient (dAB) composes the dynamics gradient through "
-        "Minv, amplifying the near-singular mimic reduced-model conditioning; the "
-        "value step matches but the gradient is not yet mimic-folding aware",
-    )
     for sample in build_dynamics_samples(project_model):
         if not pinocchio_model.has_invertible_mass_matrix(sample.q):
             pytest.skip(
@@ -93,12 +87,6 @@ def test_fixed_base_integrator_matches_pinocchio(
 def test_floating_base_integrator_matches_pinocchio(
     spec, base_mode, integrator_type, project_model, pinocchio_model, request
 ):
-    xfail_if_mimic(
-        request, spec, pinocchio_model,
-        reason="integrator_gradient (dAB) composes the dynamics gradient through "
-        "Minv, amplifying the near-singular mimic reduced-model conditioning; the "
-        "value step matches but the gradient is not yet mimic-folding aware",
-    )
     for sample in build_dynamics_samples(project_model):
         if not pinocchio_model.has_invertible_mass_matrix(sample.q):
             pytest.skip(

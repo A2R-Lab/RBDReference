@@ -1170,18 +1170,36 @@ class PinocchioModelAdapter:
         the URDF multiplier on each axis)."""
         import pinocchio as pin
 
+        arg = pin.ArgumentPosition.ARG0 if with_respect_to == "q" else pin.ArgumentPosition.ARG1
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            # Use pinocchio's NATIVE mimic-coupled model (transformJointIntoMimic,
+            # the same model minv/crba use): it is already reduced (native nv ==
+            # project nv, velocity order == project) so dIntegrate returns the
+            # correct reduced Jacobian directly. The previous uncoupled-model +
+            # two-axis manual fold DOUBLE-COUNTED the structural identity on
+            # mimic-target diagonals -- dIntegrate(q) is identity-like, so folding
+            # the mimic q-slot into its target turned the 1.0 diagonal into
+            # (1 + multiplier) (e.g. fr3's q_next/dq[mimic_target] = 2.0 instead of
+            # 1.0). The native model has no separate mimic DoF to fold, so the
+            # identity stays correct.
+            nm, _ = self._ensure_native_mimic_model()
+            if nm is not None:
+                q_native = self._to_native_mimic_q(q)
+                v_native = np.asarray(v_dt, dtype=np.float64)  # already reduced nv
+                return np.asarray(
+                    pin.dIntegrate(nm, q_native, v_native, arg), dtype=np.float64
+                )
+            # Fallback (pinocchio without transformJointIntoMimic): the manual fold
+            # is an approximation that mis-handles the identity; better than a shape
+            # mismatch but flagged as imperfect.
+            q_pin = self._to_pin_q(q)
+            v_dt_pin = self._expand_project_v_to_pin(np.asarray(v_dt, dtype=np.float64))
+            J = np.asarray(pin.dIntegrate(self.model, q_pin, v_dt_pin, arg), dtype=np.float64)
+            return self._reduce_pin_matrix_to_project(J, axes_to_reduce=[(0, "v"), (1, "v")])
+
         q_pin = self._to_pin_q(q)
         v_dt_pin = self._expand_project_v_to_pin(np.asarray(v_dt, dtype=np.float64))
-        arg = pin.ArgumentPosition.ARG0 if with_respect_to == "q" else pin.ArgumentPosition.ARG1
-        J = np.asarray(
-            pin.dIntegrate(self.model, q_pin, v_dt_pin, arg),
-            dtype=np.float64,
-        )
-        if self.mimic_info is not None and not self.mimic_info.is_empty():
-            J = self._reduce_pin_matrix_to_project(
-                J, axes_to_reduce=[(0, "v"), (1, "v")]
-            )
-        return J
+        return np.asarray(pin.dIntegrate(self.model, q_pin, v_dt_pin, arg), dtype=np.float64)
 
     def d2Integrate(self, q, v_dt, arg1, arg2, fd_step=1e-3):
         """Pinocchio cross-check for `RBDReference.d2Integrate`: the
