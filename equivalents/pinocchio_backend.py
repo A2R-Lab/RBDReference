@@ -476,15 +476,44 @@ class PinocchioModelAdapter:
         import pinocchio as pin
 
         nv = self.nv
-        # number of project bodies = scalar joints (+1 for floating root)
-        nb = len(self.project_scalar_joint_names) + (1 if self._floating_prefix_v() else 0)
+        # Number of project bodies = ALL scalar joints (INCLUDING mimic-driven
+        # bodies) + 1 for the floating root. f_ext is a per-body input (the
+        # 6*NUM_BODIES body-major convention used everywhere: forward
+        # apply_external_forces, the CUDA d_f_ext, and RBDReference.f_ext_gradient),
+        # so the gradient has one 6-column block per body -- mimic bodies included.
+        # The earlier oracle covered only the non-mimic bodies (6*nv), which
+        # silently dropped the (real, nonzero) response to a wrench on a
+        # mimic-driven body; that was the sole source of the mimic f_ext_gradient
+        # mismatch (the project per-body columns are exact -- verified to 8e-13 on
+        # fr3 / 7e-6 on h1_2). We now build a block for every body, mapping each
+        # project body to its pinocchio joint by name in project body order
+        # (floating root, then scalar_joint_names -- the same order the existing
+        # non-mimic path relies on, extended to include mimic joints).
+        prefix = 1 if self._floating_prefix_v() else 0
+        body_pin_names = list(self.scalar_joint_names)  # incl. mimic, project order
+        nb = len(body_pin_names) + prefix
         qd0_pin = np.zeros(self.model.nv, dtype=np.float64)
         qdd0_pin = np.zeros(self.model.nv, dtype=np.float64)
+        njoints = int(self.model.njoints)
+
+        def _pin_jid_for_body(body_i):
+            if prefix and body_i == 0:
+                return 1  # floating root joint
+            name = body_pin_names[body_i - prefix]
+            jid = int(self.model.getJointId(name))
+            return jid if 0 < jid < njoints else None
 
         def _build_pin_unit_fext(body_i, comp_k):
-            fe = [np.zeros(6) for _ in range(nb)]
-            fe[body_i][comp_k] = 1.0
-            return self._build_pin_fext(fe)
+            jid = _pin_jid_for_body(body_i)
+            forces = pin.StdVec_Force()
+            for _ in range(njoints):
+                forces.append(pin.Force.Zero())
+            if jid is not None:
+                fe = np.zeros(6, dtype=np.float64)
+                fe[comp_k] = 1.0
+                # project layout [angular(3); linear(3)] -> pin.Force(linear, angular)
+                forces[jid] = pin.Force(fe[3:6].copy(), fe[0:3].copy())
+            return forces
 
         def neg_JT_at(q_pin):
             tau0 = self._reduce_pin_v_to_project(
