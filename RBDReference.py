@@ -2411,6 +2411,13 @@ class RBDReference(
                     tf.append(mm)
                     mm = self.robot.get_parent_id(mm)
                 tf = list(reversed(tf))  # j+1, j+2, ..., i
+                # MIMIC source scaling: a mimic source joint j contributes its
+                # geometric-Jacobian column α_j-weighted into the shared v_j slot
+                # (matching the α-weighted reduction the first-order J^T performs).
+                # For a leaf mimic (h1_2 hand) the chain (j, i] is empty so this
+                # never fires, but it keeps a mid-chain mimic-with-descendants
+                # source correct. α_j = 1 for non-mimic joints (no-op).
+                alpha_j = self._mimic_multiplier(j)
                 # one source geometric-Jacobian column per S column / source v-slot
                 for c in range(S.shape[1]):
                     vj = vj_list[c]
@@ -2425,6 +2432,14 @@ class RBDReference(
                     for midx, m in enumerate(tf):
                         Sm = _Sof(m)
                         vm_list = _vslots(m)  # per-column perturbed v-slots
+                        # MIMIC chain-rule scaling: the perturbed joint m's angle
+                        # is θ_m = α_m·q_{vm} + offset, so dX[m]/dq_{vm} =
+                        # α_m·(-crm(S_m)X[m]). Multiple joints can share v-slot vm
+                        # (a primary α=1 plus its α≠1 mimics); each is a separate m
+                        # on the chain and accumulates its α_m-scaled term via +=.
+                        # Omitting α_m undercounts non-unit-mult mimic slots (h1_2
+                        # hand: α=1.6/2.4). α_m = 1 for non-mimic (no-op).
+                        alpha_m = self._mimic_multiplier(m)
                         # X_{m->i} = X[i]...X[m+1]
                         Xmi = np.eye(6)
                         for m2 in tf[midx + 1:]:
@@ -2435,7 +2450,7 @@ class RBDReference(
                             # S_m^(cm) x col_{m,j} (spatial motion cross product)
                             term = self.cross_operator(Sm[:6, cm]) @ col_at[m]
                             dcol = -(Xmi @ term)
-                            dJT[vj, 6 * i:6 * i + 6, vm] += dcol
+                            dJT[vj, 6 * i:6 * i + 6, vm] += (alpha_j * alpha_m) * dcol
         return dJT
 
     def f_ext_gradient(self, q, normalize_input=True):

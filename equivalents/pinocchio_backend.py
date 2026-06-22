@@ -1,8 +1,57 @@
+import math
 from dataclasses import dataclass
 from typing import List, Mapping
 
 import numpy as np
 from bs4 import BeautifulSoup
+
+
+def _snap_rpy_value_to_pi_grid(value, tolerance: float = 1e-5):
+    """Snap a single rpy scalar to the nearest N*π/2 (|N| ≤ 4) within `tolerance`.
+
+    EXACT mirror of ``URDFParser.Joint._snap_to_pi_grid`` (tol 1e-5). The
+    GRiD parser snaps every joint-origin rpy component to the π/2 grid so the
+    symbolic codegen sees clean quarter-turn rotations; URDFs that truncate π
+    (e.g. h1_2's hand uses rpy="-3.1416", which is π−3.1416 ≈ 7.35e-6 off)
+    therefore describe a *slightly different* robot to the project than to a
+    literal parser. Snapping the pinocchio oracle's geometry the same way makes
+    the two adapters model the IDENTICAL robot, so the equivalence checks
+    compare like-for-like instead of carrying that 7e-6 geometry residual.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return value
+    pi_half = math.pi / 2.0
+    for n in range(-4, 5):
+        if abs(v - n * pi_half) < tolerance:
+            return n * pi_half
+    return v
+
+
+def _snap_urdf_rpy_to_pi_grid(urdf_text: str) -> str:
+    """Return URDF XML with every ``<origin rpy>`` snapped to the π/2 grid.
+
+    Matches the GRiD parser's universal rpy snap (see
+    ``URDFParser.Joint.set_origin_rpy``). A no-op for any origin already on the
+    grid or far from it, so only truncated-π URDFs change — bringing the oracle
+    closer to the project's geometry, never further. xyz translations are left
+    untouched (the project snaps rpy only).
+    """
+    soup = BeautifulSoup(urdf_text, "xml")
+    changed = False
+    for origin in soup.find_all("origin"):
+        if not origin.has_attr("rpy"):
+            continue
+        parts = origin["rpy"].split()
+        if len(parts) != 3:
+            continue
+        snapped = [_snap_rpy_value_to_pi_grid(p) for p in parts]
+        new_rpy = " ".join(repr(float(s)) for s in snapped)
+        if new_rpy != origin["rpy"]:
+            origin["rpy"] = new_rpy
+            changed = True
+    return str(soup) if changed else urdf_text
 
 from .conventions import (
     ConventionMismatch,
@@ -1609,7 +1658,8 @@ def build_pinocchio_adapter(spec, resolved_model, base_mode: str) -> PinocchioMo
     import pinocchio as pin
 
     with open(resolved_model.urdf_path, "r", encoding="utf-8") as urdf_file:
-        soup = BeautifulSoup(urdf_file.read(), "xml").find("robot")
+        urdf_text = urdf_file.read()
+    soup = BeautifulSoup(urdf_text, "xml").find("robot")
     urdf_joint_types_by_name = {
         joint["name"]: joint["type"]
         for joint in soup.find_all("joint", recursive=False)
@@ -1636,11 +1686,30 @@ def build_pinocchio_adapter(spec, resolved_model, base_mode: str) -> PinocchioMo
         mimic_relations[joint["name"]] = (target_name, multiplier, offset)
     mimic_info = MimicInfo(relations=mimic_relations)
 
+    # Geometry snap is SCOPED TO MIMIC ROBOTS. The GRiD parser snaps joint-origin
+    # rpy to the π/2 grid (URDFParser _snap_to_pi_grid); a URDF that truncates π
+    # (e.g. h1_2's hand rpy="-3.1416", off by 7.35e-6) therefore describes a
+    # slightly different robot to the project than to a literal parser. For a
+    # MIMIC robot that 7e-6 lands in a near-singular reduced model (h1_2 hand
+    # cond(M)~7e5) and becomes test-visible, so we build the oracle from a
+    # geometry-snapped URDF to compare like-for-like. Non-mimic robots are left
+    # on the literal build: their existing continuous-joint / conditioning
+    # tolerance buckets are already calibrated to the literal-vs-snapped 7e-6
+    # (e.g. gen3's cond~6e4 floating fdsva_so), and snapping them would only
+    # trade a calibrated first-order match for a re-tuned second-order floor with
+    # no correctness gain. (_snap_urdf_rpy_to_pi_grid is a no-op for URDFs whose
+    # origins are already on/off the grid, so it changes nothing for grid-exact
+    # mimic robots like fr3.)
+    snap_oracle_geometry = bool(mimic_relations)
+    build_text = _snap_urdf_rpy_to_pi_grid(urdf_text) if snap_oracle_geometry else urdf_text
+
     if base_mode == "floating":
-        model = pin.buildModelFromUrdf(
-            resolved_model.urdf_path,
-            pin.JointModelFreeFlyer(),
-        )
+        if snap_oracle_geometry:
+            model = pin.buildModelFromXML(build_text, pin.JointModelFreeFlyer())
+        else:
+            model = pin.buildModelFromUrdf(
+                resolved_model.urdf_path, pin.JointModelFreeFlyer()
+            )
         mismatches = [
             ConventionMismatch(
                 category="floating_base_quaternion",
@@ -1648,7 +1717,10 @@ def build_pinocchio_adapter(spec, resolved_model, base_mode: str) -> PinocchioMo
             )
         ]
     else:
-        model = pin.buildModelFromUrdf(resolved_model.urdf_path)
+        if snap_oracle_geometry:
+            model = pin.buildModelFromXML(build_text)
+        else:
+            model = pin.buildModelFromUrdf(resolved_model.urdf_path)
         mismatches = []
 
     data = model.createData()
