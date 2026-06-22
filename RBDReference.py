@@ -2678,7 +2678,13 @@ class RBDReference(
         #      behavior is unchanged -- this only ADDS coverage for spherical,
         #      unblocking the fd / SO oracle paths that compose minv.
         if self._has_mimic_joints() or self._robot_has_multidof_nonfloating_joint():
-            M = self.crba(q, normalize_input=False)
+            # Invert the INTERNAL-order M so the floating-base v reorder is
+            # applied exactly once (here), not twice: crba's public output
+            # already denormalizes, and the [3,4,5,0,1,2] root reorder is an
+            # involution, so inverting the public M and denormalizing again
+            # would cancel the reorder (legacy output would wrongly come back
+            # in pinocchio order). See crba(public_output=...).
+            M = self.crba(q, normalize_input=False, public_output=False)
             Minv = np.linalg.inv(M)
             if public_output:
                 return self._denormalize_qv_matrix_output(
@@ -2798,7 +2804,10 @@ class RBDReference(
                 public_output=False,
                 normalize_input=False,
             )[0]
-            M = self.crba(q, normalize_input=False)
+            # Solve in INTERNAL order (bias/tau are internal here): use the raw
+            # internal-order M so a floating+multidof robot doesn't mix a
+            # denormalized M with an internal-order rhs. Single denormalize on qdd.
+            M = self.crba(q, normalize_input=False, public_output=False)
             qdd = np.linalg.solve(M, tau - bias)
             return self._denormalize_v_output(qdd)
         # joint-local viscous damping + Coulomb friction reduce the torque
@@ -3016,13 +3025,21 @@ class RBDReference(
 
 
 
-    def crba(self, q, normalize_input=True):
+    def crba(self, q, normalize_input=True, public_output=True):
         """Compute the joint-space inertia matrix using the Composite Rigid Body Algorithm.
 
         Parameters
         ----------
         q : numpy.ndarray
             N-element joint positions.
+        public_output : bool
+            When True (default) the returned matrix is mapped back to the
+            user-facing floating-base v convention (the legacy [3,4,5,0,1,2]
+            root reorder under the legacy convention). Set False to get the
+            raw INTERNAL-order matrix -- used by callers (e.g. ``minv``'s
+            mimic path) that invert/solve in internal order and apply their
+            own single denormalization afterward, so the involution perm is
+            not applied twice.
 
         Returns
         -------
@@ -3152,7 +3169,9 @@ class RBDReference(
                     H[np.ix_(vj, vi)] += block
                     H[np.ix_(vi, vj)] += block.T
 
-        return self._denormalize_qv_matrix_output(H, row_space="v", col_space="v")
+        if public_output:
+            return self._denormalize_qv_matrix_output(H, row_space="v", col_space="v")
+        return H
 
     ##### Testing original RNEA_grad to help with CUDA 
     def inverse_dynamics_gradient_fpass_dq(self, q, qd, v, a, GRAVITY = -9.81):
