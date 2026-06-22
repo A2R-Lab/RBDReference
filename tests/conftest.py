@@ -183,18 +183,26 @@ def _model_has_mimic(model):
     return False
 
 
-def xfail_if_mimic(request, spec, model, *, reason):
-    """Gate the T4-owned mimic-folding gaps. If the robot has mimic joints, mark
-    the current test xfail with ``strict=False`` — the test still RUNS, so when the
-    T4 mimic fix lands it surfaces as XPASS instead of staying silently red/green.
+def xfail_if_mimic(request, spec, model, *, reason, only_robots=None):
+    """Gate the remaining T4-owned mimic equivalence residuals. If the robot has
+    mimic joints (optionally restricted to ``only_robots``), mark the current test
+    xfail with ``strict=False`` — the test still RUNS, so when the residual is
+    resolved it surfaces as XPASS instead of staying silently red/green.
 
-    The project reduced-model paths are not yet mimic-folding aware in three places
-    this gates: f_ext gradient builds 6*num_bodies wrench columns vs pinocchio's
-    6*nv reduced; the floating two-convention cross-check; and Minv-amplified
-    gradients (integrator_gradient). Tracked: PINOCCHIO_ALIGNMENT_BACKLOG
-    ("f_ext not threaded through the mimic FD fast path"), owner T4. Non-mimic
-    robots are unaffected (the guard is a no-op). ``model`` may be a pinocchio
-    adapter or a project adapter (both are handled)."""
+    Remaining gated residuals (two convention + integrator gaps below; the f_ext
+    gap is now CLOSED for fr3 — the project per-body f_ext gradient was always
+    correct; the actual bug was the pinocchio oracle covering only non-mimic
+    bodies, fixed in pinocchio_backend.f_ext_gradient). h1_2 f_ext still gates on a
+    ~7e-6 project-vs-pinocchio finger-chain parse/round-off in the (exact) -J^T
+    block — the project is self-consistent (analytic == its own forward FD to 0) —
+    amplified by the near-singular hand Minv (cond ~7e5) and by central-FD noise in
+    the oracle's dJ^T/dq block. Tracked: PINOCCHIO_ALIGNMENT_BACKLOG. Non-mimic
+    robots are unaffected. ``model`` may be a pinocchio or project adapter.
+
+    ``only_robots``: optional iterable of robot_ids; when given, the xfail applies
+    only to those (so a robot the fix already covers, e.g. fr3, passes cleanly)."""
+    if only_robots is not None and spec.robot_id not in only_robots:
+        return
     if _model_has_mimic(model):
         request.applymarker(
             pytest.mark.xfail(reason=f"{spec.robot_id} (mimic): {reason}", strict=False)
