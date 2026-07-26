@@ -1522,13 +1522,141 @@ class RBDReference(
         return np.vstack([Rt @ Jv, Rt @ Jw])
 
     def frame_jacobian_dot(self, q, qd, frame_name=None,
-                           reference_frame="LOCAL_WORLD_ALIGNED", step=1e-6):
-        """Time derivative Jdot of `frame_jacobian` along v = qd, 6 x nv.
+                           reference_frame="LOCAL_WORLD_ALIGNED"):
+        """ANALYTIC time derivative Jdot of `frame_jacobian` along v = qd, 6 x nv.
 
-        Jdot = d/dt J(q(t)) with q evolving on the Lie group under v = qd.
-        Central finite difference of the analytic `frame_jacobian` along the
-        integrator flow (machine-precision oracle; mirrors how the pose Hessian
-        oracle finite-differences the analytic Jacobian)."""
+        Jdot = d/dt J(q(t)) with q evolving under v = qd. Differentiates the SAME
+        world-axis geometric Jacobian `frame_jacobian` builds (NOT a finite
+        difference). Each column i owns a joint j; the value column is
+
+            Jw[:,i] = a_w ,  Jv[:,i] = a_w x (p_f - p_j)      (rotational)
+            Jv[:,i] = R_j s_lin                                (translational)
+
+        with a_w = R_j s_ang the world joint axis. Differentiating in time
+        (Ṙ_j = w_j x R_j, ṗ = the world point velocities) gives
+
+            Jẇ[:,i] = w_j x a_w
+            Jv̇[:,i] = (w_j x a_w) x (p_f - p_j) + a_w x (v_f - v_j)   (rotational)
+            Jv̇[:,i] = w_j x (R_j s_lin)                               (translational)
+
+        where w_j / v_j are the world angular / origin-linear velocities of joint
+        j's frame and v_f that of the target frame origin — obtained from a forward
+        velocity sweep along the chain that is consistent WITH `frame_jacobian`'s
+        own construction (same S, R_j, mimic scale). Matches pinocchio's
+        `getFrameJacobianTimeVariation` for the three reference frames.
+
+        (The central-FD form is retained as `_frame_jacobian_dot_fd` for the
+        machine-precision cross-check.)"""
+        qd = self._normalize_v_input(np.asarray(qd, dtype=np.float64))
+        reference_frame = str(reference_frame).upper()
+        if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
+            raise ValueError("reference_frame must be LOCAL/WORLD/LOCAL_WORLD_ALIGNED")
+
+        nv = self.robot.get_num_vel()
+        Xw, _ = self._frame_world_placement_and_chain(q)
+        target_id, X_offset = self._resolve_frame_joint(frame_name)
+        if target_id == -1:
+            return np.zeros((6, nv), dtype=np.float64)
+
+        X_frame = Xw[target_id] @ X_offset
+        R_f = X_frame[:3, :3]
+        p_f = X_frame[:3, 3]
+
+        def vinds_for(jid):
+            try:
+                inds = self.robot.get_joint_index_v(jid)
+            except Exception:
+                inds = self.robot.get_joint_index_q(jid)
+            if isinstance(inds, (list, tuple, np.ndarray)):
+                return list(inds)
+            return [inds]
+
+        def mimic_scale(jid):
+            joint = self.robot.get_joint_by_id(jid)
+            return joint.get_mimic_multiplier() if getattr(joint, "is_mimic", False) else 1.0
+
+        chain = sorted(self.robot.get_ancestors_by_id(target_id)) + [target_id]
+
+        # ── forward velocity sweep (world frame): per chain joint j, w_j (angular
+        # velocity of frame j) and v_j (linear velocity of origin p_j). Rigid transport
+        # from the parent + joint j's own DOF, mirroring frame_jacobian's a_w = R_j S. ──
+        w_of = {}
+        v_of = {}
+        for j in chain:
+            par = self.robot.get_parent_id(j)
+            R_j = Xw[j][:3, :3]
+            p_j = Xw[j][:3, 3]
+            if par in w_of:
+                w_j = w_of[par].copy()
+                v_j = v_of[par] + np.cross(w_of[par], p_j - Xw[par][:3, 3])
+            else:  # chain root (fixed base: world; floating: the free-flyer carries qd[0:6])
+                w_j = np.zeros(3, dtype=np.float64)
+                v_j = np.zeros(3, dtype=np.float64)
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            vinds = vinds_for(j)
+            scale = mimic_scale(j)
+            for c in range(S.shape[1]):
+                vi = vinds[c] if c < len(vinds) else vinds[-1]
+                ang_local = S[:3, c]
+                lin_local = S[3:6, c]
+                if np.linalg.norm(ang_local) > 0.5:      # rotational: axis through p_j
+                    w_j = w_j + scale * qd[vi] * (R_j @ ang_local)
+                else:                                    # translational: moves p_j
+                    v_j = v_j + scale * qd[vi] * (R_j @ lin_local)
+            w_of[j] = w_j
+            v_of[j] = v_j
+
+        # target frame velocities (rigidly attached through X_offset)
+        w_f = w_of[target_id]
+        v_f = v_of[target_id] + np.cross(w_of[target_id], p_f - Xw[target_id][:3, 3])
+
+        # ── column-wise value J + its time derivative (LWA basis) ──
+        Jv = np.zeros((3, nv), dtype=np.float64)
+        Jw = np.zeros((3, nv), dtype=np.float64)
+        Jvd = np.zeros((3, nv), dtype=np.float64)
+        Jwd = np.zeros((3, nv), dtype=np.float64)
+        for j in chain:
+            R_j = Xw[j][:3, :3]
+            p_j = Xw[j][:3, 3]
+            w_j = w_of[j]
+            v_j = v_of[j]
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            vinds = vinds_for(j)
+            scale = mimic_scale(j)
+            for c in range(S.shape[1]):
+                vi = vinds[c] if c < len(vinds) else vinds[-1]
+                ang_local = S[:3, c]
+                lin_local = S[3:6, c]
+                if np.linalg.norm(ang_local) > 0.5:      # rotational DOF
+                    aw = R_j @ ang_local
+                    awd = np.cross(w_j, aw)              # d/dt a_w
+                    Jw[:, vi] += scale * aw
+                    Jv[:, vi] += scale * np.cross(aw, p_f - p_j)
+                    Jwd[:, vi] += scale * awd
+                    Jvd[:, vi] += scale * (np.cross(awd, p_f - p_j) + np.cross(aw, v_f - v_j))
+                else:                                    # translational DOF
+                    lw = R_j @ lin_local
+                    Jv[:, vi] += scale * lw
+                    Jvd[:, vi] += scale * np.cross(w_j, lw)
+
+        if reference_frame == "LOCAL_WORLD_ALIGNED":
+            return np.vstack([Jvd, Jwd])
+        if reference_frame == "WORLD":
+            # J_world_v = Jv + skew(p_f) Jw ; d/dt adds skew(v_f) Jw + skew(p_f) Jwd.
+            return np.vstack([Jvd + self._skew(v_f) @ Jw + self._skew(p_f) @ Jwd, Jwd])
+        # LOCAL: rows rotated into body axes; d/dt(R_f^T) = -R_f^T skew(w_f).
+        Rt = R_f.T
+        Rtd = -Rt @ self._skew(w_f)
+        return np.vstack([Rtd @ Jv + Rt @ Jvd, Rtd @ Jw + Rt @ Jwd])
+
+    def _frame_jacobian_dot_fd(self, q, qd, frame_name=None,
+                               reference_frame="LOCAL_WORLD_ALIGNED", step=1e-6):
+        """Central-FD cross-check for the analytic `frame_jacobian_dot`: differences
+        the analytic `frame_jacobian` along the Lie-group integrator flow."""
         qd = self._normalize_v_input(np.asarray(qd, dtype=np.float64))
         q_plus = self.integrate(q, step * qd)
         q_minus = self.integrate(q, -step * qd)
