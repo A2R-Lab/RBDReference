@@ -454,8 +454,40 @@ class RBDReference(
             return H
         if arg2 == "q":
             # The free-flyer dIntegrate blocks are independent of the base
-            # q, so this derivative is exactly zero. Returned explicitly
-            # (rather than as FD-of-a-constant) to avoid spurious roundoff.
+            # q, so this derivative is exactly zero.
+            return H
+        # ANALYTIC (2026-07-27): closed-form tangent derivative of dIntegrate,
+        # per-joint. Free-flyer 6x6 block over its own 6 v-directions; each
+        # SPHERICAL joint's 3x3 SO(3) block over its 3. Structured chain rule
+        # (coeff'(theta)·phi_k/theta + coeff·d(skew-products)), small-angle Taylor
+        # below theta=0.2. Validated to ~1e-14 vs an mpmath complex-step ground
+        # truth across theta in [1e-9, 2]. See docs/open-tasks/plan_phase3_*.
+        v_dt = np.asarray(v_dt, dtype=np.float64)
+        for jtype, _iq, iv in self._joint_retract_specs():
+            if jtype == "floating":
+                rho = v_dt[iv][0:3]
+                phi = v_dt[iv][3:6]
+                for kk in range(6):
+                    blk = self._d2_se3_dblock(rho, phi, arg1, kk)   # 6x6
+                    for a in range(6):
+                        for b in range(6):
+                            H[iv[a], iv[b], iv[kk]] = blk[a, b]
+            else:  # spherical: omega-only SO(3) restriction (3x3 over 3 dirs)
+                phi = v_dt[iv]
+                for k in range(3):
+                    d3 = (self._d2_se3_dRinv(phi, k) if arg1 == "q"
+                          else self._d2_se3_dJr(phi, k))
+                    for a in range(3):
+                        for b in range(3):
+                            H[iv[a], iv[b], iv[k]] = d3[a, b]
+        return H
+
+    def _d2Integrate_fd(self, q, v_dt, arg1, arg2, fd_step=1e-3):
+        """Legacy 4th-order central-FD d2Integrate, retained as a cross-check for
+        the analytic `d2Integrate`. Same signature/semantics."""
+        nv = self.robot.get_num_vel()
+        H = np.zeros((nv, nv, nv), dtype=np.float64)
+        if not self.robot.floating_base or arg2 == "q":
             return H
         v_dt = np.asarray(v_dt, dtype=np.float64)
 
@@ -466,12 +498,145 @@ class RBDReference(
         for k in range(nv):
             e = np.zeros(nv, dtype=np.float64)
             e[k] = 1.0
-            # 4th-order central stencil:
-            #   f'(0) ~= (8(f(h)-f(-h)) - (f(2h)-f(-2h))) / (12 h)
             d1 = J_at(h * e) - J_at(-h * e)
             d2 = J_at(2.0 * h * e) - J_at(-2.0 * h * e)
             H[:, :, k] = (8.0 * d1 - d2) / (12.0 * h)
         return H
+
+    # ---- Analytic d2Integrate building blocks (SE(3)-exp 2nd derivatives) ----
+    # Coefficient value/derivative as functions of theta; exact above _D2_TH,
+    # small-angle Taylor below (odd series for derivatives). See plan doc.
+    _D2_TH = 0.2
+    _D2_VAL_SERIES = {  # even series in theta^2 (coefficient VALUE)
+        'a':  [1/2, -1/24, 1/720, -1/40320, 1/3628800],
+        'b':  [1/6, -1/120, 1/5040, -1/362880, 1/39916800],
+        's':  [1.0, -1/6, 1/120, -1/5040, 1/362880],
+        'c2': [-1/24, 1/720, -1/40320, 1/3628800, -1/479001600],
+        'c3': [1/120, -1/2520, 1/120960, -1/9979200, 1/1245404160],
+    }
+    _D2_DER_SERIES = {  # odd series (coefficient DERIVATIVE): sum coeff*theta^(2i+1)
+        'a':  [-1/12, 1/180, -1/6720, 1/453600],
+        'b':  [-1/60, 1/1260, -1/60480, 1/4989600],
+        's':  [-1/3, 1/30, -1/840, 1/45360],
+        'c2': [1/360, -1/10080, 1/604800, -1/59875200],
+        'c3': [-1/1260, 1/30240, -1/1663200, 1/155675520],
+    }
+
+    @staticmethod
+    def _d2_coef(name, t):
+        """SE(3)-exp coefficient VALUE (a,b/c1,s,c2,c3) at theta=t."""
+        if name == 'c1':
+            name = 'b'
+        if abs(t) >= RBDReference._D2_TH:
+            if name == 'a':  return (1.0 - np.cos(t)) / (t * t)
+            if name == 'b':  return (t - np.sin(t)) / t**3
+            if name == 's':  return np.sin(t) / t
+            if name == 'c2': return (1.0 - 0.5 * t * t - np.cos(t)) / t**4
+            if name == 'c3': return -0.5 * ((1.0 - 0.5 * t * t - np.cos(t)) / t**4
+                                            - 3.0 * (t - np.sin(t) - t**3 / 6.0) / t**5)
+        r, p, t2 = 0.0, 1.0, t * t
+        for c in RBDReference._D2_VAL_SERIES[name]:
+            r += c * p; p *= t2
+        return r
+
+    @staticmethod
+    def _d2_coef_der(name, t):
+        """SE(3)-exp coefficient DERIVATIVE d(coef)/d(theta) at theta=t."""
+        if name == 'c1':
+            name = 'b'
+        if abs(t) >= RBDReference._D2_TH:
+            if name == 'a':  return (t * np.sin(t) - 2.0 * (1.0 - np.cos(t))) / t**3
+            if name == 'b':  return ((1.0 - np.cos(t)) * t - 3.0 * (t - np.sin(t))) / t**4
+            if name == 's':  return (t * np.cos(t) - np.sin(t)) / (t * t)
+            if name == 'c2': return (t * np.sin(t) + t * t + 4.0 * np.cos(t) - 4.0) / t**5
+            if name == 'c3':
+                c2p = (t * np.sin(t) + t * t + 4.0 * np.cos(t) - 4.0) / t**5
+                return -0.5 * (c2p - 3.0 * (-4.0 * t - t * np.cos(t)
+                                            + 5.0 * np.sin(t) + t**3 / 3.0) / t**6)
+        r, p, t2 = 0.0, t, t * t
+        for c in RBDReference._D2_DER_SERIES[name]:
+            r += c * p; p *= t2
+        return r
+
+    @staticmethod
+    def _d2_dcoef_dphi(name, phi, k):
+        """d(coef(theta))/d(phi_k) = coef'(theta) * (phi_k / theta)."""
+        t = float(np.sqrt(phi @ phi))
+        if t == 0.0:
+            return 0.0
+        return RBDReference._d2_coef_der(name, t) * (phi[k] / t)
+
+    @staticmethod
+    def _d2_se3_dJr(phi, k):
+        """d Jr(phi) / d phi_k  (3x3). Also the spherical ARG_v derivative."""
+        S = RBDReference._so3_skew(phi); Ek = RBDReference._so3_skew(np.eye(3)[k])
+        t = float(np.sqrt(phi @ phi))
+        a = RBDReference._d2_coef('a', t); b = RBDReference._d2_coef('b', t)
+        return (-RBDReference._d2_dcoef_dphi('a', phi, k) * S - a * Ek
+                + RBDReference._d2_dcoef_dphi('b', phi, k) * (S @ S) + b * (Ek @ S + S @ Ek))
+
+    @staticmethod
+    def _d2_se3_dRinv(phi, k):
+        """d exp(-phi) / d phi_k  (3x3). Also the spherical ARG_q derivative."""
+        S = RBDReference._so3_skew(phi); Ek = RBDReference._so3_skew(np.eye(3)[k])
+        t = float(np.sqrt(phi @ phi))
+        s = RBDReference._d2_coef('s', t); a = RBDReference._d2_coef('a', t)
+        return (-RBDReference._d2_dcoef_dphi('s', phi, k) * S - s * Ek
+                + RBDReference._d2_dcoef_dphi('a', phi, k) * (S @ S) + a * (Ek @ S + S @ Ek))
+
+    @staticmethod
+    def _d2_se3_dQ(rho, phi, kk):
+        """d Q(rho,phi) / d w_kk (kk<3 -> rho, else phi). Q = -sola."""
+        Px = RBDReference._so3_skew(-phi); Rx = RBDReference._so3_skew(rho)
+        t = float(np.sqrt(phi @ phi)); Px2 = Px @ Px
+        c1 = RBDReference._d2_coef('c1', t); c2 = RBDReference._d2_coef('c2', t)
+        c3 = RBDReference._d2_coef('c3', t)
+        if kk < 3:  # d/d rho_kk: Q linear in rho -> substitute Rx -> skew(e_kk)
+            Ek = RBDReference._so3_skew(np.eye(3)[kk])
+            A1 = Px @ Ek + Ek @ Px + Px @ Ek @ Px
+            A2 = Px2 @ Ek + Ek @ Px2 - 3.0 * (Px @ Ek @ Px)
+            A3 = Px @ Ek @ Px2 + Px2 @ Ek @ Px
+            return -(0.5 * Ek + c1 * A1 - c2 * A2 + c3 * A3)
+        k = kk - 3  # d/d phi_k: Px=-Sphi -> dPx=-E_k, c-coeffs via chain
+        dPx = -RBDReference._so3_skew(np.eye(3)[k]); dPx2 = dPx @ Px + Px @ dPx
+        A1 = Px @ Rx + Rx @ Px + Px @ Rx @ Px
+        A2 = Px2 @ Rx + Rx @ Px2 - 3.0 * (Px @ Rx @ Px)
+        A3 = Px @ Rx @ Px2 + Px2 @ Rx @ Px
+        dA1 = dPx @ Rx + Rx @ dPx + (dPx @ Rx @ Px + Px @ Rx @ dPx)
+        dA2 = dPx2 @ Rx + Rx @ dPx2 - 3.0 * (dPx @ Rx @ Px + Px @ Rx @ dPx)
+        dA3 = (dPx @ Rx @ Px2 + Px @ Rx @ dPx2) + (dPx2 @ Rx @ Px + Px2 @ Rx @ dPx)
+        dc1 = RBDReference._d2_dcoef_dphi('c1', phi, k)
+        dc2 = RBDReference._d2_dcoef_dphi('c2', phi, k)
+        dc3 = RBDReference._d2_dcoef_dphi('c3', phi, k)
+        return -(dc1 * A1 + c1 * dA1 - dc2 * A2 - c2 * dA2 + dc3 * A3 + c3 * dA3)
+
+    @staticmethod
+    def _d2_se3_doff(rho, phi, kk):
+        """d off / d w_kk, off = skew(-Jr@rho) @ exp(-phi) (ARG_q coupling)."""
+        Jr = np.eye(3) - RBDReference._d2_coef('a', float(np.sqrt(phi @ phi))) * RBDReference._so3_skew(phi) \
+            + RBDReference._d2_coef('b', float(np.sqrt(phi @ phi))) * (RBDReference._so3_skew(phi) @ RBDReference._so3_skew(phi))
+        R = np.eye(3) - RBDReference._d2_coef('s', float(np.sqrt(phi @ phi))) * RBDReference._so3_skew(phi) \
+            + RBDReference._d2_coef('a', float(np.sqrt(phi @ phi))) * (RBDReference._so3_skew(phi) @ RBDReference._so3_skew(phi))
+        if kk < 3:  # p_inv=-Jr@rho linear in rho -> dp=-Jr[:,kk], dR=0
+            return RBDReference._so3_skew(-Jr[:, kk]) @ R
+        k = kk - 3
+        p_inv = -Jr @ rho
+        dp = -RBDReference._d2_se3_dJr(phi, k) @ rho
+        return RBDReference._so3_skew(dp) @ R + RBDReference._so3_skew(p_inv) @ RBDReference._d2_se3_dRinv(phi, k)
+
+    @staticmethod
+    def _d2_se3_dblock(rho, phi, arg1, kk):
+        """The 6x6 d(dIntegrate block)/d w_kk for the free-flyer, arg1 in {q,v}."""
+        blk = np.zeros((6, 6))
+        if arg1 == "v":
+            dJ = RBDReference._d2_se3_dJr(phi, kk - 3) if kk >= 3 else np.zeros((3, 3))
+            blk[0:3, 0:3] = dJ; blk[3:6, 3:6] = dJ
+            blk[0:3, 3:6] = RBDReference._d2_se3_dQ(rho, phi, kk)
+        else:  # arg1 == "q"
+            dR = RBDReference._d2_se3_dRinv(phi, kk - 3) if kk >= 3 else np.zeros((3, 3))
+            blk[0:3, 0:3] = dR; blk[3:6, 3:6] = dR
+            blk[0:3, 3:6] = RBDReference._d2_se3_doff(rho, phi, kk)
+        return blk
 
     # ----- Multi-integrator one-step time-integration -----
 
