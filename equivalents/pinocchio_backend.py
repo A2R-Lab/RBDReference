@@ -1454,9 +1454,16 @@ class PinocchioModelAdapter:
 
         frame_id = self._resolve_frame_id(target_name)
         placement = self.data.oMf[frame_id]
-        point_local = np.asarray(offset[:3], dtype=np.float64)
-        point_world = placement.translation + placement.rotation @ point_local
-        rot = placement.rotation
+        off = np.asarray(offset, dtype=np.float64)
+        if off.shape == (4, 4):
+            # full SE(3) tool offset: tip frame = placement * X_tool
+            frame = placement * pin.SE3(off[:3, :3].copy(), off[:3, 3].copy())
+            point_world = np.asarray(frame.translation, dtype=np.float64)
+            rot = np.asarray(frame.rotation, dtype=np.float64)
+        else:
+            point_local = np.asarray(off.reshape(-1)[:3], dtype=np.float64)
+            point_world = placement.translation + placement.rotation @ point_local
+            rot = placement.rotation
         roll = np.arctan2(rot[2, 1], rot[2, 2])
         pitch_temp = np.sqrt(rot[2, 2] * rot[2, 2] + rot[2, 1] * rot[2, 1])
         pitch = np.arctan2(-rot[2, 0], pitch_temp)

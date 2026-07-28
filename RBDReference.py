@@ -1303,6 +1303,33 @@ class RBDReference(
             for offset in offsets
         ]
 
+    def _normalize_ee_offset_transforms(self, offsets=None):
+        """Normalize ee offsets to a list of 4x4 SE(3) tool transforms X_tool.
+
+        Each offset may be given either as a POINT (``[x,y,z]`` or homogeneous
+        ``[x,y,z,1]``) -- a pure translation, ``R_tool = I`` -- or as a full 4x4
+        SE(3) ``X_tool`` (rotation + translation of the tool/tip frame in the
+        target joint frame). This is the runtime "welded tool" offset: the tip
+        frame is ``X_frame = X_target @ X_tool``.
+
+        A point offset yields output BYTE-IDENTICAL to the legacy point path:
+        ``X @ [[I,p],[0,1]]`` has the same position column (``X @ [x,y,z,1]``) and
+        the same rotation block (``R @ I == R``) as ``X`` itself, so the pose rpy
+        and the Jacobian lever arm are unchanged.
+        """
+        if offsets is None:
+            return [np.eye(4, dtype=np.float64)]
+        out = []
+        for off in offsets:
+            A = np.asarray(off, dtype=np.float64)
+            if A.shape == (4, 4):
+                out.append(A.copy())
+            else:
+                X = np.eye(4, dtype=np.float64)
+                X[:3, 3] = A.reshape(-1)[:3]
+                out.append(X)
+        return out
+
     def end_effector_pose(self, q, ee_joint_names = None, ee_offsets = None):
         """Compute the 4x4 homogeneous transformation matrix of the end effector.
 
@@ -1342,31 +1369,36 @@ class RBDReference(
                 currId = self.robot.get_parent_id(currId)
             return Xmat_hom
 
-        # Extract the end-effector position with the given offset(s)
-        # see docs/open-tasks/notes.md (RBDReference.py:987)
-        def eePos_from_Xmat_hom(Xmat_hom, ee_offsets):
-            # xyz position is easy
-            eePos_xyz1 = np.matmul(np.asarray(Xmat_hom, dtype=np.float64), ee_offsets[0])
+        # Extract the end-effector pose at the tool frame X_frame = X_target @ X_tool.
+        # X_tool is a 4x4 SE(3) offset (point offset => R_tool = I; see
+        # _normalize_ee_offset_transforms). see docs/open-tasks/notes.md (RBDReference.py:987)
+        def eePos_from_Xmat_hom(Xmat_hom, ee_offset_Xtools):
+            # tool/tip frame: post-multiply the target world transform by X_tool
+            X_frame = np.matmul(np.asarray(Xmat_hom, dtype=np.float64), ee_offset_Xtools[0])
 
-            # roll pitch yaw is a bit more difficult
-            eePos_roll = np.arctan2(Xmat_hom[2,1],Xmat_hom[2,2])
-            pitch_temp = np.sqrt(Xmat_hom[2,2]*Xmat_hom[2,2] + Xmat_hom[2,1]*Xmat_hom[2,1])
-            eePos_pitch = np.arctan2(-Xmat_hom[2,0],pitch_temp)
-            eePos_yaw = np.arctan2(Xmat_hom[1,0],Xmat_hom[0,0])
+            # xyz position is the translation column of the tool frame
+            eePos_xyz = X_frame[:3, 3:4]
+
+            # roll pitch yaw from the TOOL-frame rotation block (= target rotation
+            # when R_tool = I, so a point offset is byte-identical)
+            eePos_roll = np.arctan2(X_frame[2,1],X_frame[2,2])
+            pitch_temp = np.sqrt(X_frame[2,2]*X_frame[2,2] + X_frame[2,1]*X_frame[2,1])
+            eePos_pitch = np.arctan2(-X_frame[2,0],pitch_temp)
+            eePos_yaw = np.arctan2(X_frame[1,0],X_frame[0,0])
             eePos_rpy = np.array([[eePos_roll], [eePos_pitch], [eePos_yaw]], dtype=np.float64)
 
             # then stack it up!
-            eePos = np.vstack((eePos_xyz1[:3,:],eePos_rpy))
+            eePos = np.vstack((eePos_xyz,eePos_rpy))
             return eePos
 
         # do the actual computations
-        ee_offsets = self._normalize_ee_offsets(ee_offsets)
+        ee_offset_Xtools = self._normalize_ee_offset_transforms(ee_offsets)
         eePos_arr = []
         ee_jids, fixed_jids = self.select_end_effector_joints(ee_joint_names)
         for jid in ee_jids:
-            # Xmat_hom = forwardChain(self, jid, q)                
+            # Xmat_hom = forwardChain(self, jid, q)
             Xmat_hom = backwardChain(self, jid, q)
-            eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
+            eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offset_Xtools)
             eePos_arr.append(eePos)
         for fjid in fixed_jids:
             fj = self.robot.get_fixed_joint_by_id(fjid)
@@ -1375,7 +1407,7 @@ class RBDReference(
             else:
                 parent = self.robot.get_joint_by_name(fj.parent_name)
                 Xmat_hom = backwardChain(self, parent.get_id(), q, fj.get_transformation_matrix_hom())
-            eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offsets)
+            eePos = eePos_from_Xmat_hom(Xmat_hom, ee_offset_Xtools)
             eePos_arr.append(eePos)
         return eePos_arr
 
@@ -1467,7 +1499,7 @@ class RBDReference(
             Per end-effector 6 x nv matrix of d(pose)/dv.
         """
         q = self._normalize_kinematics_q(q)
-        ee_offsets = self._normalize_ee_offsets(ee_offsets)
+        ee_offset_Xtools = self._normalize_ee_offset_transforms(ee_offsets)
         nv = self.robot.get_num_vel()
         n_joints = self.robot.get_num_joints()
 
@@ -1512,8 +1544,12 @@ class RBDReference(
                              [-sp,     0.0, 1.0]], dtype=np.float64)
 
         def jacobian_for_chain(chain_jids, X_ee):
-            p_ee = (X_ee @ ee_offsets[0]).reshape(-1)[:3]
-            R_ee = X_ee[:3, :3]
+            # tool/tip frame X_frame = X_ee @ X_tool; the lever arm uses the tip
+            # position p_ee and the E^-1 block uses the tip rotation R_ee (both
+            # reduce to the legacy point path when R_tool = I).
+            X_frame = X_ee @ ee_offset_Xtools[0]
+            p_ee = X_frame[:3, 3]
+            R_ee = X_frame[:3, :3]
             Jv = np.zeros((3, nv), dtype=np.float64)
             Jw = np.zeros((3, nv), dtype=np.float64)
             for j in chain_jids:
