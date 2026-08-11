@@ -338,6 +338,70 @@ class RBDReference(
                 q_new[iq] = self._spherical_retract(q[iq], v_dt[iv])
         return q_new
 
+    @staticmethod
+    def _so3_log_from_quat_xyzw(quat_xyzw):
+        """SO(3) log: the rotation vector phi with exp(phi) == R(quat).
+        Canonical branch |phi| <= pi via the w-sign fold (q and -q are the same
+        rotation; folding to w >= 0 matches Pinocchio `difference` and GLASS
+        quat_log)."""
+        x, y, z, w = np.asarray(quat_xyzw, dtype=np.float64)
+        if w < 0.0:
+            x, y, z, w = -x, -y, -z, -w
+        vec_norm = float(np.sqrt(x * x + y * y + z * z))
+        if vec_norm < 1e-12:
+            return np.array([2.0 * x, 2.0 * y, 2.0 * z], dtype=np.float64)
+        angle = 2.0 * np.arctan2(vec_norm, w)
+        return (angle / vec_norm) * np.array([x, y, z], dtype=np.float64)
+
+    def _spherical_difference(self, quat_from, quat_to):
+        """Inverse of _spherical_retract: omega_dt with
+        _spherical_retract(quat_from, omega_dt) == quat_to (up to sign)."""
+        qf = np.asarray(quat_from, dtype=np.float64)
+        q_rel = self._quat_mul_xyzw(
+            np.array([-qf[0], -qf[1], -qf[2], qf[3]]), np.asarray(quat_to, dtype=np.float64))
+        return self._so3_log_from_quat_xyzw(q_rel)
+
+    def difference(self, q_from, q_to):
+        """Lie-group boxminus: the tangent v (size nv) with
+        integrate(q_from, v) == q_to. Matches pin.difference(model, q1, q2):
+          - vector-space joints: q_to - q_from.
+          - floating ROOT: SE(3) log of the relative pose — phi from the
+            relative quaternion (canonical branch), rho = V(phi)^-1 @ R_from^T
+            @ (p_to - p_from) (the exact inverse of integrate's
+            p_new = p + R_from @ V(phi) @ rho).
+          - SPHERICAL joints: SO(3) log of the relative quaternion.
+        Same user-facing conventions as `integrate` (xyzw quats, floating
+        tangent order [v_lin; omega])."""
+        q1 = np.asarray(q_from, dtype=np.float64)
+        q2 = np.asarray(q_to, dtype=np.float64)
+        nv = self.robot.get_num_vel()
+        specs = self._joint_retract_specs()
+        if not specs:
+            return q2 - q1
+        v = np.zeros(nv, dtype=np.float64)
+        for joint in self.robot.get_joints_ordered_by_id():
+            jid = joint.get_id()
+            if self.robot.floating_base and jid == 0:
+                continue
+            if getattr(joint, "jtype", None) == "spherical" and not getattr(joint, "is_mimic", False):
+                continue
+            if getattr(joint, "is_mimic", False):
+                continue
+            iq = self._as_index_list(self.robot.get_joint_index_q(jid))
+            iv = self._as_index_list(self.robot.get_joint_index_v(jid))
+            v[iv] = q2[iq] - q1[iq]
+        for jtype, iq, iv in specs:
+            if jtype == "floating":
+                phi = self._spherical_difference(q1[iq][3:7], q2[iq][3:7])
+                R_from = self._rotation_from_quat_xyzw(q1[iq][3:7])
+                p_delta_local = R_from.T @ (q2[iq[0:3]] - q1[iq[0:3]])
+                rho = np.linalg.solve(self._so3_V_matrix(phi), p_delta_local)
+                v[iv[0:3]] = rho
+                v[iv[3:6]] = phi
+            else:  # spherical
+                v[iv] = self._spherical_difference(q1[iq], q2[iq])
+        return v
+
     def dIntegrate(self, q, v_dt, with_respect_to):
         """Return the (nv, nv) Jacobian of `integrate(q, v_dt)` in tangent
         space. `with_respect_to` is 'q' or 'v' (Pinocchio's ARG0 / ARG1 — ARG1
