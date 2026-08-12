@@ -402,6 +402,25 @@ class RBDReference(
                 v[iv] = self._spherical_difference(q1[iq], q2[iq])
         return v
 
+    def dDifference(self, q_from, q_to, with_respect_to):
+        """Tangent-space (nv, nv) Jacobian of `difference(q_from, q_to)`.
+
+        `with_respect_to` is 'from' or 'to' (Pinocchio's ARG0 / ARG1). Pure
+        composition via the retract identity
+        integrate(q_from, e) == q_to with e = difference(q_from, q_to):
+          'to'   : dIntegrate(q_from, e, 'v')^-1
+          'from' : -dIntegrate(q_from, e, 'v')^-1 @ dIntegrate(q_from, e, 'q')
+        Matches pin.dDifference(model, q1, q2, ARG0/ARG1). Fixed base
+        collapses to +I / -I.
+        """
+        if with_respect_to not in ("from", "to"):
+            raise ValueError("with_respect_to must be 'from' or 'to'")
+        e = self.difference(q_from, q_to)
+        M_inv = np.linalg.inv(self.dIntegrate(q_from, e, "v"))
+        if with_respect_to == "to":
+            return M_inv
+        return -M_inv @ self.dIntegrate(q_from, e, "q")
+
     def dIntegrate(self, q, v_dt, with_respect_to):
         """Return the (nv, nv) Jacobian of `integrate(q, v_dt)` in tangent
         space. `with_respect_to` is 'q' or 'v' (Pinocchio's ARG0 / ARG1 — ARG1

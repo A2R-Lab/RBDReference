@@ -310,6 +310,52 @@ class _PlantMixin:
         """
         return self._quadratic_cost(u, u_des, R)
 
+    def quadratic_state_cost_tangent(self, x, x_des, Q, gauss_newton=True):
+        """Tangent-space (log-map) quadratic state cost — the oracle twin of
+        the grid_plant floating tracking preset (GATO ASK 3).
+
+        x = [q (nq); qd (nv)]. The error is TANGENT-width 2*nv:
+            e = [difference(q_des, q) (nv); qd - qd_des (nv)]
+        and Q is a DIAGONAL weight vector of size 2*nv (NOT nq+nv).
+
+        Returns (value, grad (2*nv,), hess (2*nv, 2*nv)): the derivatives of
+        delta -> cost(integrate(q, delta_q), qd + delta_v) at delta = 0 —
+        the tangent-chart derivatives a manifold Newton/SQP consumes. The
+        q-block uses the EXACT J_diff = dDifference(q_des, q, 'to'). The
+        hessian is Gauss-Newton (J^T diag(Q) J) by default; gauss_newton=False
+        adds the exact curvature from d2Integrate (full Newton): with
+        e(delta) = difference(q_des, integrate(q, delta)) the chain is
+        de/ddelta = M(e)^-1 N(delta), M = dIntegrate(q_des, e, 'v'),
+        N = dIntegrate(q, delta, 'v') — differentiating BOTH factors at
+        delta = 0 gives -J (dM) J (through e) plus J-composed dN (the
+        d2Integrate-at-zero right-Jacobian slope; N(0) = I but dN(0) != 0).
+        Fixed base reduces exactly to quadratic_state_cost (J = I,
+        e = x - x_des).
+        """
+        nq = self.robot.get_num_pos()
+        nv = self.robot.get_num_vel()
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+        x_des = np.asarray(x_des, dtype=np.float64).reshape(-1)
+        Q = np.asarray(Q, dtype=np.float64).reshape(-1)
+        q, qd = x[:nq], x[nq:nq + nv]
+        q_des, qd_des = x_des[:nq], x_des[nq:nq + nv]
+        Qq, Qv = Q[:nv], Q[nv:]
+        eq = self.difference(q_des, q)
+        ev = qd - qd_des
+        value = 0.5 * float(np.sum(Qq * eq * eq) + np.sum(Qv * ev * ev))
+        Jq = self.dDifference(q_des, q, "to")
+        grad_q = Jq.T @ (Qq * eq)
+        grad = np.concatenate([grad_q, Qv * ev])
+        hess = np.zeros((2 * nv, 2 * nv))
+        hess[:nv, :nv] = Jq.T @ (Qq[:, None] * Jq)
+        hess[nv:, nv:] = np.diag(Qv)
+        if not gauss_newton:
+            T_des = self.d2Integrate(q_des, eq, "v", "v")
+            T0 = self.d2Integrate(q, np.zeros(nv), "v", "v")
+            hess[:nv, :nv] += -np.einsum("b,bcm,ci,mk->ik", grad_q, T_des, Jq, Jq)
+            hess[:nv, :nv] += np.einsum("b,bik->ik", grad_q, T0)
+        return value, grad, hess
+
     # ----- end-effector position cost (value, grad_x, GN hess_x) -----
 
     def _ee_target_name(self, ee):
