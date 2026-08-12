@@ -42,7 +42,8 @@ pin = pytest.importorskip("pinocchio")
 from URDFParser import URDFParser
 from RBDReference import RBDReference
 
-FIX = "URDFParser/tests/fixtures/"
+import URDFParser as _urdfparser_pkg  # the package dir is the repo root
+FIX = str(__import__("pathlib").Path(_urdfparser_pkg.__file__).resolve().parent / "tests" / "fixtures") + "/"
 
 pytestmark = [
     pytest.mark.pinocchio_equivalence,
