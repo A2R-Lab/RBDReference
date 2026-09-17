@@ -152,6 +152,117 @@ class _RegressorMixin:
 
         return self._denormalize_reduced_q_matrix_output(Y, row_space="v")
 
+    def body_regressor_gradient_col(self, v, a, dv, da):
+        """6x10 derivative of the body regressor along ONE state direction.
+
+        Y_body col k = dI_k a + crf(v) (dI_k v) is linear in a and bilinear in
+        v, so its directional derivative under (v,a) -> (v+eps dv, a+eps da) is
+            dI_k da + crf(dv) (dI_k v) + crf(v) (dI_k dv)
+        (three terms — the crf(v)(dI v) product rule; dI_k is a constant basis).
+        This is the same shape the RNEA gradient fpass uses for df:
+        I da + fx(dv) Iv + fx(v) I dv, with the basis dI_k in place of I.
+        """
+        v = np.asarray(v, dtype=np.float64).reshape(-1)
+        a = np.asarray(a, dtype=np.float64).reshape(-1)
+        dv = np.asarray(dv, dtype=np.float64).reshape(-1)
+        da = np.asarray(da, dtype=np.float64).reshape(-1)
+        crf_v = self.dual_cross_operator(v)
+        crf_dv = self.dual_cross_operator(dv)
+        dY = np.zeros((6, 10), dtype=np.float64)
+        for k, dI in enumerate(_BASIS_I):
+            dY[:, k] = dI @ da + crf_dv @ (dI @ v) + crf_v @ (dI @ dv)
+        return dY
+
+    def inverse_dynamics_regressor_gradient(self, q, qd, qdd, GRAVITY=-9.81):
+        """State derivative of the joint-torque regressor (the du x pi cell).
+
+        Returns (dY_dq, dY_dqd), each (nv, nv, 10*NB) with dY_dq[c] = the
+        (nv x 10*NB) derivative of Y along tangent direction q_c. Because
+        tau = Y . pi with constant pi, these satisfy dY_dq[c] @ pi ==
+        (dtau/dq)[:, c] (and likewise for qd) — the B.0 identity, which the
+        tests pin against the analytic RNEA gradient.
+
+        Structure mirrors inverse_dynamics_regressor exactly, with the two
+        derivative sources the scalar summary hides:
+          1. the body-regressor product rule (body_regressor_gradient_col),
+             fed by the RNEA gradient fpass's dv/dx, da/dx staging;
+          2. the backward X^T propagation differentiates too (dq only): the
+             joint's own tangent columns pick up X^T (S_j x* F) exactly as
+             the RNEA gradient bpass does for its force RHS (fxS idiom),
+             here with the 6 x 10*NB block RHS instead of a force vector.
+        """
+        q = self._normalize_q_input(q)
+        qd = self._normalize_v_input(qd)
+        qdd = self._normalize_v_input(qdd)
+        NB = self.robot.get_num_bodies()
+        nv = self.robot.get_num_vel()
+        W = 10 * NB
+
+        v, a, _f = self.inverse_dynamics_fpass(q, qd, qdd, GRAVITY)
+        dv_dq, da_dq, _ = self.inverse_dynamics_gradient_fpass_dq(q, qd, v, a, GRAVITY)
+        dv_dqd, da_dqd, _ = self.inverse_dynamics_gradient_fpass_dqd(q, qd, v)
+
+        # Base blocks + their per-direction derivatives.
+        Fblk = np.zeros((NB, 6, W), dtype=np.float64)
+        dFq = np.zeros((NB, nv, 6, W), dtype=np.float64)
+        dFqd = np.zeros((NB, nv, 6, W), dtype=np.float64)
+        for i in range(NB):
+            Fblk[i][:, 10 * i:10 * i + 10] = self.body_regressor(v[:, i], a[:, i])
+            for c in range(nv):
+                dFq[i, c][:, 10 * i:10 * i + 10] = self.body_regressor_gradient_col(
+                    v[:, i], a[:, i], dv_dq[:, c, i], da_dq[:, c, i])
+                dFqd[i, c][:, 10 * i:10 * i + 10] = self.body_regressor_gradient_col(
+                    v[:, i], a[:, i], dv_dqd[:, c, i], da_dqd[:, c, i])
+
+        dY_dq = np.zeros((nv, nv, W), dtype=np.float64)
+        dY_dqd = np.zeros((nv, nv, W), dtype=np.float64)
+        for curr_id in range(NB - 1, -1, -1):
+            parent_id = self.robot.get_parent_id(curr_id)
+            S = np.asarray(self.robot.get_S_by_id(curr_id), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            inds_f = self.robot.get_joint_index_f(curr_id)
+            inds_f = list(inds_f) if isinstance(inds_f, (list, tuple, np.ndarray)) else [inds_f]
+            idx = self.robot.get_joint_index_v(curr_id)
+            idx_cols = list(idx) if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+            mimic_scale = self._mimic_multiplier(curr_id)
+
+            # Projection: S is q-independent, so only the block derivative
+            # projects (dY[c] rows += alpha * S^T dF[c]).
+            for c in range(nv):
+                proj_q = mimic_scale * (S.T @ dFq[curr_id, c])
+                proj_qd = mimic_scale * (S.T @ dFqd[curr_id, c])
+                for r, fidx in enumerate(inds_f):
+                    dY_dq[c][fidx, :] += proj_q[r, :]
+                    dY_dqd[c][fidx, :] += proj_qd[r, :]
+
+            if parent_id != -1:
+                _q = self.robot.q_for_joint(curr_id, q)
+                Xmat = np.asarray(
+                    self.robot.get_Xmat_Func_by_id(curr_id)(_q), dtype=np.float64
+                )
+                XT = Xmat.T
+                for c in range(nv):
+                    dFq[parent_id, c] += XT @ dFq[curr_id, c]
+                    dFqd[parent_id, c] += XT @ dFqd[curr_id, c]
+                # dq-only: the propagation's own X(q_j) derivative — the
+                # joint's tangent columns get X^T (S_j x* Fblk), the block
+                # form of the RNEA gradient bpass's
+                #   df_dq[:, vcol, parent] += alpha * X^T fxS(S_col, f).
+                S_cols = np.asarray(S).reshape(6, -1)
+                for j, vcol in enumerate(idx_cols):
+                    dFq[parent_id, vcol] += mimic_scale * (
+                        XT @ (self.dual_cross_operator(S_cols[:, j]) @ Fblk[curr_id]))
+                Fblk[parent_id] += XT @ Fblk[curr_id]
+
+        dY_dq = np.stack([
+            self._denormalize_reduced_q_matrix_output(dY_dq[c], row_space="v")
+            for c in range(nv)])
+        dY_dqd = np.stack([
+            self._denormalize_reduced_q_matrix_output(dY_dqd[c], row_space="v")
+            for c in range(nv)])
+        return dY_dq, dY_dqd
+
     def forward_dynamics_parameter_gradient(self, q, qd, u, GRAVITY=-9.81):
         """Forward-dynamics gradient w.r.t. the inertial params: ∂q̈/∂π.
 

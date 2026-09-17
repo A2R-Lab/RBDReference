@@ -143,6 +143,12 @@ class ProjectModelAdapter:
     def inverse_dynamics_regressor(self, q, qd, qdd):
         return normalize_matrix(self.reference.inverse_dynamics_regressor(q, qd, qdd))
 
+    def inverse_dynamics_regressor_gradient(self, q, qd, qdd):
+        """State derivative of the joint-torque regressor: (dY_dq, dY_dqd),
+        each (nv, nv, 10*NB) with slice [c] = dY/d(x_c) (the B.0 du x pi cell)."""
+        dY_dq, dY_dqd = self.reference.inverse_dynamics_regressor_gradient(q, qd, qdd)
+        return np.asarray(dY_dq, dtype=np.float64), np.asarray(dY_dqd, dtype=np.float64)
+
     def forward_dynamics_parameter_gradient(self, q, qd, u):
         """Forward-dynamics inertial-parameter gradient dqdd/dpi (nv x 10*NB)."""
         return normalize_matrix(self.reference.forward_dynamics_parameter_gradient(q, qd, u))

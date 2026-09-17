@@ -127,6 +127,12 @@ ROBOT_ALGORITHM_TOLERANCES = {
         atol=1.0,
         note="h1_2's reduced mass matrix has cond(M) ~7e5 (fixed) / ~5e6 (floating) due to the genuinely small minimum singular value (~4e-6 / ~1.4e-5). Inverting that matrix amplifies the cross-library CRBA round-off; |Minv| itself reaches ~9.6e4 (fixed) / ~2.5e5 (floating). MEASURED floor 2026-06-21 (true max over the test samples): max abs |Δ| = 0.76 (fixed) / 0.63 (floating) on only 4/1521 near-null-space entries, with relative error 0.16% (fixed) / 2.65% (floating) on those entries while the bulk agrees to machine precision. This is a near-singular-mimic CONDITIONING floor, not structural (a structural error would corrupt the well-conditioned entries too, which the 1e-6 RELATIVE tolerance still guards). atol set to 1.0 to cover the measured 0.76 with margin. NOTE: this is a deliberately large absolute floor justified ONLY by the genuinely tiny singular values of this 12-mimic-joint reduced model; do NOT copy it to well-conditioned robots.",
     ),
+    # ----- rizon4 healed-asset aba round-trip bucket (2026-09-17) -----
+    ("rizon4", "aba"): Tolerance(
+        rtol=1e-6,
+        atol=5e-6,
+        note="rizon4's ABA round-trip (tau=inverse_dynamics(qdd) then aba(tau)) first EXECUTED after the 2026-09-15 <inertial> heal (the flexiv values are ROUNDED: diagonal inertias 0.001-0.03). MEASURED 2026-09-17: worst cross-library residual 5.9e-7 abs (fixed) / 1.1e-6 (floating), landing on structurally-near-zero qdd entries (whole-array scale ~2e-8 on the low-energy sample) — cross-library RNEA tau round-off amplified through M^-1 (min singular value ~1e-3, cond ~5e3 fixed / 3e4 floating). Same treatment as the gen3/h1_2 aba buckets: atol 5e-6 covers the measured noise with ~5x margin while a structural error would be O(|qdd|) ~ 10 and is still caught by the 1e-6 relative tolerance on well-conditioned directions.",
+    ),
     # ----- gen3 continuous-joint cross-library round-off bucket -----
     # gen3 has 4 continuous joints. Pinocchio encodes each as an RUBZ SO(2)
     # (cos/sin, NQ=2) slot while GRiD stores a raw scalar angle (NQ=1). The
@@ -146,6 +152,11 @@ ROBOT_ALGORITHM_TOLERANCES = {
         rtol=5e-4,
         atol=5e-5,
         note="gen3 continuous-joint RUBZ cross-library round-off; this bucket also fronts the kinematics-pose, forward-dynamics-gradient and integrator equivalence checks (worst ~2.4e-4 relative on the high-energy samples). The integrator q-residual is compared against EXACT ZEROS (scale=0, so only atol applies) and carries continuous-joint tangent-space round-off up to ~2e-5 on the semi_implicit_euler step (q += dt*(v + dt*qdd) folds in the velocity update's round-off), so the absolute floor is 5e-5 (a structural integration error would be O(dt*|qdd|), orders of magnitude larger). See the gen3 round-off block comment.",
+    ),
+    ("gen3", "inverse_dynamics_gradient"): Tolerance(
+        rtol=5e-4,
+        atol=5e-5,
+        note="Same continuous-joint RUBZ round-off bucket as gen3 inverse_dynamics: the regressor-gradient pi-identity check (dY/dx . pi vs pin's analytic dtau/dx) measures ~1.6e-4 abs (rel-to-scale ~2e-6) — triangulated 2026-09-17 as the PRE-EXISTING project-vs-pin dtau/dq residual (the project's own analytic id_du differs from pin by the identical amount; the project's tau/id_du/Y/dY are mutually consistent to <5e-10). See the gen3 round-off block comment.",
     ),
     ("gen3", "minv"): Tolerance(
         rtol=1e-5,
