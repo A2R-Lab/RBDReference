@@ -40,15 +40,19 @@ def _is_stale(so):
 
 
 def _cmeel_pkgconfig_dirs():
-    """pkgconfig dir(s) holding pinocchio.pc inside the venv's cmeel.prefix."""
+    """pkgconfig dir(s) inside the venv's cmeel.prefix: lib/pkgconfig holds
+    pinocchio.pc (the pin wheel); share/pkgconfig holds eigen3.pc (the
+    cmeel-eigen wheel — pinocchio.pc Requires eigen3, and a box without a
+    system libeigen3-dev, e.g. a CI runner, resolves it from there)."""
     dirs = []
     for key in ("purelib", "platlib"):
         base = sysconfig.get_paths().get(key)
         if not base:
             continue
-        cand = Path(base) / "cmeel.prefix" / "lib" / "pkgconfig"
-        if cand.is_dir() and cand not in dirs:
-            dirs.append(cand)
+        for sub in ("lib", "share"):
+            cand = Path(base) / "cmeel.prefix" / sub / "pkgconfig"
+            if cand.is_dir() and cand not in dirs:
+                dirs.append(cand)
     return dirs
 
 

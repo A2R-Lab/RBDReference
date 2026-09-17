@@ -4,11 +4,18 @@
 # does NOT need any of these — install them only to run equivalence tests.
 -r requirements.txt
 
-pin                          # Pinocchio (C++) Python wheel: `import pinocchio`
+pin<4                        # Pinocchio (C++) Python wheel: `import pinocchio`.
+                             # <4: pin 4.x drops pinocchio.pc AND restructures the C++
+                             # headers (its urdf-parser templates no longer compile from
+                             # pin_so_ext's TU) — porting pin_so_ext to pin 4 is a
+                             # tracked follow-up, not a requirements tweak.
+cmeel-eigen                  # Eigen headers + eigen3.pc (pinocchio.pc Requires eigen3;
+                             # covers boxes without a system libeigen3-dev, e.g. CI runners)
 robot_descriptions>=1.23.0   # resolves the robot URDFs in equivalents/robot_manifest.json
 xacrodoc                     # xacro -> URDF expansion for some robot descriptions
 beautifulsoup4>=4.9.3        # URDF joint-type parsing in the adapters
 pybind11                     # builds the pin_so_ext second-order RNEA binding
+setuptools                   # pin_so_ext's setup.py (not bundled in py3.12 venvs)
 pytest
 
 # Also required (sibling package, not on PyPI): URDFParser
