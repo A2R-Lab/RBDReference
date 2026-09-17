@@ -38,6 +38,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: A2R-Lab/URDFParser
+          # The modernized parser (floating_base_convention, mimic/planar/spherical
+          # tiers) lives on modernizing-tests; URDFParser's default main predates it.
+          # Flip back to main once that branch merges upstream.
+          ref: modernizing-tests
           path: URDFParser
 
       - uses: actions/setup-python@v5
