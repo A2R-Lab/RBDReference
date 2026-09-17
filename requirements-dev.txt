@@ -11,6 +11,8 @@ pin<4                        # Pinocchio (C++) Python wheel: `import pinocchio`.
                              # tracked follow-up, not a requirements tweak.
 cmeel-eigen                  # Eigen headers + eigen3.pc (pinocchio.pc Requires eigen3;
                              # covers boxes without a system libeigen3-dev, e.g. CI runners)
+cmeel-urdfdom<5              # pin 3.9's pywrap links liburdfdom_*.so.4.0; pip otherwise
+                             # pairs it with urdfdom 6.x -> ImportError at `import pinocchio`
 robot_descriptions>=1.23.0   # resolves the robot URDFs in equivalents/robot_manifest.json
 xacrodoc                     # xacro -> URDF expansion for some robot descriptions
 beautifulsoup4>=4.9.3        # URDF joint-type parsing in the adapters
