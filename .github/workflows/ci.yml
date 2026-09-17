@@ -1,0 +1,64 @@
+name: CI
+
+# CPU-only Pinocchio-equivalence CI for the pure-Python reference.
+#
+# Layout: the suite's absolute imports are `RBDReference.tests.*`, so the
+# checkout must live in a directory literally named `RBDReference` with its
+# PARENT on sys.path (pytest's default prepend import mode provides that when
+# invoked as `pytest RBDReference/tests` from the parent). The sibling
+# `URDFParser` package (not on PyPI) is checked out next to it — the same
+# shape the GRiD super-project's `external/` gives both.
+#
+# A plain run executes the FAST set (the tests/conftest.py fast-default
+# policy deselects the @slow big-robot cells); dispatch with `runslow` for
+# the exhaustive set. The pin_so_ext pybind11 extension self-builds on first
+# use against the `pin` wheel's cmeel pkg-config — the runner only needs
+# g++ and pkg-config (both preinstalled on ubuntu-latest).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      runslow:
+        description: "Also run the @slow big-robot cells (--runslow)"
+        type: boolean
+        default: false
+
+jobs:
+  pinocchio-equivalence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: RBDReference
+
+      - uses: actions/checkout@v4
+        with:
+          repository: A2R-Lab/URDFParser
+          path: URDFParser
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache downloaded robot descriptions
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/robot_descriptions
+          key: robot-descriptions-${{ hashFiles('RBDReference/tests/robot_manifest.json') }}
+
+      - name: Install dependencies
+        run: |
+          pip install -r RBDReference/requirements-dev.txt
+          pip install -r URDFParser/requirements.txt
+
+      - name: Run equivalence suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          RUNSLOW=""
+          if [[ "${{ inputs.runslow }}" == "true" ]]; then RUNSLOW="--runslow"; fi
+          python -m pytest RBDReference/tests -q $RUNSLOW
