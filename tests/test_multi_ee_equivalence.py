@@ -26,8 +26,8 @@ singular at pitch = +/-pi/2 (the rotation rows of the Jacobian then blow up on
 BOTH the project oracle and the pinocchio FD reference — a representation
 limitation of the rpy pose, not a multi-target bug). When an EE sample sits in
 that band the per-EE GRADIENT cross-check is skipped, but the well-defined pose
-position + rotation-matrix checks still run. rizon4's zero-inertia URDF is skipped
-wholesale (consistent with the rest of the suite).
+position + rotation-matrix checks still run. (rizon4's former wholesale skip is
+gone — its URDF was healed 2026-09-15 and it now runs like every other robot.)
 """
 
 import numpy as np
@@ -67,8 +67,6 @@ def _near_gimbal_lock(rot, band=0.05):
 
 
 def _check_multi_ee(spec, project_model, pinocchio_model):
-    if spec.robot_id == "rizon4":
-        pytest.skip("rizon4 ships a zero-inertia URDF; its FK/pose oracle is non-physical.")
     ref = project_model.reference
     leaf_names = _leaf_names(project_model)
     pin_frames = set(pinocchio_model.frame_names)

@@ -1,3 +1,8 @@
+> **ARCHIVAL (2026-09-18).** Snapshot of a pre-rename checkout (the
+> `rnea_fpass` era of the API). Superseded by the `pin_so_ext` C++
+> second-order oracle and the current `tests/` suite; kept only as a record
+> of the original mapping decisions.
+
 # Pinocchio Mapping Inventory
 
 This inventory was created from the checked-out `URDFParser` and `RBDReference`

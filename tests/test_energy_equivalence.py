@@ -35,7 +35,7 @@ def _check_energy(spec, project_model, pinocchio_model, coriolis: bool = True):
     for sample in build_dynamics_samples(project_model):
         q, qd = sample.q, sample.qd
         if not pinocchio_model.has_invertible_mass_matrix(q):
-            # Degenerate / zero-inertia model (e.g. rizon4's broken URDF) — the
+            # Degenerate / zero-inertia model (a broken zero-inertia URDF) — the
             # Pinocchio oracle returns non-physical (NaN) energy/gravity, so the
             # equivalence is not well-defined for this configuration.
             continue

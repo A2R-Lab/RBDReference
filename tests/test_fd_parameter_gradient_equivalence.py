@@ -68,7 +68,7 @@ def _check_forward_dynamics_parameter_gradient(spec, project_model, pinocchio_mo
     for sample in build_dynamics_samples(project_model):
         q, qd, qdd = sample.q, sample.qd, sample.qdd
         if not pinocchio_model.has_invertible_mass_matrix(q):
-            # Degenerate / zero-inertia model (e.g. rizon4's broken URDF) — the
+            # Degenerate / zero-inertia model (a broken zero-inertia URDF) — the
             # Pinocchio Minv / regressor oracle is non-physical here.
             continue
         # Ground the input torque at a physical acceleration so the gradient is

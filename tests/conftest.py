@@ -196,7 +196,7 @@ def xfail_if_mimic(request, spec, model, *, reason, only_robots=None):
     ~7e-6 project-vs-pinocchio finger-chain parse/round-off in the (exact) -J^T
     block — the project is self-consistent (analytic == its own forward FD to 0) —
     amplified by the near-singular hand Minv (cond ~7e5) and by central-FD noise in
-    the oracle's dJ^T/dq block. Tracked: PINOCCHIO_ALIGNMENT_BACKLOG. Non-mimic
+    the oracle's dJ^T/dq block. Tracked: docs/history/PINOCCHIO_ALIGNMENT_BACKLOG.md (archival). Non-mimic
     robots are unaffected. ``model`` may be a pinocchio or project adapter.
 
     ``only_robots``: optional iterable of robot_ids; when given, the xfail applies

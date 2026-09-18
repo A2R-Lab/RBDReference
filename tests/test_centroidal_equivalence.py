@@ -44,7 +44,7 @@ def _check_centroidal(spec, project_model, pinocchio_model):
     for sample_idx, sample in enumerate(build_dynamics_samples(project_model)):
         q, qd = sample.q, sample.qd
         if not pinocchio_model.has_invertible_mass_matrix(q):
-            # Degenerate / zero-inertia model (e.g. rizon4's broken URDF) — the
+            # Degenerate / zero-inertia model (a broken zero-inertia URDF) — the
             # Pinocchio oracle returns NaN CoM/centroidal quantities here, so the
             # equivalence is not well-defined.
             continue

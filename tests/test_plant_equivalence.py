@@ -130,7 +130,7 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
         # structure: symmetric, only the top-left nv x nv q-block non-zero).
         # GRiD-defined cost, so FD is the oracle (no pinocchio).
         #
-        # Degenerate / zero-inertia models (e.g. rizon4's broken URDF) have
+        # Degenerate / zero-inertia models (a broken zero-inertia URDF) have
         # M_total = 0, so the CoM and CoM-Jacobian are non-physical (NaN from the
         # 1/M_total normalization) and the cost is not well-defined — skip the
         # CoM / centroidal-momentum blocks there (same guard the energy/centroidal

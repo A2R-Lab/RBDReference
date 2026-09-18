@@ -1,3 +1,8 @@
+> **ARCHIVAL (2026-09-18).** Kept as the historical migration log of the
+> Pinocchio-equivalence work (parser fixes, joint-ordering change, floating-
+> base convention alignment). Everything below has long since landed; consult
+> the current READMEs and test suite for present-day behavior.
+
 # URDFParser And RBDReference Change Notes
 
 This note captures the functional changes made during the Pinocchio equivalence
@@ -300,7 +305,7 @@ Why it matters for CUDA later:
   gravity transport if it is expected to
   match the CPU reference layer.
 
-### 5. Rooted fixed-joint gradient cleanup
+### 6. Rooted fixed-joint gradient cleanup
 
 Problem:
 - One rooted fixed-joint branch in the pose-gradient path multiplied a zero
@@ -314,7 +319,7 @@ Why it matters for CUDA later:
 - Mostly cleanup, but it is worth keeping the same rooted-fixed-joint branch
   structure in any mirrored gradient code.
 
-### 6. Floating-base ABA, CRBA, and pose helpers received first-pass generalization fixes
+### 7. Floating-base ABA, CRBA, and pose helpers received first-pass generalization fixes
 
 Problem:
 - Broader floating-base robots exposed several floating-only implementation bugs
@@ -342,7 +347,7 @@ Why it matters for CUDA later:
   CUDA should be checked for these same root-expanded indexing and root-slice
   assumptions before it is trusted against the new CPU reference behavior.
 
-### 6b. Floating-base ABA and CRBA now match Pinocchio on the enabled robot set
+### 7b. Floating-base ABA and CRBA now match Pinocchio on the enabled robot set
 
 Problem:
 - After the first floating-base generalization pass, `aba(...)` and `crba(...)`
@@ -372,7 +377,7 @@ Why it matters for CUDA later:
   the floating joint subspace convention, while user-facing mass-matrix
   cross-term blocks must be emitted in Pinocchio order.
 
-### 7. Explicit-`world` URDF roots now convert cleanly into floating bases
+### 8. Explicit-`world` URDF roots now convert cleanly into floating bases
 
 Problem:
 - Some upstream robot URDFs, including `gen3` and `rizon4`, already include an
@@ -394,7 +399,7 @@ Why it matters for CUDA later:
   need a synthetic outer `world` wrapper should be updated to recognize explicit
   world-root URDFs and convert the existing root attachment instead.
 
-### 8. Floating-base inverse-dynamics gradients were aligned with Pinocchio
+### 9. Floating-base inverse-dynamics gradients were aligned with Pinocchio
 
 Problem:
 - After floating-base `inverse_dynamics(...)` itself matched Pinocchio, the `dq` block of
@@ -420,7 +425,7 @@ Why it matters for CUDA later:
   output mapping and the corrected root gravity derivative path to match the
   CPU reference and Pinocchio.
 
-### 9. Floating-base end-effector derivative helpers now use an analytic free-flyer path
+### 10. Floating-base end-effector derivative helpers now use an analytic free-flyer path
 
 Problem:
 - `end_effector_pose_gradient(...)` and `end_effector_pose_hessian(...)` were

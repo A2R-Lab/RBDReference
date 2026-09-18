@@ -44,7 +44,7 @@ def test_floating_base_f_ext_gradient_matches_pinocchio(
 def _check(spec, project_model, pinocchio_model):
     for sample in build_dynamics_samples(project_model):
         q = sample.q
-        # Degenerate/zero-inertia models (e.g. rizon4's broken URDF) have a singular
+        # Degenerate/zero-inertia models (a broken zero-inertia URDF) have a singular
         # mass matrix, so the dqdd/dfext = M^-1 J^T block is undefined. Skip them,
         # mirroring the invertible-mass guard every sibling Minv-touching test uses
         # (test_aba/test_minv/test_crba/test_integrator_pinocchio_equivalence).

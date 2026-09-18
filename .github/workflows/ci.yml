@@ -17,9 +17,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, modernizing-tests]
   pull_request:
-    branches: [main]
+    branches: [main, modernizing-tests]
   workflow_dispatch:
     inputs:
       runslow:

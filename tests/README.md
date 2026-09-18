@@ -1,208 +1,90 @@
 # Pinocchio Equivalence Suite
 
-This developer-only suite validates GRiD's CPU-side Python reference path against
-Pinocchio Python bindings on the same URDF inputs. The goal is to make Pinocchio
-the comparison authority for parse behavior, metadata sanity, and core dynamics
-algorithms before extending that trust boundary to CUDA and generated GPU code.
+This suite validates the pure-Python `RBDReference` implementation against
+Pinocchio (C++) on the same URDF inputs — parse behavior, metadata sanity, and
+every dynamics / kinematics / derivative algorithm the package exposes. It is
+the trust anchor the parent GRiD repo's CUDA equivalence tests build on, but it
+runs standalone on CPU only.
 
-## What This Suite Validates
+## Running standalone
 
-- Robot acquisition is manifest-driven and reproducible.
-- The same resolved URDF can be loaded by both GRiD and Pinocchio.
-- Fixed-base default-tier robots have sane metadata and can be compared numerically.
-- Fixed-base `inverse_dynamics` and `minv` match Pinocchio within central epsilon tolerances.
-- Fixed-base default-tier robots also exercise `crba`, `aba`,
-  `forward_dynamics`, `forward_dynamics_gradient`, `inverse_dynamics_gradient`, and selected pose
-  targets against Pinocchio when the resolved robot parses cleanly on both sides.
-- The current fixed-base verified set includes `iiwa14`, `go2`, `g1`, `fetch`,
-  `baxter`, `fr3`, and `gen3`, while `rizon4` remains included with explicit
-  skips for inverse-mass and ABA-style checks because the resolved source model
-  is singular on both the GRiD and Pinocchio sides.
-- Floating-base parse and metadata coverage exists for the same smoke robots.
-- Floating-base `inverse_dynamics` now matches Pinocchio for the floating-enabled smoke
-  robots after aligning the floating root velocity/acceleration convention and
-  correcting the root gravity transport in `RBDReference`.
-- Floating-base `minv` matches Pinocchio for the floating-enabled smoke robots
-  under the same native Pinocchio free-flyer ordering now used by GRiD.
-- Floating-base `crba` now also matches Pinocchio for the current
-  floating-enabled set wherever the resolved source model has an invertible
-  mass matrix.
-- Floating-base `aba` now also matches Pinocchio for the current
-  floating-enabled set wherever the resolved source model has an invertible
-  mass matrix.
-- Floating-base `forward_dynamics` now also matches Pinocchio for the current
-  floating-enabled set: `iiwa14`, `go2`, `g1`, `fr3`, `fetch`, `baxter`, and
-  `gen3`, with singular-model skips scoped narrowly where needed.
-- Floating-base `inverse_dynamics_gradient` and `forward_dynamics_gradient` now also match
-  Pinocchio for the current floating-enabled set wherever the resolved source
-  model has an invertible mass matrix.
-- Floating-base selected pose targets now also match Pinocchio for the current
-  floating-enabled set.
-- End-effector pose gradients now match Pinocchio on the current fixed-base and
-  floating-base default robots using articulated leaf-joint targets shared by
-  both sides.
-- End-effector pose Hessians now match Pinocchio on a focused `iiwa14`
-  fixed-base and floating-base slice, with second-order checks using a
-  dedicated finite-difference tolerance policy.
-- The second-order top-level helpers `idsva_so` and `fdsva_so` are now covered
-  on fixed-base `iiwa14` and floating-base smoke robots. Floating-base coverage
-  is validated against Pinocchio's bound C++
-  `ComputeRNEASecondOrderDerivatives` (exposed through the `pin_so_ext`
-  pybind11 extension), which is the golden second-order oracle rather than
-  finite-differencing the first-order paths.
-- Floating-base parse, metadata, `inverse_dynamics`, `minv`, `crba`, `aba`,
-  `forward_dynamics`, `inverse_dynamics_gradient`, `forward_dynamics_gradient`, and selected pose
-  targets are now exercised on the broader floating-enabled set `iiwa14`,
-  `go2`, `g1`, `fr3`, `fetch`, `baxter`, `gen3`, and `rizon4`, with
-  singular-model skips scoped narrowly where needed.
-- Remaining floating-base convention gaps are surfaced explicitly instead of
-  being hidden by loose tolerances or ad hoc test logic.
+1. Check out this repo and its sibling parser under a common parent, with the
+   directories named **exactly** `RBDReference` and `URDFParser` (the suite's
+   absolute imports are `RBDReference.tests.*`):
 
-## What This Suite Does Not Validate
+   ```bash
+   git clone <RBDReference>            # -> ./RBDReference
+   git clone -b modernizing-tests https://github.com/A2R-Lab/URDFParser  # -> ./URDFParser
+   ```
 
-- CUDA kernels, generated GPU code, or accelerator paths.
-- Every function in `RBDReference`.
-- Broad nightly robot corpora in the default developer path.
-- Broad end-effector Hessian coverage beyond the focused `iiwa14`
-  fixed/floating slice until the current higher-runtime finite-difference path
-  is either widened confidently or replaced with a broader analytic
-  implementation.
+   `URDFParser` must be on the `modernizing-tests` branch (the modernized
+   parser: floating-base convention, mimic/planar/spherical tiers).
 
-## Robot Sourcing
+2. Install the developer dependencies:
 
-The default suite is controlled by `robot_manifest.json` and currently includes:
+   ```bash
+   pip install -r RBDReference/requirements-dev.txt
+   ```
 
-- `iiwa14`
-- `go2`
-- `g1`
-- `fr3`
-- `rizon4`
-- `gen3`
-- `fetch`
-- `baxter`
+3. Run pytest **from the common parent** (so the parent lands on `sys.path`
+   and `RBDReference.*` / `URDFParser` imports resolve):
 
-Robot acquisition is `robot_descriptions`-first in v1. Each manifest entry can
-carry a source-candidate chain, so the default developer flow tries
-`robot_descriptions` first and leaves room for later `direct_git`,
-`example_robot_data`, or `local_path` fallbacks when upstream coverage is missing.
+   ```bash
+   python -m pytest RBDReference/tests -q
+   ```
 
-## Installation
+## Fast default vs. `--runslow`
 
-Base install:
+A plain run is fast by default (a few minutes): the heavy big-robot cells —
+second-order tensors, per-DoF finite-difference plant / parameter-gradient /
+pose-Hessian oracles, the floating-base FD cross-checks — are tagged `@slow`
+and deselected automatically. Every algorithm keeps live small/medium-robot
+coverage, so the fast set is still a real regression gate.
 
 ```bash
-./base_install.sh
+python -m pytest RBDReference/tests --runslow           # everything
+python -m pytest RBDReference/tests --runslow -m slow   # only the heavy cells
 ```
 
-Developer install for the Pinocchio equivalence suite:
+The policy lives in `tests/conftest.py` (`pytest_collection_modifyitems`), not
+in ini `addopts` — when run from a parent repo, that parent's pytest config is
+the active one and would ignore a submodule-local `pytest.ini`.
 
-```bash
-./developer_install.sh
-```
+## Pieces
 
-The developer install adds `pytest`, `pin`, `robot_descriptions>=1.23.0`, and
-`pybind11`, then builds the `pin_so_ext` C++ extension (which wraps Pinocchio's
-`ComputeRNEASecondOrderDerivatives` for use as the second-order golden oracle)
-and prewarms only the default tier unless `PINOCCHIO_EQUIVALENCE_TIER` is
-overridden. Both install scripts create and reuse a repo-local `.venv` so the
-workflow does not depend on global `pip` writes.
+- `conftest.py` — fixtures that resolve each manifest robot and build the two
+  adapters (`reference` and `pinocchio`) per (robot, base mode); the
+  fast/slow policy above.
+- `robot_manifest.json` + `model_sources.py` — manifest-driven robot
+  acquisition. Each robot tries its vendored URDF in `robot_assets/` FIRST
+  (found in this repo or a parent repo), then falls back to a
+  `robot_descriptions` download.
+- `tolerances.py` — per-(algorithm, robot) tolerance buckets, each with a
+  written justification. Loosen a bucket only with a documented triangulation
+  note explaining where the extra round-off/FD error comes from.
+- `comparators.py` — `assert_close`, the single comparison helper all tests
+  use.
+- `ROBOT_SOURCE_LOCK.json` / `source_lock.py` — provenance for resolved robots.
 
-### pin_so_ext (Pinocchio second-order RNEA binding)
+## Robots
 
-The extension lives at `RBDReference/equivalents/pin_so_ext/`. Its loader
-(`pin_so_ext/__init__.py`) auto-builds via `setup.py build_ext --inplace` on
-first import if the compiled `.so` is missing, so a fresh checkout can be
-exercised without manual setup. Prerequisites:
+The manifest currently pins 9 robots, each in fixed- and floating-base modes:
+`iiwa14`, `go2`, `g1`, `h1_2`, `fr3`, `rizon4`, `gen3`, `fetch`, `baxter`.
 
-- A C++17 compiler (`g++` ≥ 7 is sufficient).
-- `pkg-config` configured for Pinocchio (`pkg-config --cflags --libs pinocchio`
-  must succeed).
-- Pinocchio development headers, typically installed via the OpenRobotPkg
-  binaries that ship under `/opt/openrobots/`.
-- `pybind11` (in `requirements-dev.txt`).
+## pin_so_ext (second-order C++ oracle)
 
-To rebuild manually after editing the C++ source:
+`equivalents/pin_so_ext/` wraps Pinocchio's C++
+`ComputeRNEASecondOrderDerivatives` (not exposed by the Python bindings). Its
+loader builds it on demand at first import; it needs `g++` and resolves
+Pinocchio via `pkg-config` (the `pin` wheel's cmeel pkgconfig dirs are
+prepended automatically) or, failing that, by probing the venv's
+`cmeel.prefix` directly. No system Pinocchio install is required — the pinned
+`pin<4` wheel in `requirements-dev.txt` is the whole toolchain.
 
-```bash
-cd RBDReference/equivalents/pin_so_ext
-.venv/bin/python setup.py build_ext --inplace
-```
+## CI
 
-Top-level runner and suite entrypoints:
-
-- `test/run_tests.py` is the main command-line entrypoint for listing models,
-  preparing assets, and running the suite.
-- `RBDReference/tests/test_all.py` is the suite-level pytest target used
-  by the top-level runner.
-
-## Running The Default Suite
-
-```bash
-.venv/bin/python test/run_tests.py
-```
-
-To focus on fixed-base coverage first:
-
-```bash
-.venv/bin/python test/run_tests.py -- -m "pinocchio_equivalence and not floating_base"
-```
-
-To list the manifest-controlled default robots:
-
-```bash
-.venv/bin/python test/run_tests.py --list-tests
-```
-
-### Fast default vs. `--runslow`
-
-A plain run is **fast by default** (a few minutes): a small tail of heavy
-big-robot numpy references — second-order `idsva_so`/`fdsva_so`, the per-DoF
-finite-difference plant + parameter-gradient + pose-Hessian oracles, the
-floating-base plant cross-check, and the `rk4` / FD-jacobian integrator
-cross-checks — is tagged `slow` and **deselected** automatically. Every
-algorithm keeps live small/medium-robot coverage, so the fast set is still a
-real regression gate. Run the exhaustive set explicitly:
-
-```bash
-pytest RBDReference/tests/ --runslow          # fast + the heavy big-robot cells
-pytest RBDReference/tests/ --runslow -m slow  # ONLY the heavy cells
-```
-
-The split lives in `tests/conftest.py` (`pytest_collection_modifyitems`); it is
-driven from the conftest rather than ini `addopts` because the active pytest
-config for this suite is the parent repo's `pyproject.toml` (the suite is run
-from the repo root so the `RBDReference.*` imports resolve), which would ignore
-a submodule-local `pytest.ini`.
-
-## Provenance And Lock Files
-
-- `ROBOT_SOURCE_LOCK.json` is the checked-in source/provenance note for the suite.
-- `test/run_tests.py --prepare-models` can generate a fresh machine-readable lock under
-  `.external_test_assets/robot_source_lock.generated.json`.
-
-If you want to refresh the checked-in lock after verifying dependencies and robot
-resolution locally, run:
-
-```bash
-.venv/bin/python test/run_tests.py --prepare-models --update-lock
-```
-
-## Adding A New Robot Safely
-
-1. Add a new manifest entry with robot id, embodiment, source kind, source
-   descriptor, tier, and base modes.
-2. Resolve it with `test/run_tests.py --prepare-models`.
-3. Refresh the source lock.
-4. Run parse and metadata coverage first.
-5. Only add numerical coverage for algorithms whose mapping to Pinocchio is clear.
-
-## Interpreting Failures
-
-- Parse failures mean GRiD or Pinocchio could not load the resolved URDF cleanly.
-  The failure message should identify the robot id, source kind, URDF path, and
-  base mode.
-- Metadata failures usually indicate a naming, indexing, or model-structure
-  mismatch that should be triaged before trusting numerical results.
-- Numerical mismatches indicate either an algorithm bug or a remaining convention
-  mismatch. Check `PINOCCHIO_MAPPING_INVENTORY.md` and
-  `PINOCCHIO_ALIGNMENT_BACKLOG.md` before loosening tolerances.
+`.github/workflows/ci.yml` runs exactly this shape on every push/PR: two
+sibling checkouts (`RBDReference` + `URDFParser@modernizing-tests`), the
+requirements-dev install, and the fast set via `python -m pytest
+RBDReference/tests` from the parent (workflow-dispatch can opt into
+`--runslow`).

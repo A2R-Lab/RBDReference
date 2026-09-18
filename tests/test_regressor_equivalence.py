@@ -60,7 +60,7 @@ def _check_regressor(spec, project_model, pinocchio_model):
     for sample in build_dynamics_samples(project_model):
         q, qd, qdd = sample.q, sample.qd, sample.qdd
         if not pinocchio_model.has_invertible_mass_matrix(q):
-            # Degenerate / zero-inertia model (e.g. rizon4's broken URDF) — the
+            # Degenerate / zero-inertia model (a broken zero-inertia URDF) — the
             # Pinocchio regressor / RNEA oracle is non-physical here.
             continue
         Y_ref = project_model.inverse_dynamics_regressor(q, qd, qdd)
