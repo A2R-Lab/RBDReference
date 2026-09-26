@@ -673,8 +673,11 @@ class PinocchioModelAdapter:
         q_pin = self._to_pin_q(q)
         qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
         pin.ccrba(self.model, self.data, q_pin, qd_pin)
-        A = np.asarray(self.data.Ag, dtype=np.float64)
-        h = np.asarray(self.data.hg.vector, dtype=np.float64)
+        # Copies: eigenpy hands back views of data.* members, which the next
+        # call on this shared Data overwrites (a caller stacking per-sample
+        # results saw every sample equal to the last one, 2026-09-26).
+        A = np.array(self.data.Ag, dtype=np.float64, copy=True)
+        h = np.array(self.data.hg.vector, dtype=np.float64, copy=True)
         if self.mimic_info is not None and not self.mimic_info.is_empty():
             A = self._reduce_pin_matrix_to_project(A, axes_to_reduce=[(1, "v")])
         return normalize_matrix(A), normalize_vector(h)
@@ -860,22 +863,22 @@ class PinocchioModelAdapter:
         # `forward_dynamics_gradient` and `idsva_so_body_frame`.
         if self.mimic_info is not None and not self.mimic_info.is_empty():
             dtau_dq = self._reduce_pin_matrix_to_project(
-                np.asarray(self.data.dtau_dq, dtype=np.float64),
+                np.array(self.data.dtau_dq, dtype=np.float64, copy=True),
                 axes_to_reduce=[(0, "v"), (1, "v")],
             )
             dtau_dv = self._reduce_pin_matrix_to_project(
-                np.asarray(self.data.dtau_dv, dtype=np.float64),
+                np.array(self.data.dtau_dv, dtype=np.float64, copy=True),
                 axes_to_reduce=[(0, "v"), (1, "v")],
             )
         else:
             dtau_dq = reduce_pinocchio_q_jacobian_to_project(
-                np.asarray(self.data.dtau_dq, dtype=np.float64),
+                np.array(self.data.dtau_dq, dtype=np.float64, copy=True),
                 self.base_mode,
                 q,
                 joint_names=self.project_scalar_joint_names,
                 joint_types_by_name=self.urdf_joint_types_by_name,
             )
-            dtau_dv = normalize_matrix(np.asarray(self.data.dtau_dv, dtype=np.float64))
+            dtau_dv = normalize_matrix(np.array(self.data.dtau_dv, dtype=np.float64, copy=True))
         return (dtau_dq, dtau_dv)
 
     def idsva_so_body_frame(self, q, qd, qdd):
@@ -993,7 +996,7 @@ class PinocchioModelAdapter:
         qdd = np.asarray(pin.aba(self.model, self.data, q_pin, qd_arr, u_arr), dtype=np.float64)
         d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq = self.idsva_so_body_frame(q, qd, qdd)
         pin.computeMinverse(self.model, self.data, q_pin)
-        Minv = normalize_matrix(np.asarray(self.data.Minv, dtype=np.float64))
+        Minv = normalize_matrix(np.array(self.data.Minv, dtype=np.float64, copy=True))
         fd_dq, fd_dqd = self.forward_dynamics_gradient(q, qd, u)
         daba_dqdq = -np.einsum(
             "il,ljk->ijk",
@@ -1033,13 +1036,13 @@ class PinocchioModelAdapter:
         u_pin = self._expand_project_v_to_pin(np.asarray(u, dtype=np.float64))
         pin.computeABADerivatives(self.model, self.data, q_pin, qd_pin, u_pin)
         ddq_dq = reduce_pinocchio_q_jacobian_to_project(
-            np.asarray(self.data.ddq_dq, dtype=np.float64),
+            np.array(self.data.ddq_dq, dtype=np.float64, copy=True),
             self.base_mode,
             q,
             joint_names=self.project_scalar_joint_names,
             joint_types_by_name=self.urdf_joint_types_by_name,
         )
-        ddq_dv = normalize_matrix(np.asarray(self.data.ddq_dv, dtype=np.float64))
+        ddq_dv = normalize_matrix(np.array(self.data.ddq_dv, dtype=np.float64, copy=True))
         return (ddq_dq, ddq_dv)
 
     # ----- Time integrators (canonical via pinocchio.integrate / dIntegrate) -----
@@ -1479,10 +1482,10 @@ class PinocchioModelAdapter:
 
         if target_name in self.joint_names:
             joint_id = self.model.getJointId(target_name)
-            return normalize_matrix(np.asarray(self.data.oMi[joint_id].rotation, dtype=np.float64))
+            return normalize_matrix(np.array(self.data.oMi[joint_id].rotation, dtype=np.float64, copy=True))
 
         frame_id = self._resolve_frame_id(target_name)
-        return normalize_matrix(np.asarray(self.data.oMf[frame_id].rotation, dtype=np.float64))
+        return normalize_matrix(np.array(self.data.oMf[frame_id].rotation, dtype=np.float64, copy=True))
 
     # ----- General-frame Jacobians + operational-space inertia (E2) -----
 
