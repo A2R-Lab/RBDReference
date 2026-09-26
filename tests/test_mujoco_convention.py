@@ -282,10 +282,9 @@ def test_ee_pos_cost_transform_matches_fd_and_direct():
 
 @pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
 def test_momentum_cost_transform_matches_direct():
-    """momentum_cost (qd-block GN cost): h invariant ⇒ value invariant; the qd-block
-    grad/hess reframe by the CMM column map (A_mjx = A_pin G^{-1}), i.e. covector G·
-    on the grad and congruence on the hess. Checked vs an independent mjx-frame
-    recompute with the reframed CMM."""
+    """Full tangent momentum GN needs the configuration-dependent velocity map,
+    not merely a rotation of an isolated qd block. Check against a residual FD
+    holding the MuJoCo-frame velocity fixed under configuration perturbations."""
     ad = _go2("floating"); ref = ad.reference; nq, nv = ad.nq, ad.nv; L = mc.FloatingRootLayout()
     rng = np.random.default_rng(33)
     q, qd, _, _ = _rand_state(rng, nq, nv)
@@ -293,13 +292,24 @@ def test_momentum_cost_transform_matches_direct():
     W = rng.standard_normal(6) ** 2 + 0.1
     h_des = rng.standard_normal(6)
     _, grad_pin, hess_pin = ref.momentum_cost(q, qd, h_des, W)
-    g_mjx, H_mjx = mc.quadratic_tracking_cost_pin_to_mjx(grad_pin, hess_pin, R, nq, nv, L)
-    # independent mjx recompute: A_mjx = A_pin G^{-1}; r invariant (h, h_des fixed).
-    A_pin, h = ref.ccrba(q, qd)
-    A_mjx = mc.jacobian_pin_to_mjx(np.asarray(A_pin), R, L)
-    r = np.asarray(h).reshape(-1) - h_des
-    assert np.abs(g_mjx[nq:nq + nv] - A_mjx.T @ (W * r)).max() < 1e-9
-    assert np.abs(H_mjx[nq:nq + nv, nq:nq + nv] - A_mjx.T @ (W[:, None] * A_mjx)).max() < 1e-9
+    Ginv = mc.g_matrix(R, nv, L).T
+    velocity_q = mc._cross_cols(qd[L.lin_slice], -1.0, nv, L)
+    transform = np.block([[Ginv, np.zeros((nv, nv))], [velocity_q, Ginv]])
+    g_mjx = transform.T @ grad_pin
+    H_mjx = transform.T @ hess_pin @ transform
+    v_mjx = mc.v_pin_to_mjx(qd, R, L)
+
+    def residual(delta):
+        qp = mc.mjx_retract(q, delta[:nv], ref, L)
+        Rp = mc.base_rotation(qp, L)
+        vp = mc.v_mjx_to_pin(v_mjx + delta[nv:], Rp, L)
+        return np.asarray(ref.ccrba(qp, vp)[1]).reshape(-1) - h_des
+
+    eps = 1e-6
+    J = np.column_stack([(residual(eps*e)-residual(-eps*e))/(2*eps) for e in np.eye(2*nv)])
+    r = residual(np.zeros(2*nv))
+    np.testing.assert_allclose(g_mjx, J.T @ (W*r), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(H_mjx, J.T @ (W[:, None]*J), rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")

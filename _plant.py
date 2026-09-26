@@ -446,26 +446,25 @@ class _PlantMixin:
     def momentum_cost(self, q, qd, h_des, W):
         """Centroidal-momentum tracking cost over the 6 momentum components.
 
-        Mirrors the CUDA `grid_plant::momentum_cost` verbatim (built on the CMM
-        `A` and momentum `h = A qd`, the two sub-outputs of `grid::ccrba_device`
-        via `self.ccrba`):
+        Uses the CMM and its configuration derivative in the Pinocchio
+        tangent convention (local base velocity, world-aligned centroidal
+        momentum ordered [linear; angular]):
           r       = h(q,qd) - h_des                        (6-vector)
           value   = 1/2 sum_r W[r] r[r]^2
-          grad_x  = [0 ; A^T (W .* r)]   (q-block dropped, GN on A; qd-block only)
-          GN hess = A^T diag(W) A in the bottom-right NUM_VEL x NUM_VEL qd-block
-                    of the NX x NX x-hessian (everything else zero).
+          J       = [ (dA/dq) qd | A ]                    (6, 2*nv)
+          grad_x  = J.T @ (W * r)                         (2*nv,)
+          GN hess = J.T @ diag(W) @ J                     (2*nv, 2*nv)
 
-        h depends on qd linearly (J_h = A), so the qd-block gradient/hessian are
-        exact; the q-dependence of A is dropped Gauss-Newton style, matching the
-        ratified `ee_pos_cost`/`com_cost` choice the CUDA emit documents.
-
-        Returns (value, grad_x (nx,), hess_x (nx, nx)).
+        The gradient is exact; only the Hessian uses Gauss-Newton. Both q and
+        qd blocks are present, including the cross blocks. Perturb q with
+        self.integrate while holding the supplied local qd coordinates fixed.
+        Outputs are tangent-state sized, NOT ambient nq+nv arrays with pads.
+        The GN Hessian is positive semidefinite when W is nonnegative; it is
+        not the exact cost Hessian at a general nonzero residual.
         """
-        nq = self.robot.get_num_pos()
-        nv = self.robot.get_num_vel()
-        nx = nq + nv
         W = np.asarray(W, dtype=np.float64).reshape(-1)
         h_des = np.asarray(h_des, dtype=np.float64).reshape(-1)
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
 
         A, h = self.ccrba(q, qd)  # A (6, nv), h (6,)
         A = np.asarray(A, dtype=np.float64)
@@ -474,11 +473,12 @@ class _PlantMixin:
         r = h - h_des
         value = 0.5 * float(np.sum(W * r * r))
 
-        grad_x = np.zeros(nx, dtype=np.float64)
-        grad_x[nq:] = A.T @ (W * r)  # (nv,) in the qd-block
-
-        hess_x = np.zeros((nx, nx), dtype=np.float64)
-        hess_x[nq:, nq:] = A.T @ (W[:, None] * A)  # A^T diag(W) A
+        # dA[row, velocity_column, tangent_direction]; contract velocity_column.
+        dA = np.asarray(self.dccrba(q), dtype=np.float64)
+        Jq = np.einsum("rki,k->ri", dA, qd)
+        J = np.hstack((Jq, A))
+        grad_x = J.T @ (W * r)
+        hess_x = J.T @ (W[:, None] * J)
         return value, grad_x, hess_x
 
     # ----- log barriers (joint position / velocity / torque) -----

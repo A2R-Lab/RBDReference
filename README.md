@@ -67,6 +67,11 @@ Spherical multi-stage gradients and multi-stage step Hessians are unsupported.
 Parent GRiD generators/bindings require a separate
 coordinated update; reference availability alone does not imply GPU support.
 
+`momentum_cost` returns an exact full tangent-state gradient of shape `(2*nv,)`
+and a Gauss–Newton Hessian of shape `(2*nv, 2*nv)`, including configuration and
+cross blocks. These are not ambient `(nq+nv)` arrays. The GN Hessian uses the
+full momentum residual Jacobian, not a frozen-configuration approximation.
+
 ### Kinematics
 
 

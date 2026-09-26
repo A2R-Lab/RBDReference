@@ -167,8 +167,9 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
                          algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
             # Centroidal-momentum-tracking cost. h = A qd is LINEAR in qd, so the
-            # qd-block gradient/hessian are exact; FD over qd is the oracle. The
-            # q-block is dropped (Gauss-Newton on A), so grad's q-block is zero.
+            # qd-block gradient/hessian are exact; FD over qd is the oracle.
+            # The full tangent q and cross blocks are tested independently in
+            # test_momentum_cost_contract.py, including nonzero residuals.
             A_cmm, h_cmm = ref.ccrba(q, qd)
             A_cmm = np.asarray(A_cmm, dtype=np.float64)
             h_des_mom = np.asarray(h_cmm, dtype=np.float64).reshape(-1) + rng.uniform(-0.5, 0.5, 6)
@@ -184,12 +185,12 @@ def _run_plant_checks(spec, project_model, base_mode="fixed"):
             for i in range(nv):
                 dv = np.zeros(nv); dv[i] = _FD
                 gfd_mom[i] = (mom_cost_qd(qd + dv) - mom_cost_qd(qd - dv)) / (2 * _FD)
-            assert_close(grad_mom[nq:], gfd_mom, algorithm="pose_gradient", robot_id=spec.robot_id)
-            assert np.allclose(grad_mom[:nq], 0.0)          # q-block dropped (GN)
+            assert grad_mom.shape == (2*nv,)
+            assert hess_mom.shape == (2*nv, 2*nv)
+            assert_close(grad_mom[nv:], gfd_mom, algorithm="pose_gradient", robot_id=spec.robot_id)
             assert np.allclose(hess_mom, hess_mom.T)
-            assert np.allclose(hess_mom[:nq, :], 0.0) and np.allclose(hess_mom[:, :nq], 0.0)
             # GN-hessian recompute: A^T diag(Wm) A in the qd-block
-            assert_close(hess_mom[nq:, nq:], A_cmm.T @ (Wm[:, None] * A_cmm),
+            assert_close(hess_mom[nv:, nv:], A_cmm.T @ (Wm[:, None] * A_cmm),
                          algorithm="inverse_dynamics", robot_id=spec.robot_id)
 
         # barriers: value/grad/hess vs hand-rolled, on each of the three slices
