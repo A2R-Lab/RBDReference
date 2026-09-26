@@ -8,7 +8,7 @@ from RBDReference import RBDReference
 from URDFParser import URDFParser
 
 
-@pytest.fixture(scope="module", params=[("iiwa14", False), ("go2", True)])
+@pytest.fixture(scope="module", params=[("iiwa14", False), ("go2", True), ("fr3", False)])
 def model(request):
     name, floating = request.param
     robot = URDFParser().parse(str(Path(__file__).parents[1] / "robot_assets" / f"{name}.urdf"),

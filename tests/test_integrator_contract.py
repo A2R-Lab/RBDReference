@@ -91,7 +91,7 @@ def test_scalar_step_gradient_with_nonzero_force(scheme):
     np.testing.assert_allclose(jac, numeric, rtol=1e-8, atol=1e-9)
 
 
-@pytest.fixture(scope="module", params=[("iiwa14", False), ("go2", True)])
+@pytest.fixture(scope="module", params=[("iiwa14", False), ("go2", True), ("fr3", False)])
 def robot_reference(request):
     name, floating = request.param
     robot = URDFParser().parse(str(Path(__file__).parents[1] / "robot_assets" / f"{name}.urdf"),
