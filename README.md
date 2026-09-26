@@ -53,11 +53,18 @@ not plain vector ops; for fixed-base they collapse to the familiar `+`/`−`):
 | Second-order retract derivative | `H = rbd.d2Integrate(q, v_dt, arg1, arg2)` (nv×nv×nv tangent derivative of `dIntegrate`) |
 | Boxminus (q_to ⊖ q_from) | `v = rbd.difference(q_from, q_to)` (matches `pin.difference`) |
 | Tangent Jacobians of difference | `J = rbd.dDifference(q_from, q_to, with_respect_to)` (`'from'`/`'to'`) |
-| One integration step | `x_kp1 = rbd.integrator(q, qd, u, dt, integrator_type="euler")` (`euler`/`semi_implicit_euler`/`trapezoidal`/`midpoint`/`rk3`/`rk4`) |
+| One integration step | `x_kp1 = rbd.integrator(q, qd, u, dt, integrator_type="euler")` (`euler`/`semi_implicit_euler`/`constant_acceleration`) |
 | Integrator Jacobian | `AB = rbd.integrator_gradient(q, qd, u, dt, ...)` — `[A | B]` of shape (2·nv, 3·nv), tangent-space `[d/dq | d/dqd | d/du]` |
 | Tangent-space quadratic state cost | `rbd.quadratic_state_cost_tangent(x, x_des, Q)` — log-map error `[difference(q_des,q); qd−qd_des]`, diagonal `Q` of size 2·nv |
 
 ### Kinematics
+
+The single-evaluation update previously named `trapezoidal` is now
+`constant_acceleration`; `si_euler` and `rk3` are removed without aliases.
+Full-state midpoint, Heun (`trapezoidal`), and RK4 are not yet available at
+this reference checkpoint. Parent GRiD generators/bindings require a separate
+coordinated update; reference availability alone does not imply GPU support.
+
 
 | Algorithm | Signature |
 |---|---|

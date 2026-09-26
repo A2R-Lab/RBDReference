@@ -735,14 +735,10 @@ class RBDReference(
         """
         if integrator_type == "euler":
             return [], [1.0]
-        if integrator_type in ("semi_implicit_euler", "si_euler"):
+        if integrator_type in ("semi_implicit_euler", "constant_acceleration"):
             return [], [1.0]
-        if integrator_type == "midpoint":
-            return [0.5], [0.0, 1.0]
-        if integrator_type == "rk3":
-            return [0.5, 0.75], [2.0 / 9.0, 3.0 / 9.0, 4.0 / 9.0]
-        if integrator_type == "rk4":
-            return [0.5, 0.5, 1.0], [1.0 / 6.0, 2.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0]
+        if integrator_type in ("midpoint", "trapezoidal", "rk4"):
+            raise NotImplementedError("Full-state multi-stage integrators are not yet available")
         raise ValueError(f"Unknown integrator_type: {integrator_type}")
 
     def integrator(self, q, qd, u, dt, integrator_type: str = "euler", f_ext=None):
@@ -750,7 +746,7 @@ class RBDReference(
 
         Returns x_kp1 of shape (nq + nv,) — concatenated [q_new, v_new] in the
         user-facing q/v convention. Supports 'euler', 'semi_implicit_euler',
-        'trapezoidal', 'midpoint', 'rk3', 'rk4'. For floating-base robots the
+        'constant_acceleration'. For floating-base robots the
         q-update uses `self.integrate` (Lie-group retract); for fixed-base this
         collapses to `q + dt*v`.
 
@@ -759,6 +755,7 @@ class RBDReference(
         is taken at the f_ext-perturbed operating point (matches GRiD threading
         d_f_ext through the integrator's FD inner). None => no external forces.
         """
+        self._integrator_butcher(integrator_type)  # Reject removed names before evaluating dynamics.
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
         u = np.asarray(u, dtype=np.float64)
@@ -767,12 +764,12 @@ class RBDReference(
             q_new = self.integrate(q, dt * qd)
             v_new = qd + dt * qdd1
             return np.concatenate([q_new, v_new])
-        if integrator_type in ("semi_implicit_euler", "si_euler"):
+        if integrator_type == "semi_implicit_euler":
             v_new = qd + dt * qdd1
             q_new = self.integrate(q, dt * v_new)
             return np.concatenate([q_new, v_new])
-        if integrator_type == "trapezoidal":
-            # GATO/GRiD trapezoidal (single-stage): v reads qdd Euler-style; q
+        if integrator_type == "constant_acceleration":
+            # Single-stage constant acceleration: v reads qdd Euler-style; q
             # retracts the combined tangent dt*qd + 0.5*dt^2*qdd in ONE step. For
             # fixed-base this is q + dt*qd + 0.5*dt^2*qdd; for floating-base
             # self.integrate applies the SE(3) Lie retract of the combined tangent.
@@ -808,6 +805,7 @@ class RBDReference(
         f_ext-perturbed operating point (matches GRiD threading d_f_ext into the
         integrator gradient's vaf/ID linearization). None => no external forces.
         """
+        self._integrator_butcher(integrator_type)
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
         u = np.asarray(u, dtype=np.float64)
@@ -836,7 +834,7 @@ class RBDReference(
             top = np.hstack([dInt_q, dt * dInt_v, Z_n])
             bottom = np.hstack([dt * J_qq, I_n + dt * J_qv, dt * Minv])
             return np.vstack([top, bottom])
-        if integrator_type in ("semi_implicit_euler", "si_euler"):
+        if integrator_type == "semi_implicit_euler":
             J_qq, J_qv, Minv = fd_grad_at(q, qd)
             # v_new = qd + dt*qdd(q, qd, u);  q_new = integrate(q, dt*v_new)
             # ∂v_new/∂q  = dt*J_qq
@@ -857,7 +855,7 @@ class RBDReference(
                               dt_dInt_v @ dvdu])
             bottom = np.hstack([dvdq, dvdv, dvdu])
             return np.vstack([top, bottom])
-        if integrator_type == "trapezoidal":
+        if integrator_type == "constant_acceleration":
             # v_new = qd + dt*qdd(q,qd,u);  q_new = integrate(q, dt*qd + dt2h*qdd),
             # dt2h = 0.5*dt*dt. Bottom (v) rows match Euler/SI (dt*); the top (q)
             # rows weight the FD gradient by dt2h (the +0.5*dt^2*qdd accel term).

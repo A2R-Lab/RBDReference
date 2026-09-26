@@ -220,16 +220,16 @@ class _PlantMixin:
         result (position rows ``0`` for Euler, ``dt^2 * D2qdd`` for SI-Euler).
         See `docs/open-tasks/f1_plant_step_hessian_plan.md`.
         """
-        if integrator_type not in ("euler", "semi_implicit_euler", "si_euler"):
+        self._integrator_butcher(integrator_type)
+        if integrator_type not in ("euler", "semi_implicit_euler"):
             raise NotImplementedError(
                 f"plant_step_hessian: integrator '{integrator_type}' not yet "
-                "supported (multi-stage RK 2nd-order chain rule is deferred; "
-                "see f1_plant_step_hessian_plan.md)."
+                "supported; only euler and semi_implicit_euler have step Hessians."
             )
         nv = self.robot.get_num_vel()
         nz = 3 * nv
         qsl, vsl = slice(0, nv), slice(nv, 2 * nv)
-        si = integrator_type in ("semi_implicit_euler", "si_euler")
+        si = integrator_type == "semi_implicit_euler"
 
         D2 = self._d2qdd_tangent(q, qd, u)  # (nv, 3nv, 3nv), axes [out, b, a]
         # Reorder to (out, a=perturb, b=column). Symmetric for a fixed base;
