@@ -4,6 +4,7 @@
 t.txt
 t2.txt
 t3.txt
+equivalents/pin_so_ext/.build.lock
 
 # Prerequisites
 *.d

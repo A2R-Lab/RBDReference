@@ -11,6 +11,7 @@ pkg-config path), so the build prepends that directory to `PKG_CONFIG_PATH`
 automatically; you no longer need `developer_install.sh` to have exported it.
 """
 import importlib
+import fcntl
 import os
 import subprocess
 import sys
@@ -68,23 +69,33 @@ def _build_env():
 
 
 def _build():
-    cmd = [sys.executable, "setup.py", "build_ext", "--inplace"]
+    # Called only after the outer freshness check. Distutils does not reliably
+    # consider setup.py changes when deciding whether to relink: without force
+    # it can copy an old artifact back forever, leaving _is_stale() true.
+    cmd = [sys.executable, "setup.py", "build_ext", "--inplace", "--force"]
     subprocess.check_call(cmd, cwd=_DIR, env=_build_env())
 
 
 def load():
     """Return the compiled `pin_so_ext` module, building it on first use (or when
     the C++ source has changed since the last build)."""
-    so = _find_compiled()
-    if _is_stale(so):
-        _build()
+    # Multiple benchmark workers share this build directory. Serialize the
+    # check/build/import so no worker imports an in-place partially copied .so.
+    with (_DIR / ".build.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
         so = _find_compiled()
-        if so is None:
-            raise RuntimeError(
-                "Failed to build pin_so_ext. Ensure pybind11 is installed and "
-                "Pinocchio development headers are available (pkg-config pinocchio); "
-                "pinocchio.pc ships in the venv's cmeel.prefix/lib/pkgconfig."
-            )
-    if str(_DIR) not in sys.path:
-        sys.path.insert(0, str(_DIR))
-    return importlib.import_module("pin_so_ext")
+        if _is_stale(so):
+            _build()
+            so = _find_compiled()
+            if so is None or _is_stale(so):
+                raise RuntimeError(
+                    "Failed to build a current pin_so_ext. Ensure pybind11 is installed and "
+                    "Pinocchio development headers are available (pkg-config pinocchio); "
+                    "pinocchio.pc ships in the venv's cmeel.prefix/lib/pkgconfig."
+                )
+        if str(_DIR) not in sys.path:
+            sys.path.insert(0, str(_DIR))
+        # The wheel initializes shared-library loading (cmeel.prefix). Do not
+        # require callers to have imported Pinocchio before using this loader.
+        importlib.import_module("pinocchio")
+        return importlib.import_module("pin_so_ext")
