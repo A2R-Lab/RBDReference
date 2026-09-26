@@ -95,4 +95,4 @@ def test_plant_hessian_defers_rk():
     _spec2, ref_fl, samples_fl = _build("go2", "floating")
     sf = samples_fl[0]
     with pytest.raises(NotImplementedError):
-        ref_fl.plant_step_hessian(sf.q, sf.qd, sf.qdd, 0.01, integrator_type="rk3")
+        ref_fl.plant_step_hessian(sf.q, sf.qd, sf.qdd, 0.01, integrator_type="trapezoidal")

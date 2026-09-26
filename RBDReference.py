@@ -727,18 +727,21 @@ class RBDReference(
     def _integrator_butcher(integrator_type: str):
         """Return (c_list, b_list) for the given integrator.
 
-        c_list[i] is the stage-i offset applied to xdot (i.e. the
-        intermediate point for FD evaluation at stage i+1 uses
-        p_{i+1}.v = v_orig + c_i * dt * qdd_i).
-        b_list[i] is the combination weight for qdd_i in the final v update.
+        Each noninitial stage retracts from the original q using the preceding
+        stage velocity, and updates the original v using the preceding stage
+        acceleration. b weights BOTH stage velocities and accelerations.
         Lengths: len(c_list) = N-1, len(b_list) = N (N = stage count).
         """
         if integrator_type == "euler":
             return [], [1.0]
         if integrator_type in ("semi_implicit_euler", "constant_acceleration"):
             return [], [1.0]
-        if integrator_type in ("midpoint", "trapezoidal", "rk4"):
-            raise NotImplementedError("Full-state multi-stage integrators are not yet available")
+        if integrator_type == "midpoint":
+            return [0.5], [0.0, 1.0]
+        if integrator_type == "trapezoidal":  # explicit trapezoidal / Heun
+            return [1.0], [0.5, 0.5]
+        if integrator_type == "rk4":
+            return [0.5, 0.5, 1.0], [1.0 / 6.0, 2.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0]
         raise ValueError(f"Unknown integrator_type: {integrator_type}")
 
     def integrator(self, q, qd, u, dt, integrator_type: str = "euler", f_ext=None):
@@ -746,16 +749,23 @@ class RBDReference(
 
         Returns x_kp1 of shape (nq + nv,) — concatenated [q_new, v_new] in the
         user-facing q/v convention. Supports 'euler', 'semi_implicit_euler',
-        'constant_acceleration'. For floating-base robots the
+        'constant_acceleration', 'trapezoidal' (explicit Heun), 'midpoint',
+        and 'rk4'. For floating-base robots the
         q-update uses `self.integrate` (Lie-group retract); for fixed-base this
         collapses to `q + dt*v`.
+
+        Full-state stages use the preceding stage velocity and acceleration.
+        Midpoint/Heun have order two and RK4 order four on Euclidean fixed-base
+        configurations. On rotational manifolds these base-point retractions
+        generally give only order two, including the scheme named rk4; no
+        Munthe-Kaas corrections are applied. u and f_ext are constant per step.
 
         `f_ext` (optional, body-major local-frame [angular; linear], one 6-vector
         per body) is threaded into every forward-dynamics evaluation so the step
         is taken at the f_ext-perturbed operating point (matches GRiD threading
         d_f_ext through the integrator's FD inner). None => no external forces.
         """
-        self._integrator_butcher(integrator_type)  # Reject removed names before evaluating dynamics.
+        c_list, b_list = self._integrator_butcher(integrator_type)
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
         u = np.asarray(u, dtype=np.float64)
@@ -776,21 +786,22 @@ class RBDReference(
             v_new = qd + dt * qdd1
             q_new = self.integrate(q, dt * qd + 0.5 * dt * dt * qdd1)
             return np.concatenate([q_new, v_new])
-        # Multi-stage RK family — TrajoptPlant convention: each stage uses the
-        # ORIGINAL v for its xdot.v term (only qdd is refined across stages).
-        c_list, b_list = self._integrator_butcher(integrator_type)
+        # Full-state stages, each retracted from the original configuration.
         N = len(b_list)
         qdd_list = [qdd1]
+        qd_list = [qd]
         prev_qdd = qdd1
         for stage_idx in range(1, N):
             c_prev = c_list[stage_idx - 1]
-            p_q  = self.integrate(q, c_prev * dt * qd)
+            p_q  = self.integrate(q, c_prev * dt * qd_list[-1])
             p_qd = qd + c_prev * dt * prev_qdd
             stage_qdd = np.asarray(self.forward_dynamics(p_q, p_qd, u, f_ext=f_ext)).reshape(-1)
             qdd_list.append(stage_qdd)
+            qd_list.append(p_qd)
             prev_qdd = stage_qdd
         accel = sum(b * qdd for b, qdd in zip(b_list, qdd_list))
-        q_new = self.integrate(q, dt * qd)   # q update is Euler-style for every RK variant
+        velocity = sum(b * v for b, v in zip(b_list, qd_list))
+        q_new = self.integrate(q, dt * velocity)
         v_new = qd + dt * accel
         return np.concatenate([q_new, v_new])
 
@@ -805,7 +816,9 @@ class RBDReference(
         f_ext-perturbed operating point (matches GRiD threading d_f_ext into the
         integrator gradient's vaf/ID linearization). None => no external forces.
         """
-        self._integrator_butcher(integrator_type)
+        c_list, b_list = self._integrator_butcher(integrator_type)
+        if c_list and self.robot.robot_has_spherical():
+            raise NotImplementedError("Spherical-joint multi-stage integrator gradients are unsupported")
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
         u = np.asarray(u, dtype=np.float64)
@@ -876,41 +889,45 @@ class RBDReference(
                              dInt_v @ dwdu])
             bottom = np.hstack([dt * J_qq, I_n + dt * J_qv, dt * Minv])
             return np.vstack([top, bottom])
-        # ----- Multi-stage chain rule (Midpoint / RK3 / RK4) -----
-        c_list, b_list = self._integrator_butcher(integrator_type)
+        # Full-state chain rule for Heun / midpoint / RK4.
         N = len(b_list)
         qdd_list = []
         D_qdd_list = []
+        qd_list = [qd]
+        E_q = np.hstack([I_n, Z_n, Z_n])
+        E_v = np.hstack([Z_n, I_n, Z_n])
+        D_qd_list = [E_v]
         # Stage 1: FD at the original (q, qd).
         qdd_list.append(np.asarray(self.forward_dynamics(q, qd, u, f_ext=f_ext)).reshape(-1))
         J_qq, J_qv, Minv = fd_grad_at(q, qd)
         D_qdd_list.append(np.hstack([J_qq, J_qv, Minv]))  # (nv, 3*nv)
-        # Subsequent stages: chain rule through self.integrate at the
-        # intermediate point (q_orig perturbed by c_{i-1}*dt*v_orig).
+        # Both the velocity used in the retract and the stage acceleration
+        # depend on earlier stages; retain both chains.
         for stage_idx in range(1, N):
             c_prev = c_list[stage_idx - 1]
             prev_qdd = qdd_list[-1]
-            p_q = self.integrate(q, c_prev * dt * qd)
+            v_dt_stage = c_prev * dt * qd_list[-1]
+            p_q = self.integrate(q, v_dt_stage)
             p_qd = qd + c_prev * dt * prev_qdd
             stage_qdd = np.asarray(self.forward_dynamics(p_q, p_qd, u, f_ext=f_ext)).reshape(-1)
             qdd_list.append(stage_qdd)
             J_qq_i, J_qv_i, Minv_i = fd_grad_at(p_q, p_qd)
-            # ∂p_i.q / ∂(q, v, u) — block structure (each (nv, nv)):
-            #   [dInt_q(q, c_prev*dt*v) | c_prev*dt*dInt_v(q, c_prev*dt*v) | 0]
-            v_dt_stage = c_prev * dt * qd
             dInt_q_stage, dInt_v_stage = q_top_blocks(v_dt_stage)
-            dp_q_block = np.hstack([dInt_q_stage, c_prev * dt * dInt_v_stage, Z_n])
+            dp_q_block = dInt_q_stage @ E_q + c_prev * dt * dInt_v_stage @ D_qd_list[-1]
             # ∂p_i.qd / ∂(q, v, u) = [0, I, 0] + c_prev*dt * D_qdd_{i-1}
-            dp_qd_block = np.hstack([Z_n, I_n, Z_n]) + c_prev * dt * D_qdd_list[-1]
+            dp_qd_block = E_v + c_prev * dt * D_qdd_list[-1]
             # Compose: D_qdd_i = J_qq_i @ dp_q_block + J_qv_i @ dp_qd_block + Minv_i @ [0|0|I]
             d_u_block = np.hstack([Z_n, Z_n, Minv_i])
             D_qdd_list.append(J_qq_i @ dp_q_block + J_qv_i @ dp_qd_block + d_u_block)
+            qd_list.append(p_qd)
+            D_qd_list.append(dp_qd_block)
 
         sum_b_D = sum(b * D for b, D in zip(b_list, D_qdd_list))
-        # Final assembly. q_new = integrate(q, dt*qd) — same as Euler.
-        dInt_q_final, dInt_v_final = q_top_blocks(dt * qd)
-        top = np.hstack([dInt_q_final, dt * dInt_v_final, Z_n])
-        bottom = np.hstack([Z_n, I_n, Z_n]) + dt * sum_b_D
+        velocity = sum(b * v for b, v in zip(b_list, qd_list))
+        D_velocity = sum(b * D for b, D in zip(b_list, D_qd_list))
+        dInt_q_final, dInt_v_final = q_top_blocks(dt * velocity)
+        top = dInt_q_final @ E_q + dt * dInt_v_final @ D_velocity
+        bottom = E_v + dt * sum_b_D
         return np.vstack([top, bottom])
 
     @staticmethod

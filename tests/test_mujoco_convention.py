@@ -626,7 +626,7 @@ def _fd_mjx_dAB(ad, q_mjx, v_mjx, u_mjx, dt, it, L, h=1e-6):
 
 
 @pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
-@pytest.mark.parametrize("it", ["euler", "si_euler"])
+@pytest.mark.parametrize("it", ["euler", "semi_implicit_euler"])
 def test_integrator_gradient_matches_fd_of_value(it):
     """The transformed mjx integrator gradient dAB = [A|B] matches FD of the mjx
     integrator VALUE along the mjx retract (q/qd/u perturbations, output q-tangent
@@ -649,7 +649,7 @@ def test_integrator_gradient_fixed_base_is_noop():
     rng = np.random.default_rng(2)
     q, qd, _, u = _rand_state(rng, ad.nq, nv); dt = 0.01
     Minv = ad.minv(q); qdd = np.asarray(ad.forward_dynamics(q, qd, u))
-    for it in ("euler", "si_euler"):
+    for it in ("euler", "semi_implicit_euler"):
         dAB = np.asarray(ad.reference.integrator_gradient(q, qd, u, dt, it), float)
         out = mc.integrator_gradient_pin_to_mjx(dAB, Minv, qdd, qd, u, np.eye(3), dt, it, L)
         assert np.array_equal(out, dAB)
@@ -694,7 +694,7 @@ def _fd_mjx_d2AB(ad, q_mjx, v_mjx, u_mjx, dt, it, L, h=1e-6):
 
 
 @pytest.mark.skipif(not _HAVE_DEPS, reason="needs robot_descriptions")
-@pytest.mark.parametrize("it", ["euler", "si_euler"])
+@pytest.mark.parametrize("it", ["euler", "semi_implicit_euler"])
 def test_integrator_hessian_matches_fd(it):
     """The transformed mjx integrator Hessian d2AB matches FD of the validated mjx
     integrator GRADIENT along the mjx retract (q/qd/u perturbations), both
@@ -718,7 +718,7 @@ def test_integrator_hessian_fixed_base_is_noop():
     rng = np.random.default_rng(2)
     q, qd, _, u = _rand_state(rng, ad.nq, nv); dt = 0.01
     qdd = np.asarray(ad.forward_dynamics(q, qd, u))
-    for it in ("euler", "si_euler"):
+    for it in ("euler", "semi_implicit_euler"):
         d2AB = np.asarray(ad.reference.plant_step_hessian(q, qd, u, dt, it), float)
         dAB = np.asarray(ad.reference.integrator_gradient(q, qd, u, dt, it), float)
         out = mc.integrator_hessian_pin_to_mjx(d2AB, dAB, qdd, qd, u, np.eye(3), dt, it, L)

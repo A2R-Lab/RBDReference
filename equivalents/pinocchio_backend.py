@@ -1291,12 +1291,12 @@ class PinocchioModelAdapter:
     def _butcher(integrator_type: str):
         if integrator_type == "euler":
             return [], [1.0]
-        if integrator_type in ("semi_implicit_euler", "si_euler"):
+        if integrator_type in ("semi_implicit_euler", "constant_acceleration"):
             return [], [1.0]
         if integrator_type == "midpoint":
             return [0.5], [0.0, 1.0]
-        if integrator_type == "rk3":
-            return [0.5, 0.75], [2.0 / 9.0, 3.0 / 9.0, 4.0 / 9.0]
+        if integrator_type == "trapezoidal":
+            return [1.0], [0.5, 0.5]
         if integrator_type == "rk4":
             return [0.5, 0.5, 1.0], [1.0 / 6.0, 2.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0]
         raise ValueError(f"Unknown integrator_type: {integrator_type}")
@@ -1305,6 +1305,7 @@ class PinocchioModelAdapter:
         """Pinocchio-backed integrator step. Uses `pin.integrate` for the
         Lie-group q update and `pin.aba` per stage for the qdd refinement.
         Output shape: nq + nv concatenated as [q_new, v_new]."""
+        c_list, b_list = self._butcher(integrator_type)
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
         u = np.asarray(u, dtype=np.float64)
@@ -1313,29 +1314,31 @@ class PinocchioModelAdapter:
             q_new = self._pin_integrate(q, dt * qd)
             v_new = qd + dt * qdd1
             return np.concatenate([q_new, v_new])
-        if integrator_type in ("semi_implicit_euler", "si_euler"):
+        if integrator_type == "semi_implicit_euler":
             v_new = qd + dt * qdd1
             q_new = self._pin_integrate(q, dt * v_new)
             return np.concatenate([q_new, v_new])
-        if integrator_type == "trapezoidal":
+        if integrator_type == "constant_acceleration":
             # Single-stage: v reads qdd Euler-style; q retracts the combined tangent
             # dt*qd + 0.5*dt^2*qdd in ONE pin.integrate (SE(3) Lie retract for floating).
             v_new = qd + dt * qdd1
             q_new = self._pin_integrate(q, dt * qd + 0.5 * dt * dt * qdd1)
             return np.concatenate([q_new, v_new])
-        c_list, b_list = self._butcher(integrator_type)
         N = len(b_list)
         qdd_list = [qdd1]
+        qd_list = [qd]
         prev_qdd = qdd1
         for stage_idx in range(1, N):
             c_prev = c_list[stage_idx - 1]
-            p_q = self._pin_integrate(q, c_prev * dt * qd)
+            p_q = self._pin_integrate(q, c_prev * dt * qd_list[-1])
             p_qd = qd + c_prev * dt * prev_qdd
             stage_qdd = self.aba(p_q, p_qd, u)
             qdd_list.append(stage_qdd)
+            qd_list.append(p_qd)
             prev_qdd = stage_qdd
         accel = sum(b * qdd for b, qdd in zip(b_list, qdd_list))
-        q_new = self._pin_integrate(q, dt * qd)
+        velocity = sum(b * v for b, v in zip(b_list, qd_list))
+        q_new = self._pin_integrate(q, dt * velocity)
         v_new = qd + dt * accel
         return np.concatenate([q_new, v_new])
 
@@ -1346,6 +1349,7 @@ class PinocchioModelAdapter:
         for the qdd partials. The chain rule across multi-stage variants
         mirrors the form in `RBDReference.integrator_gradient`.
         """
+        c_list, b_list = self._butcher(integrator_type)
         q = np.asarray(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64)
         u = np.asarray(u, dtype=np.float64)
@@ -1367,7 +1371,7 @@ class PinocchioModelAdapter:
             top = np.hstack([dInt_q, dt * dInt_v, Z_n])
             bottom = np.hstack([dt * J_qq, I_n + dt * J_qv, dt * Minv])
             return np.vstack([top, bottom])
-        if integrator_type in ("semi_implicit_euler", "si_euler"):
+        if integrator_type == "semi_implicit_euler":
             J_qq, J_qv, Minv = fd_grad_at(q, qd)
             v_new = qd + dt * self.aba(q, qd, u)
             dInt_q, dInt_v = q_top_blocks(dt * v_new)
@@ -1380,7 +1384,7 @@ class PinocchioModelAdapter:
                               dt_dInt_v @ dvdu])
             bottom = np.hstack([dvdq, dvdv, dvdu])
             return np.vstack([top, bottom])
-        if integrator_type == "trapezoidal":
+        if integrator_type == "constant_acceleration":
             # v_new = qd + dt*qdd;  q_new = integrate(q, w), w = dt*qd + dt2h*qdd
             # (dt2h = 0.5*dt^2). Bottom (v) rows match Euler/SI; top (q) rows weight the
             # FD gradient by dt2h. dInt blocks are taken at w (SE(3) for floating). This
@@ -1398,30 +1402,37 @@ class PinocchioModelAdapter:
                              dInt_v @ dwdu])
             bottom = np.hstack([dt * J_qq, I_n + dt * J_qv, dt * Minv])
             return np.vstack([top, bottom])
-        c_list, b_list = self._butcher(integrator_type)
         N = len(b_list)
         qdd_list = []
         D_qdd_list = []
+        qd_list = [qd]
+        E_q = np.hstack([I_n, Z_n, Z_n])
+        E_v = np.hstack([Z_n, I_n, Z_n])
+        D_qd_list = [E_v]
         qdd_list.append(self.aba(q, qd, u))
         J_qq, J_qv, Minv = fd_grad_at(q, qd)
         D_qdd_list.append(np.hstack([J_qq, J_qv, Minv]))
         for stage_idx in range(1, N):
             c_prev = c_list[stage_idx - 1]
             prev_qdd = qdd_list[-1]
-            p_q = self._pin_integrate(q, c_prev * dt * qd)
+            v_dt_stage = c_prev * dt * qd_list[-1]
+            p_q = self._pin_integrate(q, v_dt_stage)
             p_qd = qd + c_prev * dt * prev_qdd
             qdd_list.append(self.aba(p_q, p_qd, u))
             J_qq_i, J_qv_i, Minv_i = fd_grad_at(p_q, p_qd)
-            v_dt_stage = c_prev * dt * qd
             dInt_q_stage, dInt_v_stage = q_top_blocks(v_dt_stage)
-            dp_q_block = np.hstack([dInt_q_stage, c_prev * dt * dInt_v_stage, Z_n])
-            dp_qd_block = np.hstack([Z_n, I_n, Z_n]) + c_prev * dt * D_qdd_list[-1]
+            dp_q_block = dInt_q_stage @ E_q + c_prev * dt * dInt_v_stage @ D_qd_list[-1]
+            dp_qd_block = E_v + c_prev * dt * D_qdd_list[-1]
             d_u_block = np.hstack([Z_n, Z_n, Minv_i])
             D_qdd_list.append(J_qq_i @ dp_q_block + J_qv_i @ dp_qd_block + d_u_block)
+            qd_list.append(p_qd)
+            D_qd_list.append(dp_qd_block)
         sum_b_D = sum(b * D for b, D in zip(b_list, D_qdd_list))
-        dInt_q_final, dInt_v_final = q_top_blocks(dt * qd)
-        top = np.hstack([dInt_q_final, dt * dInt_v_final, Z_n])
-        bottom = np.hstack([Z_n, I_n, Z_n]) + dt * sum_b_D
+        velocity = sum(b * v for b, v in zip(b_list, qd_list))
+        D_velocity = sum(b * D for b, D in zip(b_list, D_qd_list))
+        dInt_q_final, dInt_v_final = q_top_blocks(dt * velocity)
+        top = dInt_q_final @ E_q + dt * dInt_v_final @ D_velocity
+        bottom = E_v + dt * sum_b_D
         return np.vstack([top, bottom])
 
     def _resolve_frame_id(self, target_name: str) -> int:

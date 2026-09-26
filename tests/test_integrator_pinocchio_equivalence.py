@@ -25,7 +25,7 @@ from RBDReference.tests.state_sampling import build_dynamics_samples
 
 import numpy as np
 
-_INTEGRATORS = ("euler", "semi_implicit_euler", "midpoint", "rk3", "rk4", "trapezoidal")
+_INTEGRATORS = ("euler", "semi_implicit_euler", "constant_acceleration", "midpoint", "rk4", "trapezoidal")
 _DEFAULT_DT = 0.01
 
 
