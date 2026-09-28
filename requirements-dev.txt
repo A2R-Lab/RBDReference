@@ -25,7 +25,8 @@ beautifulsoup4>=4.9.3        # URDF joint-type parsing in the adapters
 pybind11                     # builds the pin_so_ext second-order RNEA binding
 setuptools                   # pin_so_ext's setup.py (not bundled in py3.12 venvs)
 pytest
+scipy                       # independent solve_ivp oracle in integrator convergence tests
 
 # Also required (sibling package, not on PyPI): URDFParser
-#   https://github.com/robot-acceleration/URDFParser
+#   https://github.com/A2R-Lab/URDFParser
 # In the parent GRiD repo it is available as a submodule on sys.path.

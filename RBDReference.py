@@ -26,8 +26,8 @@ class RBDReference(
 
         Parameters
         ----------
-        robotObj : URDFparser
-            An instance of the URDFparser class.
+        robotObj : URDFParser.Robot
+            The Robot returned by URDFParser().parse(...), not the parser itself.
         use_joint_dynamics : bool, optional
             When True, the RNEA/ABA value path applies the joint-local
             ``<dynamics damping>`` / ``<dynamics friction>`` bias
@@ -751,8 +751,8 @@ class RBDReference(
         user-facing q/v convention. Supports 'euler', 'semi_implicit_euler',
         'constant_acceleration', 'trapezoidal' (explicit Heun), 'midpoint',
         and 'rk4'. For floating-base robots the
-        q-update uses `self.integrate` (Lie-group retract); for fixed-base this
-        collapses to `q + dt*v`.
+        q-update uses `self.integrate` (Lie-group retract); for Euclidean
+        scalar-joint configurations this collapses to `q + dt*v`.
 
         Full-state stages use the preceding stage velocity and acceleration.
         Midpoint/Heun have order two and RK4 order four on Euclidean fixed-base

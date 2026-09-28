@@ -13,17 +13,18 @@ runs standalone on CPU only.
    absolute imports are `RBDReference.tests.*`):
 
    ```bash
-   git clone <RBDReference>            # -> ./RBDReference
-   git clone -b modernizing-tests https://github.com/A2R-Lab/URDFParser  # -> ./URDFParser
+   git clone https://github.com/A2R-Lab/RBDReference
+   git clone https://github.com/A2R-Lab/URDFParser
    ```
 
-   `URDFParser` must be on the `modernizing-tests` branch (the modernized
-   parser: floating-base convention, mimic/planar/spherical tiers).
+   Use the current A2R-Lab `main` branches. In a GRiD checkout these packages
+   live side by side under `external/`, at GRiD's pinned commits.
 
 2. Install the developer dependencies:
 
    ```bash
    pip install -r RBDReference/requirements-dev.txt
+   pip install -r URDFParser/requirements.txt
    ```
 
 3. Run pytest **from the common parent** (so the parent lands on `sys.path`
@@ -35,7 +36,7 @@ runs standalone on CPU only.
 
 ## Fast default vs. `--runslow`
 
-A plain run is fast by default (a few minutes): the heavy big-robot cells —
+A plain run selects the default regression set: the heavy big-robot cells —
 second-order tensors, per-DoF finite-difference plant / parameter-gradient /
 pose-Hessian oracles, the floating-base FD cross-checks — are tagged `@slow`
 and deselected automatically. Every algorithm keeps live small/medium-robot
@@ -84,7 +85,14 @@ prepended automatically) or, failing that, by probing the venv's
 ## CI
 
 `.github/workflows/ci.yml` runs exactly this shape on every push/PR: two
-sibling checkouts (`RBDReference` + `URDFParser@modernizing-tests`), the
+sibling checkouts (`RBDReference` + `URDFParser@main`), the
 requirements-dev install, and the fast set via `python -m pytest
 RBDReference/tests` from the parent (workflow-dispatch can opt into
 `--runslow`).
+
+SciPy is a test dependency for the independent quaternion-ODE convergence
+oracle. It is not needed by the runtime reference algorithms. Optional
+real-MuJoCo checks skip unless MuJoCo is installed; all other expected
+dependencies are declared in the developer requirements. Runtime depends on
+hardware, cache state, and model acquisition; a default CI run can take tens
+of minutes. The `--runslow` suite is a separate, more expensive gate.

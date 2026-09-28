@@ -1,9 +1,8 @@
-> **ARCHIVAL (2026-09-18).** Historical record — no live items remain. All of
-> the asks below shipped (typed parse errors, joint-limit helpers, `nq`/`nv`
-> metadata, explicit traversal policy), and the two `apply_external_forces`
-> bugs cited in the D.1 audit no longer exist — that function has since been
-> moved and rewritten. The sole surviving item (optional parser stdout) was
-> fixed in URDFParser on 2026-09-18.
+> **ARCHIVAL (2026-09-18).** Historical proposals, not a completion checklist
+> or current API contract. Some names and implementation details below are
+> obsolete. Consult the current package READMEs and tests; in particular, the
+> parser still prints joint ordering, so the optional-stdout proposal should
+> not be read as a shipped API.
 
 # Pinocchio Alignment Backlog
 

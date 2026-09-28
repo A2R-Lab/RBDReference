@@ -320,10 +320,6 @@ def build_project_adapter(
     )
     mismatches = [
         ConventionMismatch(
-            category="parse_behavior",
-            detail="URDFParser.parse() suppresses exceptions and returns None instead of surfacing structured errors.",
-        ),
-        ConventionMismatch(
             category="joint_order",
             detail="Joint order follows parser-defined DFS order with Pinocchio-style sibling sorting by child subtree name.",
         ),

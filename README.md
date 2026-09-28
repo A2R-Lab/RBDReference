@@ -1,10 +1,14 @@
 # RBDReference
 
-A Python reference implementation of rigid body dynamics algorithms.
+A NumPy reference implementation of robot dynamics, kinematics, analytical
+derivatives, and integration. Active development lives at
+[A2R-Lab/RBDReference](https://github.com/A2R-Lab/RBDReference); the
+[robot-acceleration repository](https://github.com/robot-acceleration/RBDReference)
+preserves the original implementation.
 
 This package is designed to enable rapid prototyping and testing of new
 algorithms and algorithmic optimizations. The CUDA / FPGA / accelerator
-implementations in the parent GRiD repo use it as a golden CPU oracle
+implementations can use it as a CPU reference
 during testing (in turn grounded against Pinocchio's C++ implementation via
 the in-package `equivalents/` layer; see "Equivalence testing" below).
 
@@ -14,13 +18,30 @@ submit a PR with the implementation.
 ## Usage and API
 
 This package relies on an already-parsed `robot` object from our
-[URDFParser](https://github.com/robot-acceleration/URDFParser) package.
+[URDFParser](https://github.com/A2R-Lab/URDFParser) package.
 
 ```python
+from pathlib import Path
+import numpy as np
+from URDFParser import URDFParser
 from RBDReference import RBDReference
+
+# Run from the common parent of the RBDReference and URDFParser checkouts.
+robot = URDFParser().parse(Path("RBDReference/robot_assets/iiwa14.urdf"))
 rbd = RBDReference(robot)
-outputs = rbd.ALGORITHM(inputs)
+q = np.zeros(robot.get_num_pos())  # fixed-base scalar joints in this example
+qd = np.zeros(robot.get_num_vel())
+tau, spatial_velocity, spatial_acceleration, spatial_force = rbd.inverse_dynamics(q, qd)
+M = rbd.crba(q)
+qdd = rbd.forward_dynamics(q, qd, tau)
 ```
+
+`q` has width **NQ**; velocities, accelerations, generalized forces, and
+configuration tangent perturbations have width **NV**. Do not size arrays by
+the number of joints or bodies. Use `integrate(q, delta)` to perturb a
+configuration and `difference(q_from, q_to)` for a tangent-space error.
+Quaternions must represent valid rotations; an all-zero floating/spherical
+quaternion is not a neutral configuration.
 
 ### Core dynamics
 
@@ -43,8 +64,8 @@ outputs = rbd.ALGORITHM(inputs)
 
 ### State space / integrators
 
-Lie-group state operations (floating-base `q` lives on SE(3)×ℝⁿ, so these are
-not plain vector ops; for fixed-base they collapse to the familiar `+`/`−`):
+Lie-group state operations handle floating and spherical joints. They collapse
+to the familiar `+`/`−` only for Euclidean scalar-joint configurations:
 
 | Algorithm | Signature |
 |---|---|
@@ -64,8 +85,9 @@ order two, and full-state RK4 has order four on Euclidean configurations.
 On floating/spherical rotational manifolds the base-point retractions generally
 give only order two, including RK4; this is not a Munthe-Kaas method.
 Spherical multi-stage gradients and multi-stage step Hessians are unsupported.
-Parent GRiD generators/bindings require a separate
-coordinated update; reference availability alone does not imply GPU support.
+Reference availability alone does not imply support on every GPU surface;
+consult [GRiD's support documentation](https://a2r-lab.github.io/GRiD/docs/user_guide/tutorials/cuda_support_status.html)
+for the generated kernels and bindings.
 
 `momentum_cost` returns an exact full tangent-state gradient of shape `(2*nv,)`
 and a Gauss–Newton Hessian of shape `(2*nv, 2*nv)`, including configuration and
@@ -92,7 +114,7 @@ full momentum residual Jacobian, not a frozen-configuration approximation.
 | Generalized gravity / nonlinear effects | `g = rbd.generalized_gravity(q, GRAVITY=-9.81)`, `c = rbd.nonlinear_effects(q, qd, GRAVITY=-9.81)` |
 | Kinetic / potential / mechanical energy | `rbd.kinetic_energy(q, qd)`, `rbd.potential_energy(q, GRAVITY=-9.81)`, `rbd.mechanical_energy(...)` |
 | Coriolis matrix `C(q,q̇)` | `C = rbd.coriolis_matrix(q, qd)` (with `C·q̇ + g = nonlinear_effects`) |
-| CoM + CoM Jacobian | `(p_com, J_com) = rbd.com(q)`, `rbd.jacobian_com(q)` |
+| CoM + CoM Jacobian | `p_com = rbd.com(q)` returns `(3,)`; `J_com = rbd.jacobian_com(q)` returns `(3, nv)` |
 | CCRBA / centroidal momentum | `(A, h) = rbd.ccrba(q, qd)`, `rbd.centroidal_momentum(q, qd)` |
 | dCCRBA (∂A/∂q tensor) | `dA = rbd.dccrba(q)` (analytic; the finite-difference variants `dccrba_fd` / `cmm_time_variation_fd` are retained as cross-checks) |
 | CMM time variation (Ȧ) | `Adot = rbd.cmm_time_variation(q, qd)` = `Σ_i (∂A/∂q_i)·q̇_i` |
@@ -117,15 +139,13 @@ in **reference frame**:
 
 | Variant | Reference frame | Best for |
 |---|---|---|
-| `idsva_so_body_frame` | Body-frame propagation, body-frame inertia, body-frame motion subspace. Multi-pass forward/backward sweeps. | **Fixed-base** robots — wins by a wide margin (e.g. iiwa14 fixed: 27 µs vs 827 µs on GPU). |
-| `idsva_so_world_frame` | World-frame propagation, world-frame motion subspace, gravity baked into the main sweep. Single-pass reference (closer to the textbook spatial-vector-algebra derivation). | **Floating-base** robots — wins by 2–4× (e.g. iiwa14_floating 1.7×, g1_floating 3.6×, GPU). |
+| `idsva_so_body_frame` | Body-frame propagation, inertia, and motion subspaces. | Default selected by `idsva_so` for fixed-base robots. |
+| `idsva_so_world_frame` | World-frame propagation, with gravity in the main sweep. | Default selected by `idsva_so` for floating-base robots. |
 
-GPU benchmarks above are from the **parent GRiD repo's** benchmark harness
-(under its `test/benchmarks/`; this repo is also consumed standalone) on
-sm_120 (RTX 5090). The crossover is purely a function of which kinematic
-chain depth dominates: body-frame's subtree-broadcast pays off when the
-chain is short and the tree is fixed; world-frame's single-pass cost is
-flat in chain depth which wins as DOF grows under floating base.
+These are CPU reference implementations, not GPU performance claims. The
+dispatch above is an implementation choice, not a universal speed ranking.
+For measured accelerator performance, use GRiD's separately versioned
+benchmark results and their stated hardware and timing boundaries.
 
 ### Per-pass helpers
 
@@ -133,24 +153,24 @@ Many algorithms also expose their internal passes (e.g. `inverse_dynamics_fpass`
 `inverse_dynamics_bpass`, `minv_bpass`, `minv_fpass`,
 `inverse_dynamics_gradient_fpass_dq` / `_dqd`,
 `inverse_dynamics_gradient_bpass_dq` / `_dqd`) for unit-testing accelerator port pieces
-independently. See `RBDReference/RBDReference.py` for full signatures.
+independently. See `RBDReference.py` and the `_plant.py`, `_centroidal.py`,
+`_energy.py`, and `_regressor.py` mixins for full signatures and returns.
 
 ## Joint-type support
 
-* **Tier-A cardinal joints** — `revolute`, `continuous`, `prismatic`, `fixed`,
-  and `floating` on cardinal (±x/±y/±z) axes: the fully optimized core path.
+* **Scalar joints** — `revolute`, `continuous`, and `prismatic`; fixed joints
+  are merged by the parser. Floating roots use a six-dimensional tangent.
 * **Helical (screw) joints** — supported natively, following Pinocchio's
   `JointModelHelical` pitch convention.
 * **Planar and translation joints** — decomposed at parse time into their
   cardinal sub-joints, so downstream algorithms only ever see cardinal joints.
 * **Spherical joints** — a native 3-DoF quaternion joint (so `NQ != NV` for
   models containing one).
-* **Skew (non-cardinal) axes** — handled through the dense-motion-subspace
-  Tier-B path.
+* **Skew (non-cardinal) axes** — handled through dense motion subspaces.
 * **Mimic joints** — folded into their target joint's reduced coordinate;
   chained mimics are flattened at resolve time.
 
-Each of these is validated against Pinocchio in `tests/`
+Representative cases are validated against Pinocchio in `tests/`
 (`test_spherical_joint_equivalence`, `test_helical_joint_equivalence`,
 `test_mimic_chain_equivalence`, ...).
 
@@ -159,8 +179,11 @@ Each of these is validated against Pinocchio in `tests/`
 The Pinocchio free-flyer convention is native at the API boundary:
 `q = [x, y, z, qx, qy, qz, qw, ...]` (quaternion **xyzw**), and the base
 tangent is ordered `[linear; angular]` (`[vx, vy, vz, wx, wy, wz]`). A
-floating-base model has `NQ = NV + 1`; velocity and force inputs are
-tangent-width (`NV`).
+floating-base model without additional spherical joints has `NQ = NV + 1`;
+each additional spherical joint contributes another quaternion coordinate.
+Velocity and force inputs are tangent-width (`NV`). The parser also provides
+a legacy convention; new integrations should use its default `pinocchio`
+convention explicitly.
 
 ## Installation
 
@@ -171,12 +194,12 @@ Two dependency tiers:
   pip install -r requirements.txt
   ```
   Building a `robot` object also requires
-  [URDFParser](https://github.com/robot-acceleration/URDFParser) (a sibling
+  [URDFParser](https://github.com/A2R-Lab/URDFParser) (a sibling
   package, not on PyPI).
 
 * **Developer / equivalence testing** — adds the Pinocchio backend and the
   test suite (`pin`, `robot_descriptions`, `xacrodoc`, `beautifulsoup4`,
-  `pybind11`, `pytest`):
+  `pybind11`, `scipy`, `pytest`):
   ```shell
   pip install -r requirements-dev.txt
   ```
@@ -188,8 +211,10 @@ This package is consumed both as a GRiD submodule and standalone. Either way,
 **siblings**: the checkout directories must be named exactly `RBDReference`
 and `URDFParser`, side by side under a common parent that is on `sys.path`
 (the package's absolute imports are `RBDReference.*`; running pytest from
-that parent provides this automatically). `RBDReference` currently needs
-`URDFParser` on its `modernizing-tests` branch.
+that parent provides this automatically). Install both source checkouts from
+`A2R-Lab` using `main`. Installing the requirements does not install these
+source packages into arbitrary Python environments; add their common parent
+to `PYTHONPATH` when running elsewhere.
 
 The Pinocchio pins in `requirements-dev.txt` are **load-bearing**:
 
@@ -202,12 +227,15 @@ The Pinocchio pins in `requirements-dev.txt` are **load-bearing**:
 
 ## Equivalence testing
 
-Every algorithm above is checked against Pinocchio (C++) as the golden oracle.
-That machinery now lives **inside this package**:
+The suite combines Pinocchio equivalence, finite-difference cross-checks,
+analytical solutions, and independent convergence tests. Coverage and supported
+configurations are defined by the tests, not an assertion that every possible
+combination has been verified. That machinery lives **inside this package**:
 
 * `equivalents/` — the reusable, shared-interface layer. Two interchangeable
   backends expose the *identical* adapter API:
-  * `reference` — the pure-Python `RBDReference` (base deps only);
+  * `reference` — the Python `RBDReference` with the sibling parser (the
+    adapter also uses the XML-parsing developer dependencies);
   * `pinocchio` — Pinocchio + the `pin_so_ext` second-order C++ binding,
     reordered into the project convention by `equivalents/conventions.py`.
 
@@ -219,8 +247,8 @@ That machinery now lives **inside this package**:
   ```
   Because both backends share the surface, a consumer (e.g. the GRiD CUDA
   equivalence harness) switches which reference it compares against by flipping
-  this one argument — turning the multi-hour pure-Python second-order
-  references into millisecond C++ calls.
+  this one argument. Adapter methods normalize return layouts; the raw
+  `RBDReference` class may return additional per-pass intermediates.
 
   `equivalents/` also contains `mujoco_convention.py` (documented in
   `mujoco_convention.md`) — the MuJoCo-convention adapter layer. It is a
@@ -228,9 +256,9 @@ That machinery now lives **inside this package**:
   `SUPPORTED_BACKENDS` stays `("reference", "pinocchio")`.
 
 * `tests/` — this package's own suite, asserting the two backends agree. Run
-  (from the directory containing `RBDReference`, e.g. the GRiD repo root):
+  (from the common parent of the two checkouts, `external/` inside GRiD):
   ```shell
-  pytest RBDReference/tests/
+  python -m pytest RBDReference/tests/ -q
   ```
 
 The `pin_so_ext` binding wraps `pinocchio::ComputeRNEASecondOrderDerivatives`

@@ -20,6 +20,7 @@ def test_model_dimensions_are_positive(spec, base_mode, project_model, pinocchio
 def test_joint_names_are_unique(spec, base_mode, project_model, pinocchio_model):
     assert len(project_model.joint_names) == len(set(project_model.joint_names))
     assert len(pinocchio_model.joint_names) == len(set(pinocchio_model.joint_names))
+    assert all(m.category != "parse_behavior" for m in project_model.mismatches)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), build_case_params())
