@@ -82,56 +82,21 @@ ALGORITHM_TOLERANCES = {
 }
 
 ROBOT_ALGORITHM_TOLERANCES = {
-    ("iiwa14", "pose_hessian"): Tolerance(
-        rtol=1e-5,
-        atol=3e-2,
-        note="Floating-base iiwa14 pose Hessians now use the analytic free-flyer path and agree with the Pinocchio reference finite-difference check to within a few hundredths on the root-root block.",
-    ),
-    ("g1", "inverse_dynamics"): Tolerance(
-        rtol=1e-6,
-        atol=3e-6,
-        note="G1 fixed-base and floating-base dynamics, ABA, and derivative comparisons show stable agreement against Pinocchio at the low-micro scale, with floating gradients needing a slightly wider absolute tolerance.",
-    ),
-    ("g1", "minv"): Tolerance(
-        rtol=1e-6,
-        atol=1e-7,
-        note="G1 inverse-mass and CRBA comparisons need a slightly wider absolute tolerance than the smaller smoke robots.",
-    ),
-    ("g1", "aba"): Tolerance(
-        rtol=1e-6,
-        atol=2e-5,
-        note="G1 ABA is a round-trip check (tau=inverse_dynamics(qdd) then aba(tau)). The GRiD reference inverts its own RNEA to ~1e-12; the residual is entirely Pinocchio-side cross-library round-off in the velocity-product terms, which scales with |qd|^2 and reaches ~1.7e-5 on the high-velocity samples (qd up to 10) where the qdd magnitude is too small for the comparator's scale-floor to cover. A structural error would be O(|qdd|), orders of magnitude larger.",
-    ),
-    ("g1", "forward_dynamics"): Tolerance(
-        rtol=1e-6,
-        atol=5e-1,
-        note="G1 floating-base FD-parameter-gradient (dqdd/dpi = -Minv . Y(q,qd,qdd_actual)) float32-CUDA equivalence. qdd_actual = Minv.(u-c) and |Minv| reaches ~3.2e3 at the zero/static sample, so the float32 round-off in that inner mass-matrix product is ~eps_f32*|Minv|*|c| ~ 0.1; that perturbed qdd then flows through Y(qdd) and the final -Minv.Y contraction, leaving an ABSOLUTE residual ~0.2 at the static sample (where the float64 reference cancels to ~0 and the output-scale headroom is therefore blind to it). This is a float32 conditioning floor identical on the in-smem PERF path and the g1 spilled-s_Y path (the high-energy samples agree to ~1e-6 RELATIVE, confirming the spilled placement is numerically identical). A genuine structural error would be O(|dqdd/dpi|) ~ 3e5, six orders of magnitude larger. Same cond(M) rationale as the h1_2-minv bucket; the atol floor is only consulted via the comparator's atol+5e-3*scale formula, so the high-magnitude entries stay governed by the relative headroom.",
-    ),
     ("baxter", "aba"): Tolerance(
         rtol=1e-7,
         atol=5e-9,
         note="Baxter fixed-base ABA agrees with Pinocchio to within a few nanounits; this narrowly scoped absolute tolerance avoids failing on near-zero residuals.",
     ),
-    ("h1_2", "aba"): Tolerance(
-        rtol=1e-3,
-        atol=6e-2,
-        note="h1_2 has 12 mimic joints whose reduced mass matrix is genuinely near-singular (min singular value ~4.3e-6 fixed-base, ~1.4e-5 floating-base; condition number ~7e5 / ~5e6). Project-side and Pinocchio-side reduced-model ABA agree algebraically but accumulate cond(M) * float64-epsilon noise. MEASURED floor 2026-06-21: the worst high-velocity sample reaches ~4.2e-2 absolute / ~3.4% relative on the 2 near-null-space joints (the cond(M) directions where the two libraries' Minv differ most); atol set to 6e-2 to cover it with margin. A structural error would be O(|qdd|) ~ 1e1, two orders larger, and is still caught by the 1e-3 relative tolerance on the well-conditioned directions.",
-    ),
     ("h1_2", "inverse_dynamics"): Tolerance(
-        rtol=1e-3,
-        atol=1e-2,
-        note="h1_2's reduced-model `forward_dynamics` (used in the equivalence tests under the `inverse_dynamics` tolerance bucket) inherits the same cond(M)~7e5 noise floor as ABA: project-side and Pinocchio-side both compute qdd = Minv * (tau - bias) but their float64 Minv differs at the 1e-9 level which the conditioning amplifies to ~1e-3. The check still catches algorithmic divergence (which would be O(|qdd|) ~ 1e1).",
-    ),
-    ("h1_2", "minv"): Tolerance(
-        rtol=1e-6,
-        atol=1.0,
-        note="h1_2's reduced mass matrix has cond(M) ~7e5 (fixed) / ~5e6 (floating) due to the genuinely small minimum singular value (~4e-6 / ~1.4e-5). Inverting that matrix amplifies the cross-library CRBA round-off; |Minv| itself reaches ~9.6e4 (fixed) / ~2.5e5 (floating). MEASURED floor 2026-06-21 (true max over the test samples): max abs |Δ| = 0.76 (fixed) / 0.63 (floating) on only 4/1521 near-null-space entries, with relative error 0.16% (fixed) / 2.65% (floating) on those entries while the bulk agrees to machine precision. This is a near-singular-mimic CONDITIONING floor, not structural (a structural error would corrupt the well-conditioned entries too, which the 1e-6 RELATIVE tolerance still guards). atol set to 1.0 to cover the measured 0.76 with margin. NOTE: this is a deliberately large absolute floor justified ONLY by the genuinely tiny singular values of this 12-mimic-joint reduced model; do NOT copy it to well-conditioned robots.",
+        rtol=3e-4,
+        atol=3e-6,
+        note="Re-measured 2026-09-30 (GRiD docs/agent_debugging_guide.md 7.z34): after the floating-mimic fixes RBDReference matches Pinocchio on h1_2 to ~1e-15 for aba/minv/crba and every other bucket passes the default, so the old cond(M)~5e6 overrides were deleted. This bucket keeps slack only for the fp64 RK4 integrator cells (h1_2-floating, dt=0.1, energetic samples): four forward-dynamics evaluations at extreme stage states differ from Pinocchio's by ~8e-5 of the default allowance x 1e3 (worst 846x the 1e-7/1e-9 default); ~3x headroom.",
     ),
     # ----- rizon4 healed-asset aba round-trip bucket (2026-09-17) -----
     ("rizon4", "aba"): Tolerance(
         rtol=1e-6,
         atol=5e-6,
-        note="rizon4's ABA round-trip (tau=inverse_dynamics(qdd) then aba(tau)) first EXECUTED after the 2026-09-15 <inertial> heal (the flexiv values are ROUNDED: diagonal inertias 0.001-0.03). MEASURED 2026-09-17: worst cross-library residual 5.9e-7 abs (fixed) / 1.1e-6 (floating), landing on structurally-near-zero qdd entries (whole-array scale ~2e-8 on the low-energy sample) — cross-library RNEA tau round-off amplified through M^-1 (min singular value ~1e-3, cond ~5e3 fixed / 3e4 floating). Same treatment as the gen3/h1_2 aba buckets: atol 5e-6 covers the measured noise with ~5x margin while a structural error would be O(|qdd|) ~ 10 and is still caught by the 1e-6 relative tolerance on well-conditioned directions.",
+        note="rizon4's ABA round-trip (tau=inverse_dynamics(qdd) then aba(tau)) first EXECUTED after the 2026-09-15 <inertial> heal (the flexiv values are ROUNDED: diagonal inertias 0.001-0.03). MEASURED 2026-09-17: worst cross-library residual 5.9e-7 abs (fixed) / 1.1e-6 (floating), landing on structurally-near-zero qdd entries (whole-array scale ~2e-8 on the low-energy sample) — cross-library RNEA tau round-off amplified through M^-1 (min singular value ~1e-3, cond ~5e3 fixed / 3e4 floating). Same treatment as the gen3 aba bucket: atol 5e-6 covers the measured noise with ~5x margin while a structural error would be O(|qdd|) ~ 10 and is still caught by the 1e-6 relative tolerance on well-conditioned directions.",
     ),
     # ----- gen3 continuous-joint cross-library round-off bucket -----
     # gen3 has 4 continuous joints. Pinocchio encodes each as an RUBZ SO(2)
@@ -166,7 +131,7 @@ ROBOT_ALGORITHM_TOLERANCES = {
     ("gen3", "aba"): Tolerance(
         rtol=1e-3,
         atol=4e-1,
-        note="gen3 ABA is a ROUND-TRIP check (tau=inverse_dynamics(qdd) then aba(tau)). Both libraries' ABA are exact: GRiD's aba(GRiD-inverse_dynamics(qdd)) recovers qdd to ~4e-13 (fixed) / ~1e-11 (floating), and pin's aba(pin-inverse_dynamics(qdd)) to ~5e-13. The residual is ENTIRELY the cross-library RNEA round-off in tau -- gen3's 4 continuous joints make GRiD-tau and pin-tau differ by ~3e-3 (RUBZ cos/sin vs raw-angle) -- amplified through M^-1. The FIXED-base mass matrix is well conditioned so the amplified residual stays ~1.6e-2; the synthetic FLOATING-base config (a fixed-base arm mounted on a free-flyer) has cond(M) ~6e4 (min singular value ~1.8e-4), which amplifies the ~3e-3 tau noise to ~0.33 absolute at the structurally-near-zero qdd entries. The wide absolute floor covers this cond-amplified cross-library noise (same treatment as h1_2's near-singular reduced-model aba/inverse_dynamics buckets); a genuine algorithmic error would be O(|qdd|) on the well-conditioned directions and is still caught by the 1e-3 relative tolerance. See the gen3 round-off block comment.",
+        note="gen3 ABA is a ROUND-TRIP check (tau=inverse_dynamics(qdd) then aba(tau)). Both libraries' ABA are exact: GRiD's aba(GRiD-inverse_dynamics(qdd)) recovers qdd to ~4e-13 (fixed) / ~1e-11 (floating), and pin's aba(pin-inverse_dynamics(qdd)) to ~5e-13. The residual is ENTIRELY the cross-library RNEA round-off in tau -- gen3's 4 continuous joints make GRiD-tau and pin-tau differ by ~3e-3 (RUBZ cos/sin vs raw-angle) -- amplified through M^-1. The FIXED-base mass matrix is well conditioned so the amplified residual stays ~1.6e-2; the synthetic FLOATING-base config (a fixed-base arm mounted on a free-flyer) has cond(M) ~6e4 (min singular value ~1.8e-4), which amplifies the ~3e-3 tau noise to ~0.33 absolute at the structurally-near-zero qdd entries. The wide absolute floor covers this cond-amplified cross-library noise; a genuine algorithmic error would be O(|qdd|) on the well-conditioned directions and is still caught by the 1e-3 relative tolerance. See the gen3 round-off block comment.",
     ),
     ("gen3", "pose_gradient"): Tolerance(
         rtol=1e-4,
@@ -177,21 +142,6 @@ ROBOT_ALGORITHM_TOLERANCES = {
         rtol=1e-3,
         atol=1e-4,
         note="gen3 second-order FDSVA tensors compound the continuous-joint round-off (~2.4e-4 relative) with the FD-of-first-order step error, so the gen3 floors are one decade wider. See the gen3 round-off block comment.",
-    ),
-    ("fetch", "inverse_dynamics"): Tolerance(
-        rtol=1e-6,
-        atol=1e-8,
-        note="Fetch floating-base inverse dynamics reaches single-digit nanounit residuals on near-zero entries; this narrow override avoids spurious failures without loosening the suite globally.",
-    ),
-    ("fetch", "aba"): Tolerance(
-        rtol=1e-7,
-        atol=1e-8,
-        note="Fetch floating-base ABA reaches single-digit nanounit residuals on near-zero entries; this narrow override avoids spurious failures without loosening the suite globally.",
-    ),
-    ("rizon4", "inverse_dynamics"): Tolerance(
-        rtol=1e-7,
-        atol=2e-9,
-        note="Rizon4 fixed-base pose and dynamics checks stay at nanounit residual scale; this narrow absolute tolerance covers tiny frame-placement differences.",
     ),
     ("gen3", "energy"): Tolerance(
         rtol=1e-4,
@@ -213,70 +163,15 @@ ROBOT_ALGORITHM_TOLERANCES = {
         atol=1e-5,
         note="Gen3 has continuous joints, which Pinocchio encodes as RUBZ (cos/sin) 2-D q-slots. The fixed-base -J^T unit-fext response leaks ~4e-6 cross-library round-off at the structurally-zero entries (project yields exact +/-0, pin's expanded model carries the round-off); the floating-base dtau component reaches ~1.1e-5 relative. The wider relative floor covers both; a structural error would be O(1). See the gen3 round-off block comment.",
     ),
-    ("gen3", "f_ext_gradient_so"): Tolerance(
-        rtol=1e-4,
-        atol=1e-4,
-        note="Gen3's -dJ^T/dq (FD-of-exact-first-order) inherits both the FD step error and the continuous-joint cross-library round-off, so it uses a wider absolute floor than the default FD-of-first-order bucket.",
-    ),
-    ("g1", "energy"): Tolerance(
-        rtol=1e-5,
-        atol=1e-3,
-        note="G1's mass matrix has entries up to ~1e4; the kinetic-energy quadratic form and the Coriolis/gravity terms inherit that scale, so cross-library round-off reaches ~1e-4 absolute. Relative residual stays at ~1e-7.",
-    ),
-    ("g1", "centroidal"): Tolerance(
-        rtol=1e-5,
-        atol=1e-4,
-        note="G1's world-frame centroidal accumulation over a 35-DoF humanoid reaches ~1e-7..1e-8 residuals scaled by the large inertia magnitudes; a slightly wider absolute floor covers the high-energy samples.",
-    ),
-    ("g1", "inverse_dynamics_regressor"): Tolerance(
-        rtol=1e-5,
-        atol=1e-4,
-        note="G1's regressor columns carry the link inertia magnitudes (up to ~1e2..1e3) times the velocity-product terms, so cross-library round-off reaches ~1e-4 absolute on the high-velocity samples. Relative residual stays at ~1e-7.",
-    ),
-    ("h1_2", "energy"): Tolerance(
-        rtol=1e-3,
-        atol=1e-2,
-        note="h1_2 (51 DoF, 12 mimic joints, near-singular reduced mass matrix) inherits the same cond(M)~7e5 noise floor as its ABA/RNEA buckets for the kinetic-energy / Coriolis composition.",
-    ),
-    ("h1_2", "centroidal"): Tolerance(
-        rtol=1e-4,
-        atol=1e-3,
-        note="h1_2's mimic-folded centroidal map carries the reduced-model round-off (folded mimic columns scaled by the URDF multiplier) at the same scale as its CRBA bucket. The C2 centroidal-derivative blocks (dh_dq / dhdot_dq / dhdot_dv) are central finite differences of the exact value layer, adding ~1e-6 FD noise on top.",
-    ),
-    ("fr3", "centroidal"): Tolerance(
-        rtol=1e-3,
-        atol=1e-4,
-        note="fr3 (mimic joints) C2 centroidal-derivative blocks (dh_dq / dhdot_dq / dhdot_dv) are central finite differences of the exact value layer; the FD carries ~1e-6 absolute noise that, on the near-zero derivative entries (mimic-folded columns), exceeds the primary 1e-6/1e-7 bucket's relative floor. The value layer (com/Jcom/A/h) still matches to the primary bucket; this override only covers the FD-sourced derivative blocks.",
-    ),
-    ("h1_2", "inverse_dynamics_regressor"): Tolerance(
-        rtol=1e-4,
-        atol=1e-2,
-        note="h1_2's regressor rows fold mimic v-slots into their target with the URDF multiplier; the reduced-row regressor inherits the cond(M)~7e5 amplified round-off of its dynamics buckets.",
-    ),
-    ("g1", "forward_dynamics_parameter_gradient"): Tolerance(
-        rtol=1e-5,
-        atol=1e-2,
-        note="G1's -Minv.Y compose carries |Minv| up to ~3e3 times the regressor's large inertia x acceleration entries; cross-library float64 round-off reaches ~1e-3..1e-2 absolute on the high-energy samples. Relative residual stays at ~1e-7 (machine eps x conditioning). A structural error would be O(|dqdd/dpi|), orders of magnitude larger. Same conditioning rationale as the g1 minv/regressor buckets.",
-    ),
-    ("h1_2", "forward_dynamics_parameter_gradient"): Tolerance(
-        rtol=1e-3,
-        atol=1e-1,
-        note="h1_2 (12 mimic joints, reduced mass matrix cond ~7e5) inherits the same near-singular Minv noise floor as its minv/aba buckets, amplified through the -Minv.Y compose and the large regressor magnitudes. A structural error would be O(|dqdd/dpi|), orders of magnitude larger.",
-    ),
     ("gen3", "forward_dynamics_parameter_gradient"): Tolerance(
         rtol=1e-3,
         atol=1e-1,
         note="gen3's 4 continuous joints (RUBZ cos/sin vs raw-angle) leave cross-library round-off in qdd_actual=aba(q,qd,u) and in Minv, amplified through the -Minv.Y compose (~2.4e-4 relative on high-energy samples, larger absolute on the floating cond~6e4 configuration). A structural continuous-joint error would be O(scale). See the gen3 round-off block comment.",
     ),
-    ("g1", "second_order_fdsva"): Tolerance(
-        rtol=1e-4,
-        atol=1e-2,
-        note="G1's mass matrix has entries up to ~1e4, which amplifies the ~1e-7 idsva_so residual to ~1e-3 when composing fdsva via Minv multiplication. Relative norm stays at ~1e-7 (8 significant digits).",
-    ),
     ("h1_2", "second_order_fdsva"): Tolerance(
         rtol=1e-4,
-        atol=1e-1,
-        note="H1-2 (51 DoF, 12 mimic joints, mass matrix entries up to ~1e5) has the same Minv-amplification issue as G1, exacerbated by higher dimensionality. The reduced CRBA from the project analytic path vs pinocchio's C++ CRBA diverge at ~1e-7 relative (float64 round-off through 51x51 inversion); composing fdsva via Minv@..@Minv compounds this to ~1e-4 relative max in the tensor entries we care about. Relative residual norms stay at ~1e-7 (7-8 significant digits).",
+        atol=3e-3,
+        note="Re-measured 2026-09-30 (GRiD docs/agent_debugging_guide.md 7.z34): after the floating-mimic fixes RBDReference matches Pinocchio on h1_2 to ~1e-15 for aba/minv/crba and every other bucket passes the default, so the old cond(M)~5e6 overrides were deleted. fdsva_so composition: one near-zero entry of 91,125 (h1_2-floating) differs by 1.0e-3 absolute, above the rtol*scale floor (9.7e-4 at scale 9.7); atol 3e-3 gives ~3x headroom. The previous atol 0.1 is gone.",
     ),
 }
 
