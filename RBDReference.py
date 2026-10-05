@@ -1429,19 +1429,21 @@ class RBDReference(
         return out
 
     def end_effector_pose(self, q, ee_joint_names = None, ee_offsets = None):
-        """Compute the 4x4 homogeneous transformation matrix of the end effector.
+        """Return one (6, 1) [xyz; roll, pitch, yaw] pose per selected frame.
 
         Parameters
         ----------
         q : numpy.ndarray
             N-element vector of joint positions.
-        ee_id : int
-            Index of the end effector.
+        ee_joint_names : str or list of str, optional
+            Articulated or fixed joint frames; defaults to leaf frames.
+        ee_offsets : list of point offsets or 4x4 transforms, optional
+            First tool offset is applied to each target (identity by default).
 
         Returns
         -------
-        T : numpy.ndarray
-            4x4 homogeneous transformation matrix.
+        list of numpy.ndarray
+            World-frame poses at the tool offset, including mimic relations.
         """
         # chain up the transforms (version 1 for starting from the root)
         def forwardChain(self, jid, q):
@@ -1451,8 +1453,7 @@ class RBDReference(
             # then chain them up
             Xmat_hom = np.eye(4)
             for ind in jidChain:
-                inds_q = self.robot.get_joint_index_q(ind)
-                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(q[inds_q])
+                currX = self.robot.get_Xmat_hom_Func_by_id(ind)(self.robot.q_for_joint(ind, q))
                 Xmat_hom = np.matmul(Xmat_hom,currX)
             return Xmat_hom
 
@@ -1461,8 +1462,7 @@ class RBDReference(
             currId = jid
             Xmat_hom = finalXmat_hom
             while(currId != -1):
-                inds_q = self.robot.get_joint_index_q(currId)
-                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(q[inds_q])
+                currX = self.robot.get_Xmat_hom_Func_by_id(currId)(self.robot.q_for_joint(currId, q))
                 Xmat_hom = np.matmul(currX,Xmat_hom)
                 currId = self.robot.get_parent_id(currId)
             return Xmat_hom

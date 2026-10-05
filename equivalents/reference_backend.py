@@ -246,8 +246,7 @@ class ProjectModelAdapter:
             xmat_hom = np.eye(4)
             curr_id = target_id
             while curr_id != -1:
-                inds_q = self.robot.get_joint_index_q(curr_id)
-                curr_x = self.robot.get_Xmat_hom_Func_by_id(curr_id)(q[inds_q])
+                curr_x = self.robot.get_Xmat_hom_Func_by_id(curr_id)(self.robot.q_for_joint(curr_id, q))
                 xmat_hom = np.matmul(curr_x, xmat_hom)
                 curr_id = self.robot.get_parent_id(curr_id)
             return normalize_matrix(np.asarray(xmat_hom[:3, :3], dtype=np.float64))
@@ -262,8 +261,7 @@ class ProjectModelAdapter:
             xmat_hom = fixed_joint.get_transformation_matrix_hom()
             curr_id = parent.get_id()
             while curr_id != -1:
-                inds_q = self.robot.get_joint_index_q(curr_id)
-                curr_x = self.robot.get_Xmat_hom_Func_by_id(curr_id)(q[inds_q])
+                curr_x = self.robot.get_Xmat_hom_Func_by_id(curr_id)(self.robot.q_for_joint(curr_id, q))
                 xmat_hom = np.matmul(curr_x, xmat_hom)
                 curr_id = self.robot.get_parent_id(curr_id)
         return normalize_matrix(np.asarray(xmat_hom[:3, :3], dtype=np.float64))

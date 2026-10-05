@@ -110,3 +110,23 @@ def test_chained_mimic_dynamics_match_flattened(tmp_path):
         u = rng.uniform(-1.0, 1.0, nv)
         _assert_same(ref_c.forward_dynamics(q, qd, u), ref_f.forward_dynamics(q, qd, u))
         _assert_same(ref_c.aba(q, qd, u), ref_f.aba(q, qd, u))
+
+
+def test_mimic_pose_matches_explicit_affine_chain_and_its_gradient(tmp_path):
+    robot = _parse(tmp_path, 'pose_chain', ('j1', _M2, _O2), ('j2', _M3, _O3))
+    ref = RBDReference(robot)
+    q = np.array([.23])
+    # Independent one-hop values, not q_for_joint (the helper under test).
+    local_q = [q[0], _M2*q[0]+_O2, _M3F*q[0]+_O3F]
+    transform = np.eye(4)
+    for jid, angle in enumerate(local_q):
+        transform = transform @ robot.get_Xmat_hom_Func_by_id(jid)(angle)
+    tool = np.eye(4)
+    tool[:3, 3] = [.03, -.01, .02]
+    pose = ref.end_effector_pose(q, 'j3', [tool])[0].reshape(-1)
+    np.testing.assert_allclose(pose[:3], (transform @ tool)[:3, 3], atol=1e-14)
+    step = 1e-6
+    diff = (ref.end_effector_pose(q+step, 'j3', [tool])[0]
+            - ref.end_effector_pose(q-step, 'j3', [tool])[0]) / (2*step)
+    np.testing.assert_allclose(diff, ref.end_effector_pose_gradient(q, 'j3', [tool])[0],
+                               rtol=1e-8, atol=1e-9)

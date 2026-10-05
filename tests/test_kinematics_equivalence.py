@@ -68,13 +68,14 @@ def select_pose_targets(project_model, pinocchio_model):
             targets.append((project_model.joint_names[-1], np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)))
     if project_model.fixed_joint_names:
         targets.append((project_model.fixed_joint_names[0], np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)))
+    # Mimic targets are essential: ordinary root/leaf choices can miss non-unit
+    # multipliers (e.g. H1's thumb). Pinocchio's adapter expands these coordinates.
+    targets.extend((name, np.array([0., 0., 0., 1.])) for name in sorted(mimic_joint_names))
 
     deduped = []
     seen = set()
     for target_name, offset in targets:
         if target_name in seen:
-            continue
-        if target_name in mimic_joint_names:
             continue
         if target_name not in pinocchio_model.frame_names:
             continue
