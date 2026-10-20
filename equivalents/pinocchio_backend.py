@@ -359,13 +359,16 @@ class PinocchioModelAdapter:
         for _ in range(njoints):
             forces.append(pin.Force.Zero())
 
-        # Project body -> pinocchio joint id. For non-mimic robots the project
-        # body order matches the scalar-joint order; map by joint NAME to be
-        # robust to pinocchio's internal joint indexing. For a floating base,
-        # project body 0 is the floating root joint (pin joint id 1) and the
-        # subsequent bodies are the scalar joints in order.
+        # Project body -> pinocchio joint id, by joint NAME in project body
+        # order: the floating root (pin joint id 1) first when present, then every
+        # scalar joint INCLUDING the mimic-driven ones (`scalar_joint_names`, the
+        # list the f_ext gradient column maps with). f_ext is a per-body input
+        # (6*NUM_BODIES, mimic bodies included), so the mimic-free
+        # `project_scalar_joint_names` list used here before 2026-10-20 shifted
+        # every body after a mid-chain mimic joint onto its neighbour's wrench on
+        # h1_2 and dropped the mimic bodies' wrenches on every mimic robot.
         prefix = self._floating_prefix_v()
-        names = self.project_scalar_joint_names
+        names = self.scalar_joint_names
         for body_id, fe in enumerate(f_ext):
             if fe is None:
                 continue
