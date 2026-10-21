@@ -21,7 +21,8 @@ class RBDReference(
     _CentroidalMixin,
     _RegressorMixin,
 ):
-    def __init__(self, robotObj, use_joint_dynamics=False):
+    def __init__(self, robotObj, use_joint_dynamics=False, friction_model="sign",
+                 friction_width=0.03):
         """Initialize RBDReference with a robot object.
 
         Parameters
@@ -37,6 +38,18 @@ class RBDReference(
             authoritative-oracle-preserving default. The id/fd GRADIENTS follow
             this same flag: when True they add the damping diagonal
             (d(damping*qd)/dqd) to dc_dqd / qdd_dqd (friction's subgradient is 0).
+        friction_model : str, optional
+            ``"sign"`` (default) applies Coulomb friction as ``friction*sign(qd)``,
+            whose derivatives are zero almost everywhere. ``"tanh"`` applies the
+            smooth model ``friction*tanh(qd/width)``; its first derivative
+            ``(friction/width)*sech^2(qd/width)`` enters the inverse-dynamics
+            gradient and ``-(2*friction/width^2)*tanh(qd/width)*sech^2(qd/width)``
+            enters the qd-qd block of the second-order derivatives. Only read when
+            ``use_joint_dynamics`` is True.
+        friction_width : float or array_like, optional
+            The width ``w`` of the tanh model in rad/s (or m/s): one scalar for
+            every velocity slot, or one value per velocity slot (length nv).
+            Default 0.03. Only read under ``friction_model="tanh"``.
 
         Returns
         -------
@@ -45,6 +58,20 @@ class RBDReference(
         """
         self.robot = robotObj # instance of Robot Object class created by URDFparser
         self.use_joint_dynamics = use_joint_dynamics
+        if friction_model not in ("sign", "tanh"):
+            raise ValueError(
+                f"friction_model must be 'sign' or 'tanh', got {friction_model!r}")
+        self.friction_model = friction_model
+        width = np.asarray(friction_width, dtype=np.float64)
+        if width.ndim == 0:
+            width = np.full(self.robot.get_num_vel(), float(width))
+        if width.shape != (self.robot.get_num_vel(),):
+            raise ValueError(
+                "friction_width must be a scalar or one value per velocity slot "
+                f"(length {self.robot.get_num_vel()}); got shape {width.shape}")
+        if not np.all(width > 0.0):
+            raise ValueError("friction_width must be positive")
+        self.friction_width = width
         self._spatial_xmat_derivative_func_cache = {}
         self._spatial_xmat_second_derivative_func_cache = {}
 
@@ -2599,11 +2626,13 @@ class RBDReference(
         return (v, a, f)
 
     def _joint_dynamics_bias(self, qd):
-        """Per-v-slot joint-dynamics bias tau += damping*qd + friction*sign(qd).
+        """Per-v-slot joint-dynamics bias tau += damping*qd + friction*s(qd).
 
         Viscous damping and Coulomb friction are joint-local generalized forces
         that oppose motion. They are returned as an nv-vector added to the RNEA
         bias (inverse_dynamics) and subtracted from the available torque in ABA.
+        The friction shape s(qd) is sign(qd) under friction_model="sign" and
+        tanh(qd/w) under friction_model="tanh" (w = friction_width per slot).
 
         Returns the zero vector when no joint declares damping/friction (the
         common case), so this is numerically a no-op there. `qd` is the
@@ -2631,8 +2660,64 @@ class RBDReference(
             idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
             for k in idx_list:
                 qd_k = qd[k]
-                bias[k] += alpha * (b * qd_k + fr * np.sign(qd_k))
+                bias[k] += alpha * (b * qd_k + fr * self._friction_shape(qd_k, k))
         return bias
+
+    def _friction_shape(self, qd_k, k):
+        """The friction velocity shape for slot k: sign(qd) or tanh(qd/w_k)."""
+        if self.friction_model == "tanh":
+            return np.tanh(qd_k / self.friction_width[k])
+        return np.sign(qd_k)
+
+    def _joint_dynamics_derivative_diag(self, qd, order):
+        """Per-v-slot derivative of the joint-dynamics bias with respect to the
+        slot's own velocity: the first (order=1) or second (order=2) derivative.
+
+        order=1 is alpha*(damping + (friction/w) sech^2(qd/w)) under the tanh
+        model and alpha*damping under the sign model (the Coulomb term has zero
+        subgradient almost everywhere). order=2 is alpha*(-(2 friction/w^2)
+        tanh(qd/w) sech^2(qd/w)) under tanh and zero under sign (damping is
+        linear in qd). Mirrors _joint_dynamics_bias: iterate bodies, map each to
+        its reduced v-slot with the mimic multiplier, skip the floating root, and
+        accumulate so mimic joints sharing a slot sum. Zero when
+        use_joint_dynamics is False or no joint declares damping/friction.
+        """
+        n = self.robot.get_num_vel()
+        diag = np.zeros(n)
+        if not self.use_joint_dynamics:
+            return diag
+        has_damping = self.robot.robot_has_joint_damping()
+        has_friction = self.robot.robot_has_joint_friction()
+        if not (has_damping or has_friction):
+            return diag
+        tanh_model = self.friction_model == "tanh"
+        if tanh_model and has_friction and qd is None:
+            raise ValueError("qd is required for the tanh friction derivatives")
+        for jid in range(self.robot.get_num_bodies()):
+            if self.robot.floating_base and self.robot.get_parent_id(jid) == -1:
+                continue  # floating root carries no damping/friction
+            b = float(self.robot.get_damping_by_id(jid)) if has_damping else 0.0
+            fr = float(self.robot.get_friction_by_id(jid)) if has_friction else 0.0
+            if b == 0.0 and fr == 0.0:
+                continue
+            idx = self.robot.get_joint_index_v(jid)
+            alpha = self._mimic_multiplier(jid)
+            idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+            for k in idx_list:
+                if order == 1:
+                    val = b
+                else:
+                    val = 0.0
+                if tanh_model and fr != 0.0:
+                    w = self.friction_width[k]
+                    th = np.tanh(qd[k] / w)
+                    sech2 = 1.0 - th * th
+                    if order == 1:
+                        val += (fr / w) * sech2
+                    else:
+                        val += -(2.0 * fr / (w * w)) * th * sech2
+                diag[k] += alpha * val
+        return diag
 
     def inverse_dynamics_bpass(self, q, f):
         """Perform the backward pass of the Recursive Newton-Euler Algorithm.
@@ -3825,7 +3910,7 @@ class RBDReference(
 
         return dc_dq
 
-    def inverse_dynamics_gradient_bpass_dqd(self, q, df_dqd):
+    def inverse_dynamics_gradient_bpass_dqd(self, q, df_dqd, qd=None):
         """Backward pass gradient with respect to joint velocities for RNEA.
 
         Parameters
@@ -3861,28 +3946,17 @@ class RBDReference(
                 df_dqd[:,:,parent_ind] += np.matmul(np.transpose(Xmat),df_dqd[:,:,ind])
 
 
-        # Joint-local viscous damping contributes a diagonal term to dc_dqd:
-        # the value bias folds c += alpha*damping*qd_v into each joint's v-slot
-        # (see _joint_dynamics_bias), so d(c)/d(qd_v) = alpha*damping on the
-        # diagonal. Coulomb friction (alpha*f*sign(qd)) has zero (sub)gradient
-        # a.e., so it contributes NOTHING here -- gate on damping only. Mirrors
-        # _joint_dynamics_bias exactly: iterate bodies, map to the reduced
-        # v-slot via get_joint_index_v + the mimic multiplier, skip the floating
-        # root (it carries no damping), and ACCUMULATE so mimic joints sharing a
-        # slot sum. Gated on use_joint_dynamics (connected to the value path),
-        # NOT a separate kwarg.
-        if self.use_joint_dynamics and self.robot.robot_has_joint_damping():
-            for jid in range(NB):
-                if self.robot.floating_base and self.robot.get_parent_id(jid) == -1:
-                    continue  # floating root carries no damping
-                b = float(self.robot.get_damping_by_id(jid))
-                if b == 0.0:
-                    continue
-                idx = self.robot.get_joint_index_v(jid)
-                alpha = self._mimic_multiplier(jid)
-                idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
-                for k in idx_list:
-                    dc_dqd[k, k] += alpha * b
+        # The joint-dynamics bias contributes a diagonal term to dc_dqd: the
+        # value path folds c += alpha*(damping*qd_v + friction*s(qd_v)) into each
+        # joint's v-slot (see _joint_dynamics_bias), so d(c)/d(qd_v) on the
+        # diagonal is alpha*damping under the sign model (the Coulomb term has
+        # zero subgradient almost everywhere) and alpha*(damping + (friction/w)
+        # sech^2(qd_v/w)) under the tanh model. _joint_dynamics_derivative_diag
+        # mirrors the value fold (bodies to reduced v-slots with the mimic
+        # multiplier, floating root skipped, shared slots accumulate). Gated on
+        # use_joint_dynamics (connected to the value path), NOT a separate kwarg.
+        if self.use_joint_dynamics:
+            dc_dqd[np.diag_indices_from(dc_dqd)] += self._joint_dynamics_derivative_diag(qd, 1)
 
         return dc_dqd
 
@@ -3947,7 +4021,7 @@ class RBDReference(
         # backward pass, dqd (joint-damping gradient gated internally on
         # self.use_joint_dynamics, so it follows the value path automatically --
         # forward_dynamics_gradient inherits it with no extra plumbing).
-        dc_dqd = self.inverse_dynamics_gradient_bpass_dqd(q, df_dqd)
+        dc_dqd = self.inverse_dynamics_gradient_bpass_dqd(q, df_dqd, qd=qd)
 
         if public_output:
             return self._denormalize_inverse_dynamics_gradient_output(dc_dq, dc_dqd)
@@ -4600,6 +4674,7 @@ class RBDReference(
         if self.robot.floating_base:
             d2tau_dq = d2tau_dq + self._floating_gravity_d2tau_dq_lie_direct(q, GRAVITY)
 
+        self._add_joint_dynamics_so_diag(d2tau_dqd, qd)
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
 
     def idsva_so_world_frame(self, q, qd, qdd, GRAVITY=-9.81):
@@ -4847,7 +4922,23 @@ class RBDReference(
             d2tau_dvdq = np.einsum('ia,ijk,jb,kc->abc', R, d2tau_dvdq, R, R, optimize=True)
             dM_dq = np.einsum('ia,ijk,jb,kc->abc', R, dM_dq, R, R, optimize=True)
 
+        self._add_joint_dynamics_so_diag(d2tau_dqd, qd)
         return d2tau_dq, d2tau_dqd, d2tau_dvdq, dM_dq
+
+    def _add_joint_dynamics_so_diag(self, d2tau_dqd, qd):
+        """Add the joint-dynamics second derivative to the qd-qd block in place.
+
+        The bias is linear in qd under the sign model (damping) with a zero
+        Coulomb subgradient, so this is a no-op there. Under the tanh model the
+        term -(2 friction/w^2) tanh(qd/w) sech^2(qd/w) lands on the triple
+        diagonal d2tau[k, k, k] of the reduced (public) velocity slots; it is
+        applied after any mimic fold, exactly where the CUDA inners add it.
+        """
+        if not self.use_joint_dynamics:
+            return
+        so = self._joint_dynamics_derivative_diag(np.asarray(qd, dtype=np.float64), 2)
+        n = so.shape[0]
+        d2tau_dqd[np.arange(n), np.arange(n), np.arange(n)] += so
 
     def idsva_so(self, q, qd, qdd, GRAVITY = -9.81):
         """Compute second-order derivatives of inverse dynamics.
