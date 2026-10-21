@@ -1,4 +1,4 @@
-"""Cost menu (phase one) reference checks: activations, activated terms, linear feature.
+"""Cost menu reference checks: activations, activated terms, linear feature, named frames.
 
 GRiD-defined quantities (the CUDA grid_plant surface), so there is no Pinocchio
 oracle; each is checked against a closed form, a central-difference gradient and a
@@ -7,7 +7,7 @@ Gauss-Newton Hessian recompute on iiwa14 (fixed) and go2 (floating):
     ee_pos_cost exactly,
   - the pseudo-Huber activation has the stated value, slope and curvature and the
     weighted-absolute-value and quadratic limits,
-  - state_cost / input_cost / linear_feature_cost / ee_pos_cost_activated gradients
+  - state_cost / input_cost / linear_feature_cost / frame_position_cost gradients
     match central differences and the Hessians are J^T diag(a'') J.
 """
 from pathlib import Path
@@ -101,23 +101,121 @@ def test_activated_terms_against_finite_differences(name, floating):
 
 
 @pytest.mark.parametrize("name,floating", [("iiwa14", False), ("go2", True)], ids=["iiwa14", "go2"])
-def test_activated_ee_position_cost(name, floating):
+def test_frame_zero_is_the_end_effector_cost(name, floating):
+    """frame_position_cost on the end-effector joint under the quadratic activation is
+    ee_pos_cost; under pseudo-Huber it carries the Gauss-Newton structure from the
+    position Jacobian and zero qd blocks (the floating go2 included)."""
     ref = _ref(name, floating)
     nq, nv = ref.robot.get_num_pos(), ref.robot.get_num_vel()
     rng = np.random.default_rng(9)
     q = ref.robot.normalize_floating_base_q_input(rng.standard_normal(nq)) if floating else rng.standard_normal(nq)
+    frame = ref.robot.get_joint_by_id(ref.robot.get_leaf_nodes()[0]).get_name()
     W = np.array([10.0, 11.0, 12.0]); p_des = np.array([0.1, -0.2, 0.3]); eps = 0.02
-    # quadratic activation reproduces ee_pos_cost
-    for a, b in zip(ref.ee_pos_cost_activated(q, p_des, W, 0, 0.0), ref.ee_pos_cost(q, p_des, W)):
+    for a, b in zip(ref.frame_position_cost(q, frame, p_des, W, 0, 0.0), ref.ee_pos_cost(q, p_des, W)):
         assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-12)
-    val, grad_x, hess_x = ref.ee_pos_cost_activated(q, p_des, W, 1, eps)
+    val, grad_x, hess_x = ref.frame_position_cost(q, frame, p_des, W, 1, eps)
     assert np.count_nonzero(grad_x[nv:]) == 0 and np.count_nonzero(hess_x[nv:, :]) == 0
-    if not floating:
-        fd = _central(lambda qq: ref.ee_pos_cost_activated(qq, p_des, W, 1, eps)[0], q)
-        assert np.allclose(grad_x[:nv], fd, atol=1e-6), np.max(np.abs(grad_x[:nv] - fd))
-    # Gauss-Newton structure from the position Jacobian
-    target = ref._ee_target_name(0)
-    Jp = np.asarray(ref.end_effector_pose_gradient(q, ee_joint_names=target)[0])[:3, :]
-    p = np.asarray(ref.end_effector_pose(q, ee_joint_names=target)[0]).reshape(-1)[:3]
+    Jp = np.asarray(ref.frame_jacobian(q, frame))[:3, :]
+    _, p, _ = ref._frame_placement(q, frame)
     _, slope, curv = ref._activation(1, W, p - p_des, eps)
     assert np.allclose(grad_x[:nv], Jp.T @ slope) and np.allclose(hess_x[:nv, :nv], Jp.T @ (curv[:, None] * Jp))
+
+
+# ---- named-frame residuals and barrier activations ----
+
+def _frames(ref):
+    robot = ref.robot
+    return [robot.get_joint_by_id(robot.get_leaf_nodes()[0]).get_name(), robot.get_joint_by_id(3).get_name()]
+
+
+@pytest.mark.parametrize("name,floating", [("iiwa14", False), ("fr3", False)], ids=["iiwa14", "fr3"])
+def test_frame_position_and_orientation_costs(name, floating):
+    ref = _ref(name, floating)
+    nq, nv = ref.robot.get_num_pos(), ref.robot.get_num_vel()
+    rng = np.random.default_rng(11)
+    q = rng.standard_normal(nq)
+    W = np.array([2.0, 3.0, 4.0]); eps = 0.05
+    for frame in _frames(ref):
+        p_des = np.array([0.1, 0.2, 0.3])
+        val, grad, hess = ref.frame_position_cost(q, frame, p_des, W, 1, eps)
+        fd = _central(lambda qq: ref.frame_position_cost(qq, frame, p_des, W, 1, eps)[0], q)
+        assert np.allclose(grad[:nv], fd, atol=1e-6) and np.count_nonzero(grad[nv:]) == 0
+        # orientation: a target rotated from the current frame by phi recovers phi as the residual
+        R_f, _, _ = ref._frame_placement(q, frame)
+        phi = np.array([0.3, -0.2, 0.5])
+        R_des = R_f @ ref._so3_right_jacobian_inv(np.zeros(3))  # identity start
+        from scipy.spatial.transform import Rotation
+        R_des = R_f @ Rotation.from_rotvec(-phi).as_matrix()
+        assert np.allclose(ref._so3_log(R_des.T @ R_f), phi, atol=1e-12)
+        val, grad, hess = ref.frame_orientation_cost(q, frame, R_des.flatten(order="F"), W, 1, eps)
+        fd = _central(lambda qq: ref.frame_orientation_cost(qq, frame, R_des.flatten(order="F"), W, 1, eps)[0], q)
+        assert np.allclose(grad[:nv], fd, atol=1e-6), np.max(np.abs(grad[:nv] - fd))
+        assert np.count_nonzero(grad[nv:]) == 0 and np.count_nonzero(hess[nv:, :]) == 0
+        # the Gauss-Newton structure J_e^T diag(a'') J_e
+        Jw = np.asarray(ref.frame_jacobian(q, frame, "LOCAL"))[3:, :]
+        Je = ref._so3_right_jacobian_inv(phi) @ Jw
+        curv = ref._activation(1, W, phi, eps)[2]
+        assert np.allclose(hess[:nv, :nv], Je.T @ (curv[:, None] * Je))
+    # the log map at pi/2 pitch (the Euler singularity) is regular
+    Rz = lambda a: np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]])
+    Ry = lambda a: np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
+    R = Rz(0.3) @ Ry(np.pi / 2)
+    phi = ref._so3_log(R)
+    from scipy.spatial.transform import Rotation
+    assert np.allclose(Rotation.from_rotvec(phi).as_matrix(), R, atol=1e-10)
+    # near pi branch
+    R_pi = Rotation.from_rotvec(np.array([0.0, 0.0, np.pi - 1e-7])).as_matrix()
+    assert np.isclose(np.linalg.norm(ref._so3_log(R_pi)), np.pi - 1e-7, atol=1e-6)
+
+
+@pytest.mark.parametrize("name", ["iiwa14", "fr3"])
+def test_frame_velocity_cost(name):
+    ref = _ref(name, False)
+    nq, nv = ref.robot.get_num_pos(), ref.robot.get_num_vel()
+    rng = np.random.default_rng(12)
+    q = rng.standard_normal(nq); qd = rng.standard_normal(nv)
+    x = np.concatenate([q, qd])
+    W = np.arange(1, 7, dtype=float); v_des = np.array([0.1, 0.0, -0.1, 0.2, 0.0, 0.1]); eps = 0.05
+    for frame in _frames(ref):
+        val, grad, hess = ref.frame_velocity_cost(q, qd, frame, v_des, W, 1, eps)
+        fd = _central(lambda xx: ref.frame_velocity_cost(xx[:nq], xx[nq:], frame, v_des, W, 1, eps)[0], x)
+        assert np.allclose(grad, fd, atol=1e-6), np.max(np.abs(grad - fd))
+        # the configuration derivative of J qd against a finite difference of the Jacobian itself
+        A = ref._frame_velocity_q_derivative(q, qd, frame)
+        F = np.zeros((6, nv))
+        for k in range(nq):
+            qp = q.copy(); qp[k] += _H; qm = q.copy(); qm[k] -= _H
+            F[:, k] = (ref.frame_jacobian(qp, frame) @ qd - ref.frame_jacobian(qm, frame) @ qd) / (2 * _H)
+        assert np.allclose(A, F, atol=1e-6)
+        J = np.asarray(ref.frame_jacobian(q, frame))
+        Jx = np.hstack([A, J]); curv = ref._activation(1, W, J @ qd - v_des, eps)[2]
+        assert np.allclose(hess, Jx.T @ (curv[:, None] * Jx))
+    go2 = _ref("go2", True)
+    with pytest.raises(NotImplementedError):
+        go2.frame_velocity_cost(go2.robot.normalize_floating_base_q_input(rng.standard_normal(go2.robot.get_num_pos())),
+                                rng.standard_normal(go2.robot.get_num_vel()), _frames(go2)[0], v_des, W, 1, eps)
+
+
+def test_barrier_activations():
+    W = np.array([0.1, 0.2, 0.3]); vals = np.array([0.5, 1.95, -0.3])
+    lo = np.array([0.0, 0.0, -np.inf]); hi = np.array([2.0, 2.0, 0.0]); delta = 0.1
+    for kind in (2, 3):
+        val, sl, cu = RBDReference._activation(kind, W, vals, delta, vals, lo, hi)
+        fd = _central(lambda vv: np.sum(RBDReference._activation(kind, W, vv, delta, vv, lo, hi)[0]), vals)
+        assert np.allclose(sl, fd, atol=1e-6)
+        fd2 = _central(lambda vv: np.sum(RBDReference._activation(kind, W, vv, delta, vv, lo, hi)[1]), vals)
+        assert np.allclose(cu, fd2, atol=1e-4)
+    # relaxed log barrier: log above delta, finite quadratic extension below and beyond the bound
+    v, d1, d2 = RBDReference._relaxed_log_barrier_1d(np.array([0.5, 0.1, 0.05, -1.0]), 0.1, delta)
+    assert np.isclose(v[0], -0.1 * np.log(0.5)) and np.isclose(v[1], -0.1 * np.log(0.1))
+    assert np.isfinite(v).all() and v[3] > v[2] > v[1]
+    # continuity of value and slope at delta
+    a = RBDReference._relaxed_log_barrier_1d(np.array([delta + 1e-9]), 0.1, delta)
+    b = RBDReference._relaxed_log_barrier_1d(np.array([delta - 1e-9]), 0.1, delta)
+    assert abs(a[0][0] - b[0][0]) < 1e-7 and abs(a[1][0] - b[1][0]) < 1e-6
+    # quadratic barrier is zero inside and the infinite bound contributes nothing
+    val, sl, cu = RBDReference._activation(3, W, vals, 0.0, vals, lo, hi)
+    assert val[0] == 0.0 and sl[0] == 0.0 and cu[0] == 0.0 and val[2] == 0.0
+    assert np.isclose(val[2], 0.0) and np.isclose(RBDReference._activation(3, W, np.array([-0.3]), 0.0, np.array([-0.3]), np.array([-np.inf]), np.array([-0.5]))[0][0], 0.5 * 0.1 * 0.04)
+    with pytest.raises(ValueError):
+        RBDReference._activation(2, W, vals, delta)

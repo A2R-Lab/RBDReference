@@ -403,19 +403,53 @@ class _PlantMixin:
         hess_x[:nv, :nv] = Jp.T @ (W[:, None] * Jp)  # J_p^T diag(W) J_p
         return value, grad_x, hess_x
 
-    # ----- cost menu, phase one: activations, activated terms, linear feature -----
+    def gravity_torque(self, q, GRAVITY=-9.81):
+        """g(q) = RNEA(q, 0, 0), the generalized gravity (size nv); the oracle of
+        grid_plant::gravity_torque."""
+        nv = self.robot.get_num_vel()
+        return np.asarray(self.inverse_dynamics(q, np.zeros(nv), np.zeros(nv), GRAVITY=GRAVITY)[0], dtype=np.float64).reshape(-1)
+
+    # ----- cost menu: activations, activated terms, linear feature, named frames -----
 
     ACTIVATION_QUADRATIC = 0
     ACTIVATION_PSEUDO_HUBER = 1
 
+    ACTIVATION_RELAXED_LOG_BARRIER = 2
+    ACTIVATION_QUADRATIC_BARRIER = 3
+
     @staticmethod
-    def _activation(kind, W, r, eps):
+    def _relaxed_log_barrier_1d(z, mu, delta):
+        """Grandia et al. relaxed log barrier on z >= 0: -mu log z above delta, the
+        quadratic extension below it (value and slope continuous at delta).
+        Returns (value, d/dz, d2/dz2) arrays. z may be +inf (no bound): zero."""
+        z = np.asarray(z, dtype=np.float64)
+        val = np.zeros_like(z); d1 = np.zeros_like(z); d2 = np.zeros_like(z)
+        finite = np.isfinite(z)
+        above = finite & (z > delta)
+        below = finite & ~(z > delta)
+        val[above] = -mu * np.log(z[above])
+        d1[above] = -mu / z[above]
+        d2[above] = mu / (z[above] ** 2)
+        t = (z[below] - 2.0 * delta) / delta
+        val[below] = mu * (0.5 * t * t - 0.5 - np.log(delta))
+        d1[below] = mu * t / delta
+        d2[below] = mu / (delta * delta) * np.ones_like(t)
+        return val, d1, d2
+
+    @staticmethod
+    def _activation(kind, W, r, eps, v=None, lo=None, hi=None):
         """Per-entry activation a(r; w, eps) with its first and second derivatives.
 
         kind 0 (quadratic): a = 1/2 w r^2, a' = w r, a'' = w.
         kind 1 (pseudo-Huber): a = w (sqrt(r^2 + eps^2) - eps), a' = w r / s,
         a'' = w eps^2 / s^3 with s = sqrt(r^2 + eps^2); eps must be positive.
-        Returns (value (M,), slope (M,), curvature (M,)).
+        kind 2 (relaxed log barrier): on the feature value v in [lo, hi], with
+        w = mu and eps = delta: B(v - lo) + B(hi - v) where B is -mu log z above
+        delta and its quadratic extension below; an infinite bound is zero.
+        kind 3 (quadratic barrier): 1/2 w (max(0, lo - v)^2 + max(0, v - hi)^2).
+        The barrier kinds read v, lo, hi; r is the residual the other kinds use.
+        Returns (value (M,), slope (M,), curvature (M,)), the derivatives with
+        respect to r (equal to those with respect to v: v = r + target).
         """
         W = np.asarray(W, dtype=np.float64).reshape(-1)
         r = np.asarray(r, dtype=np.float64).reshape(-1)
@@ -427,33 +461,447 @@ class _PlantMixin:
                 raise ValueError("the pseudo-Huber activation needs eps > 0")
             s = np.sqrt(r * r + eps * eps)
             return W * (s - eps), W * r / s, W * eps * eps / (s * s * s)
+        if kind in (_PlantMixin.ACTIVATION_RELAXED_LOG_BARRIER, _PlantMixin.ACTIVATION_QUADRATIC_BARRIER):
+            if v is None or lo is None or hi is None:
+                raise ValueError("barrier activations need the feature value v and the bounds lo, hi")
+            v = np.asarray(v, dtype=np.float64).reshape(-1)
+            lo = np.asarray(lo, dtype=np.float64).reshape(-1)
+            hi = np.asarray(hi, dtype=np.float64).reshape(-1)
+            if kind == _PlantMixin.ACTIVATION_QUADRATIC_BARRIER:
+                below = np.where(np.isfinite(lo), np.maximum(0.0, lo - v), 0.0)
+                above = np.where(np.isfinite(hi), np.maximum(0.0, v - hi), 0.0)
+                value = 0.5 * W * (below * below + above * above)
+                slope = W * (above - below)
+                curv = W * ((below > 0) | (above > 0)).astype(np.float64)
+                return value, slope, curv
+            delta = float(eps)
+            if not delta > 0.0:
+                raise ValueError("the relaxed log barrier needs delta = eps > 0")
+            value = np.zeros_like(r); slope = np.zeros_like(r); curv = np.zeros_like(r)
+            for k in range(r.size):
+                mu = W[k]
+                if np.isfinite(lo[k]):
+                    val, d1, d2 = _PlantMixin._relaxed_log_barrier_1d(np.array([v[k] - lo[k]]), mu, delta)
+                    value[k] += val[0]; slope[k] += d1[0]; curv[k] += d2[0]
+                if np.isfinite(hi[k]):
+                    val, d1, d2 = _PlantMixin._relaxed_log_barrier_1d(np.array([hi[k] - v[k]]), mu, delta)
+                    value[k] += val[0]; slope[k] -= d1[0]; curv[k] += d2[0]
+            return value, slope, curv
         raise ValueError(f"unknown activation kind {kind!r}")
 
+    @staticmethod
+    def _skew3(v):
+        return np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
+
+    @staticmethod
+    def _so3_log(R):
+        """phi = log(R) on the canonical branch |phi| <= pi (3-vector)."""
+        R = np.asarray(R, dtype=np.float64)
+        c = np.clip((np.trace(R) - 1.0) * 0.5, -1.0, 1.0)
+        theta = np.arccos(c)
+        w = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+        if theta < 1e-6:
+            return 0.5 * w
+        if theta < np.pi - 1e-4:
+            return theta / (2.0 * np.sin(theta)) * w
+        # near pi: axis from the symmetric part (R + I)/2 = a a^T, sign from w
+        S = 0.5 * (R + np.eye(3))
+        k = int(np.argmax(np.diag(S)))
+        a = S[:, k] / np.sqrt(max(S[k, k], 1e-18))
+        a = a / np.linalg.norm(a)
+        if np.dot(a, w) < 0.0:
+            a = -a
+        return theta * a
+
+    @staticmethod
+    def _so3_right_jacobian_inv(phi):
+        """Jr(phi)^-1 = I + 1/2 [phi]x + (1/theta^2 - (1 + cos theta)/(2 theta sin theta)) [phi]x^2."""
+        phi = np.asarray(phi, dtype=np.float64)
+        theta = np.linalg.norm(phi)
+        S = _PlantMixin._skew3(phi)
+        if theta < 1e-5:
+            coef = 1.0 / 12.0
+        else:
+            coef = 1.0 / (theta * theta) - (1.0 + np.cos(theta)) / (2.0 * theta * np.sin(theta))
+        return np.eye(3) + 0.5 * S + coef * (S @ S)
+
+    def _frame_placement(self, q, frame_name):
+        """(R_f, p_f, target_id) of a named articulated or fixed joint frame, the
+        fixed joint's offset included (the frame_jacobian resolution)."""
+        Xw, _ = self._frame_world_placement_and_chain(q)
+        target_id, X_off = self._resolve_frame_joint(frame_name)
+        if target_id == -1:
+            X = X_off
+        else:
+            X = Xw[target_id] @ X_off
+        return X[:3, :3], X[:3, 3], target_id
+
+    def frame_position_cost(self, q, frame_name, p_des, W, activation=0, eps=0.0, lo=None, hi=None):
+        """Position residual r = p_f(q) - p_des of a named frame under an activation.
+        Returns (value, grad_x (nx,) = [J_p^T a'(r); 0], GN hess_x (nx, nx))."""
+        nq = self.robot.get_num_pos(); nv = self.robot.get_num_vel(); nx = nq + nv
+        R_f, p_f, _ = self._frame_placement(q, frame_name)
+        Jp = np.asarray(self.frame_jacobian(q, frame_name, "LOCAL_WORLD_ALIGNED"))[:3, :]
+        value, slope, curv = self._activation(activation, W, p_f - np.asarray(p_des, dtype=np.float64).reshape(-1), eps, p_f, lo, hi)
+        grad_x = np.zeros(nx); grad_x[:nv] = Jp.T @ slope
+        hess_x = np.zeros((nx, nx)); hess_x[:nv, :nv] = Jp.T @ (curv[:, None] * Jp)
+        return float(np.sum(value)), grad_x, hess_x
+
+    def frame_orientation_cost(self, q, frame_name, R_des, W, activation=0, eps=0.0):
+        """Log-map orientation residual e = log(R_des^T R_f(q)) (3-vector) under an
+        activation. With the frame's body-axes angular Jacobian J_w (LOCAL rows 3..5)
+        the residual Jacobian is J_e = Jr(e)^-1 J_w. Returns (value, grad_x, GN hess_x)."""
+        nq = self.robot.get_num_pos(); nv = self.robot.get_num_vel(); nx = nq + nv
+        R_f, _, _ = self._frame_placement(q, frame_name)
+        R_des = np.asarray(R_des, dtype=np.float64).reshape(3, 3, order="F")
+        e = self._so3_log(R_des.T @ R_f)
+        Jw = np.asarray(self.frame_jacobian(q, frame_name, "LOCAL"))[3:, :]
+        Je = self._so3_right_jacobian_inv(e) @ Jw
+        value, slope, curv = self._activation(activation, W, e, eps)
+        grad_x = np.zeros(nx); grad_x[:nv] = Je.T @ slope
+        hess_x = np.zeros((nx, nx)); hess_x[:nv, :nv] = Je.T @ (curv[:, None] * Je)
+        return float(np.sum(value)), grad_x, hess_x
+
+    def _frame_velocity_q_derivative(self, q, qd, frame_name):
+        """d(J(q) qd)/dq for the LOCAL_WORLD_ALIGNED frame Jacobian (6 x nv), from
+        the same world-axis column construction frame_jacobian uses. Fixed base."""
+        if self.robot.floating_base:
+            raise NotImplementedError("frame velocity residual: fixed base only in this release")
+        nv = self.robot.get_num_vel()
+        Xw, _ = self._frame_world_placement_and_chain(q)
+        target_id, X_off = self._resolve_frame_joint(frame_name)
+        p_f = (Xw[target_id] @ X_off)[:3, 3]
+        chain = sorted(self.robot.get_ancestors_by_id(target_id)) + [target_id]
+
+        def column_info(j):
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            R_j = Xw[j][:3, :3]; p_j = Xw[j][:3, 3]
+            inds = self.robot.get_joint_index_v(j)
+            inds = list(inds) if isinstance(inds, (list, tuple, np.ndarray)) else [inds]
+            joint = self.robot.get_joint_by_id(j)
+            scale = joint.get_mimic_multiplier() if getattr(joint, "is_mimic", False) else 1.0
+            out = []
+            for c in range(S.shape[1]):
+                vi = inds[c] if c < len(inds) else inds[-1]
+                rot = np.linalg.norm(S[:3, c]) > 0.5
+                axis = R_j @ (S[:3, c] if rot else S[3:6, c])
+                out.append((vi, rot, axis, p_j, scale))
+            return out
+
+        cols = {j: column_info(j) for j in chain}
+        dJqd = np.zeros((6, nv))
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        # Column j is a_j x (p_f - p_j) (revolute) or l_j (prismatic) over its axis
+        # a_j / l_j and origin p_j. A joint m moves, rigidly, everything downstream
+        # of it: for m an ancestor-or-self of j that is the axis, the origin and the
+        # frame point; for m downstream of j only the frame point p_f moves.
+        for j in chain:
+            for (vi, rot, a_j, p_j, s_j) in cols[j]:
+                w = s_j * qd[vi]
+                for m in chain:
+                    for (vm, rot_m, a_m, p_m, s_m) in cols[m]:
+                        if m <= j:
+                            if rot and rot_m:
+                                d_axis = np.cross(a_m, a_j)
+                                d_lin = np.cross(d_axis, p_f - p_j) + np.cross(a_j, np.cross(a_m, p_f - p_j))
+                                dJqd[:3, vm] += s_m * w * d_lin
+                                dJqd[3:, vm] += s_m * w * d_axis
+                            elif (not rot) and rot_m:
+                                dJqd[:3, vm] += s_m * w * np.cross(a_m, a_j)
+                            # a prismatic m shifts the frame and the joint origins together: no change
+                        elif rot:
+                            # m downstream of j: only p_f moves, by a_m x (p_f - p_m) or l_m
+                            d_pf = np.cross(a_m, p_f - p_m) if rot_m else a_m
+                            dJqd[:3, vm] += s_m * w * np.cross(a_j, d_pf)
+        return dJqd
+
+    def frame_velocity_cost(self, q, qd, frame_name, v_des, W, activation=0, eps=0.0, lo=None, hi=None):
+        """Frame velocity residual r = J(q) qd - v_des over the LOCAL_WORLD_ALIGNED
+        twist [linear; angular] (6) under an activation. The residual Jacobian over
+        x = [q; qd] is [d(J qd)/dq | J]. Returns (value, grad_x (nx,), GN hess_x)."""
+        nq = self.robot.get_num_pos(); nv = self.robot.get_num_vel(); nx = nq + nv
+        J = np.asarray(self.frame_jacobian(q, frame_name, "LOCAL_WORLD_ALIGNED"))
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        r = J @ qd - np.asarray(v_des, dtype=np.float64).reshape(-1)
+        Jx = np.hstack([self._frame_velocity_q_derivative(q, qd, frame_name), J])
+        value, slope, curv = self._activation(activation, W, r, eps, J @ qd, lo, hi)
+        return float(np.sum(value)), Jx.T @ slope, Jx.T @ (curv[:, None] * Jx)
+
     @classmethod
-    def _activated_cost(cls, var, des, W, activation, eps):
+    def _activated_cost(cls, var, des, W, activation, eps, lo=None, hi=None):
         var = np.asarray(var, dtype=np.float64).reshape(-1)
         des = np.asarray(des, dtype=np.float64).reshape(-1)
-        value, slope, curv = cls._activation(activation, W, var - des, eps)
+        value, slope, curv = cls._activation(activation, W, var - des, eps, var, lo, hi)
         return float(np.sum(value)), slope, np.diag(curv)
 
-    def state_cost(self, x, x_des, Q, activation=0, eps=0.0):
+    def state_cost(self, x, x_des, Q, activation=0, eps=0.0, lo=None, hi=None):
         """sum_i a(x_i - x_des_i; Q_i, eps) over x = [q; qd]. The quadratic
-        activation is quadratic_state_cost. Returns (value, grad (nx,), GN hess (nx, nx))."""
-        return self._activated_cost(x, x_des, Q, activation, eps)
+        activation is quadratic_state_cost; lo / hi are the barrier bounds on x.
+        Returns (value, grad (nx,), GN hess (nx, nx))."""
+        return self._activated_cost(x, x_des, Q, activation, eps, lo, hi)
 
-    def input_cost(self, u, u_des, R, activation=0, eps=0.0):
+    def input_cost(self, u, u_des, R, activation=0, eps=0.0, lo=None, hi=None):
         """sum_i a(u_i - u_des_i; R_i, eps). Returns (value, grad (nu,), GN hess (nu, nu))."""
-        return self._activated_cost(u, u_des, R, activation, eps)
+        return self._activated_cost(u, u_des, R, activation, eps, lo, hi)
 
-    def linear_feature_cost(self, v, A, b, target, W, activation=0, eps=0.0):
-        """sum_m a(r_m; W_m, eps) with r = A v + b - target, A of shape (M, N).
+    def linear_feature_cost(self, v, A, b, target, W, activation=0, eps=0.0, lo=None, hi=None):
+        """sum_m a(r_m; W_m, eps) with r = A v + b - target, A of shape (M, N); lo / hi
+        are barrier bounds on the feature value A v + b.
 
         Returns (value, grad (N,) = A^T a'(r), GN hess (N, N) = A^T diag(a''(r)) A).
         """
         A = np.asarray(A, dtype=np.float64)
         v = np.asarray(v, dtype=np.float64).reshape(-1)
-        r = A @ v + np.asarray(b, dtype=np.float64).reshape(-1) - np.asarray(target, dtype=np.float64).reshape(-1)
-        value, slope, curv = self._activation(activation, W, r, eps)
+        f = A @ v + np.asarray(b, dtype=np.float64).reshape(-1)
+        r = f - np.asarray(target, dtype=np.float64).reshape(-1)
+        value, slope, curv = self._activation(activation, W, r, eps, f, lo, hi)
+        return float(np.sum(value)), A.T @ slope, A.T @ (curv[:, None] * A)
+
+    ACTIVATION_RELAXED_LOG_BARRIER = 2
+    ACTIVATION_QUADRATIC_BARRIER = 3
+
+    @staticmethod
+    def _relaxed_log_barrier_1d(z, mu, delta):
+        """Grandia et al. relaxed log barrier on z >= 0: -mu log z above delta, the
+        quadratic extension below it (value and slope continuous at delta).
+        Returns (value, d/dz, d2/dz2) arrays. z may be +inf (no bound): zero."""
+        z = np.asarray(z, dtype=np.float64)
+        val = np.zeros_like(z); d1 = np.zeros_like(z); d2 = np.zeros_like(z)
+        finite = np.isfinite(z)
+        above = finite & (z > delta)
+        below = finite & ~(z > delta)
+        val[above] = -mu * np.log(z[above])
+        d1[above] = -mu / z[above]
+        d2[above] = mu / (z[above] ** 2)
+        t = (z[below] - 2.0 * delta) / delta
+        val[below] = mu * (0.5 * t * t - 0.5 - np.log(delta))
+        d1[below] = mu * t / delta
+        d2[below] = mu / (delta * delta) * np.ones_like(t)
+        return val, d1, d2
+
+    @staticmethod
+    def _activation(kind, W, r, eps, v=None, lo=None, hi=None):
+        """Per-entry activation a(r; w, eps) with its first and second derivatives.
+
+        kind 0 (quadratic): a = 1/2 w r^2, a' = w r, a'' = w.
+        kind 1 (pseudo-Huber): a = w (sqrt(r^2 + eps^2) - eps), a' = w r / s,
+        a'' = w eps^2 / s^3 with s = sqrt(r^2 + eps^2); eps must be positive.
+        kind 2 (relaxed log barrier): on the feature value v in [lo, hi], with
+        w = mu and eps = delta: B(v - lo) + B(hi - v) where B is -mu log z above
+        delta and its quadratic extension below; an infinite bound is zero.
+        kind 3 (quadratic barrier): 1/2 w (max(0, lo - v)^2 + max(0, v - hi)^2).
+        The barrier kinds read v, lo, hi; r is the residual the other kinds use.
+        Returns (value (M,), slope (M,), curvature (M,)), the derivatives with
+        respect to r (equal to those with respect to v: v = r + target).
+        """
+        W = np.asarray(W, dtype=np.float64).reshape(-1)
+        r = np.asarray(r, dtype=np.float64).reshape(-1)
+        if kind == _PlantMixin.ACTIVATION_QUADRATIC:
+            return 0.5 * W * r * r, W * r, W.copy()
+        if kind == _PlantMixin.ACTIVATION_PSEUDO_HUBER:
+            eps = float(eps)
+            if not eps > 0.0:
+                raise ValueError("the pseudo-Huber activation needs eps > 0")
+            s = np.sqrt(r * r + eps * eps)
+            return W * (s - eps), W * r / s, W * eps * eps / (s * s * s)
+        if kind in (_PlantMixin.ACTIVATION_RELAXED_LOG_BARRIER, _PlantMixin.ACTIVATION_QUADRATIC_BARRIER):
+            if v is None or lo is None or hi is None:
+                raise ValueError("barrier activations need the feature value v and the bounds lo, hi")
+            v = np.asarray(v, dtype=np.float64).reshape(-1)
+            lo = np.asarray(lo, dtype=np.float64).reshape(-1)
+            hi = np.asarray(hi, dtype=np.float64).reshape(-1)
+            if kind == _PlantMixin.ACTIVATION_QUADRATIC_BARRIER:
+                below = np.where(np.isfinite(lo), np.maximum(0.0, lo - v), 0.0)
+                above = np.where(np.isfinite(hi), np.maximum(0.0, v - hi), 0.0)
+                value = 0.5 * W * (below * below + above * above)
+                slope = W * (above - below)
+                curv = W * ((below > 0) | (above > 0)).astype(np.float64)
+                return value, slope, curv
+            delta = float(eps)
+            if not delta > 0.0:
+                raise ValueError("the relaxed log barrier needs delta = eps > 0")
+            value = np.zeros_like(r); slope = np.zeros_like(r); curv = np.zeros_like(r)
+            for k in range(r.size):
+                mu = W[k]
+                if np.isfinite(lo[k]):
+                    val, d1, d2 = _PlantMixin._relaxed_log_barrier_1d(np.array([v[k] - lo[k]]), mu, delta)
+                    value[k] += val[0]; slope[k] += d1[0]; curv[k] += d2[0]
+                if np.isfinite(hi[k]):
+                    val, d1, d2 = _PlantMixin._relaxed_log_barrier_1d(np.array([hi[k] - v[k]]), mu, delta)
+                    value[k] += val[0]; slope[k] -= d1[0]; curv[k] += d2[0]
+            return value, slope, curv
+        raise ValueError(f"unknown activation kind {kind!r}")
+
+    @staticmethod
+    def _skew3(v):
+        return np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
+
+    @staticmethod
+    def _so3_log(R):
+        """phi = log(R) on the canonical branch |phi| <= pi (3-vector)."""
+        R = np.asarray(R, dtype=np.float64)
+        c = np.clip((np.trace(R) - 1.0) * 0.5, -1.0, 1.0)
+        theta = np.arccos(c)
+        w = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+        if theta < 1e-6:
+            return 0.5 * w
+        if theta < np.pi - 1e-4:
+            return theta / (2.0 * np.sin(theta)) * w
+        # near pi: axis from the symmetric part (R + I)/2 = a a^T, sign from w
+        S = 0.5 * (R + np.eye(3))
+        k = int(np.argmax(np.diag(S)))
+        a = S[:, k] / np.sqrt(max(S[k, k], 1e-18))
+        a = a / np.linalg.norm(a)
+        if np.dot(a, w) < 0.0:
+            a = -a
+        return theta * a
+
+    @staticmethod
+    def _so3_right_jacobian_inv(phi):
+        """Jr(phi)^-1 = I + 1/2 [phi]x + (1/theta^2 - (1 + cos theta)/(2 theta sin theta)) [phi]x^2."""
+        phi = np.asarray(phi, dtype=np.float64)
+        theta = np.linalg.norm(phi)
+        S = _PlantMixin._skew3(phi)
+        if theta < 1e-5:
+            coef = 1.0 / 12.0
+        else:
+            coef = 1.0 / (theta * theta) - (1.0 + np.cos(theta)) / (2.0 * theta * np.sin(theta))
+        return np.eye(3) + 0.5 * S + coef * (S @ S)
+
+    def _frame_placement(self, q, frame_name):
+        """(R_f, p_f, target_id) of a named articulated or fixed joint frame, the
+        fixed joint's offset included (the frame_jacobian resolution)."""
+        Xw, _ = self._frame_world_placement_and_chain(q)
+        target_id, X_off = self._resolve_frame_joint(frame_name)
+        if target_id == -1:
+            X = X_off
+        else:
+            X = Xw[target_id] @ X_off
+        return X[:3, :3], X[:3, 3], target_id
+
+    def frame_position_cost(self, q, frame_name, p_des, W, activation=0, eps=0.0, lo=None, hi=None):
+        """Position residual r = p_f(q) - p_des of a named frame under an activation.
+        Returns (value, grad_x (nx,) = [J_p^T a'(r); 0], GN hess_x (nx, nx))."""
+        nq = self.robot.get_num_pos(); nv = self.robot.get_num_vel(); nx = nq + nv
+        R_f, p_f, _ = self._frame_placement(q, frame_name)
+        Jp = np.asarray(self.frame_jacobian(q, frame_name, "LOCAL_WORLD_ALIGNED"))[:3, :]
+        value, slope, curv = self._activation(activation, W, p_f - np.asarray(p_des, dtype=np.float64).reshape(-1), eps, p_f, lo, hi)
+        grad_x = np.zeros(nx); grad_x[:nv] = Jp.T @ slope
+        hess_x = np.zeros((nx, nx)); hess_x[:nv, :nv] = Jp.T @ (curv[:, None] * Jp)
+        return float(np.sum(value)), grad_x, hess_x
+
+    def frame_orientation_cost(self, q, frame_name, R_des, W, activation=0, eps=0.0):
+        """Log-map orientation residual e = log(R_des^T R_f(q)) (3-vector) under an
+        activation. With the frame's body-axes angular Jacobian J_w (LOCAL rows 3..5)
+        the residual Jacobian is J_e = Jr(e)^-1 J_w. Returns (value, grad_x, GN hess_x)."""
+        nq = self.robot.get_num_pos(); nv = self.robot.get_num_vel(); nx = nq + nv
+        R_f, _, _ = self._frame_placement(q, frame_name)
+        R_des = np.asarray(R_des, dtype=np.float64).reshape(3, 3, order="F")
+        e = self._so3_log(R_des.T @ R_f)
+        Jw = np.asarray(self.frame_jacobian(q, frame_name, "LOCAL"))[3:, :]
+        Je = self._so3_right_jacobian_inv(e) @ Jw
+        value, slope, curv = self._activation(activation, W, e, eps)
+        grad_x = np.zeros(nx); grad_x[:nv] = Je.T @ slope
+        hess_x = np.zeros((nx, nx)); hess_x[:nv, :nv] = Je.T @ (curv[:, None] * Je)
+        return float(np.sum(value)), grad_x, hess_x
+
+    def _frame_velocity_q_derivative(self, q, qd, frame_name):
+        """d(J(q) qd)/dq for the LOCAL_WORLD_ALIGNED frame Jacobian (6 x nv), from
+        the same world-axis column construction frame_jacobian uses. Fixed base."""
+        if self.robot.floating_base:
+            raise NotImplementedError("frame velocity residual: fixed base only in this release")
+        nv = self.robot.get_num_vel()
+        Xw, _ = self._frame_world_placement_and_chain(q)
+        target_id, X_off = self._resolve_frame_joint(frame_name)
+        p_f = (Xw[target_id] @ X_off)[:3, 3]
+        chain = sorted(self.robot.get_ancestors_by_id(target_id)) + [target_id]
+
+        def column_info(j):
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            R_j = Xw[j][:3, :3]; p_j = Xw[j][:3, 3]
+            inds = self.robot.get_joint_index_v(j)
+            inds = list(inds) if isinstance(inds, (list, tuple, np.ndarray)) else [inds]
+            joint = self.robot.get_joint_by_id(j)
+            scale = joint.get_mimic_multiplier() if getattr(joint, "is_mimic", False) else 1.0
+            out = []
+            for c in range(S.shape[1]):
+                vi = inds[c] if c < len(inds) else inds[-1]
+                rot = np.linalg.norm(S[:3, c]) > 0.5
+                axis = R_j @ (S[:3, c] if rot else S[3:6, c])
+                out.append((vi, rot, axis, p_j, scale))
+            return out
+
+        cols = {j: column_info(j) for j in chain}
+        dJqd = np.zeros((6, nv))
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        # Column j is a_j x (p_f - p_j) (revolute) or l_j (prismatic) over its axis
+        # a_j / l_j and origin p_j. A joint m moves, rigidly, everything downstream
+        # of it: for m an ancestor-or-self of j that is the axis, the origin and the
+        # frame point; for m downstream of j only the frame point p_f moves.
+        for j in chain:
+            for (vi, rot, a_j, p_j, s_j) in cols[j]:
+                w = s_j * qd[vi]
+                for m in chain:
+                    for (vm, rot_m, a_m, p_m, s_m) in cols[m]:
+                        if m <= j:
+                            if rot and rot_m:
+                                d_axis = np.cross(a_m, a_j)
+                                d_lin = np.cross(d_axis, p_f - p_j) + np.cross(a_j, np.cross(a_m, p_f - p_j))
+                                dJqd[:3, vm] += s_m * w * d_lin
+                                dJqd[3:, vm] += s_m * w * d_axis
+                            elif (not rot) and rot_m:
+                                dJqd[:3, vm] += s_m * w * np.cross(a_m, a_j)
+                            # a prismatic m shifts the frame and the joint origins together: no change
+                        elif rot:
+                            # m downstream of j: only p_f moves, by a_m x (p_f - p_m) or l_m
+                            d_pf = np.cross(a_m, p_f - p_m) if rot_m else a_m
+                            dJqd[:3, vm] += s_m * w * np.cross(a_j, d_pf)
+        return dJqd
+
+    def frame_velocity_cost(self, q, qd, frame_name, v_des, W, activation=0, eps=0.0, lo=None, hi=None):
+        """Frame velocity residual r = J(q) qd - v_des over the LOCAL_WORLD_ALIGNED
+        twist [linear; angular] (6) under an activation. The residual Jacobian over
+        x = [q; qd] is [d(J qd)/dq | J]. Returns (value, grad_x (nx,), GN hess_x)."""
+        nq = self.robot.get_num_pos(); nv = self.robot.get_num_vel(); nx = nq + nv
+        J = np.asarray(self.frame_jacobian(q, frame_name, "LOCAL_WORLD_ALIGNED"))
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        r = J @ qd - np.asarray(v_des, dtype=np.float64).reshape(-1)
+        Jx = np.hstack([self._frame_velocity_q_derivative(q, qd, frame_name), J])
+        value, slope, curv = self._activation(activation, W, r, eps, J @ qd, lo, hi)
+        return float(np.sum(value)), Jx.T @ slope, Jx.T @ (curv[:, None] * Jx)
+
+    @classmethod
+    def _activated_cost(cls, var, des, W, activation, eps, lo=None, hi=None):
+        var = np.asarray(var, dtype=np.float64).reshape(-1)
+        des = np.asarray(des, dtype=np.float64).reshape(-1)
+        value, slope, curv = cls._activation(activation, W, var - des, eps, var, lo, hi)
+        return float(np.sum(value)), slope, np.diag(curv)
+
+    def state_cost(self, x, x_des, Q, activation=0, eps=0.0, lo=None, hi=None):
+        """sum_i a(x_i - x_des_i; Q_i, eps) over x = [q; qd]. The quadratic
+        activation is quadratic_state_cost; lo / hi are the barrier bounds on x.
+        Returns (value, grad (nx,), GN hess (nx, nx))."""
+        return self._activated_cost(x, x_des, Q, activation, eps, lo, hi)
+
+    def input_cost(self, u, u_des, R, activation=0, eps=0.0, lo=None, hi=None):
+        """sum_i a(u_i - u_des_i; R_i, eps). Returns (value, grad (nu,), GN hess (nu, nu))."""
+        return self._activated_cost(u, u_des, R, activation, eps, lo, hi)
+
+    def linear_feature_cost(self, v, A, b, target, W, activation=0, eps=0.0, lo=None, hi=None):
+        """sum_m a(r_m; W_m, eps) with r = A v + b - target, A of shape (M, N); lo / hi
+        are barrier bounds on the feature value A v + b.
+
+        Returns (value, grad (N,) = A^T a'(r), GN hess (N, N) = A^T diag(a''(r)) A).
+        """
+        A = np.asarray(A, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64).reshape(-1)
+        f = A @ v + np.asarray(b, dtype=np.float64).reshape(-1)
+        r = f - np.asarray(target, dtype=np.float64).reshape(-1)
+        value, slope, curv = self._activation(activation, W, r, eps, f, lo, hi)
         return float(np.sum(value)), A.T @ slope, A.T @ (curv[:, None] * A)
 
     def ee_pos_cost_activated(self, q, p_des, W, activation=0, eps=0.0, ee=0):
