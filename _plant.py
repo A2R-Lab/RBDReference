@@ -403,6 +403,79 @@ class _PlantMixin:
         hess_x[:nv, :nv] = Jp.T @ (W[:, None] * Jp)  # J_p^T diag(W) J_p
         return value, grad_x, hess_x
 
+    # ----- cost menu, phase one: activations, activated terms, linear feature -----
+
+    ACTIVATION_QUADRATIC = 0
+    ACTIVATION_PSEUDO_HUBER = 1
+
+    @staticmethod
+    def _activation(kind, W, r, eps):
+        """Per-entry activation a(r; w, eps) with its first and second derivatives.
+
+        kind 0 (quadratic): a = 1/2 w r^2, a' = w r, a'' = w.
+        kind 1 (pseudo-Huber): a = w (sqrt(r^2 + eps^2) - eps), a' = w r / s,
+        a'' = w eps^2 / s^3 with s = sqrt(r^2 + eps^2); eps must be positive.
+        Returns (value (M,), slope (M,), curvature (M,)).
+        """
+        W = np.asarray(W, dtype=np.float64).reshape(-1)
+        r = np.asarray(r, dtype=np.float64).reshape(-1)
+        if kind == _PlantMixin.ACTIVATION_QUADRATIC:
+            return 0.5 * W * r * r, W * r, W.copy()
+        if kind == _PlantMixin.ACTIVATION_PSEUDO_HUBER:
+            eps = float(eps)
+            if not eps > 0.0:
+                raise ValueError("the pseudo-Huber activation needs eps > 0")
+            s = np.sqrt(r * r + eps * eps)
+            return W * (s - eps), W * r / s, W * eps * eps / (s * s * s)
+        raise ValueError(f"unknown activation kind {kind!r}")
+
+    @classmethod
+    def _activated_cost(cls, var, des, W, activation, eps):
+        var = np.asarray(var, dtype=np.float64).reshape(-1)
+        des = np.asarray(des, dtype=np.float64).reshape(-1)
+        value, slope, curv = cls._activation(activation, W, var - des, eps)
+        return float(np.sum(value)), slope, np.diag(curv)
+
+    def state_cost(self, x, x_des, Q, activation=0, eps=0.0):
+        """sum_i a(x_i - x_des_i; Q_i, eps) over x = [q; qd]. The quadratic
+        activation is quadratic_state_cost. Returns (value, grad (nx,), GN hess (nx, nx))."""
+        return self._activated_cost(x, x_des, Q, activation, eps)
+
+    def input_cost(self, u, u_des, R, activation=0, eps=0.0):
+        """sum_i a(u_i - u_des_i; R_i, eps). Returns (value, grad (nu,), GN hess (nu, nu))."""
+        return self._activated_cost(u, u_des, R, activation, eps)
+
+    def linear_feature_cost(self, v, A, b, target, W, activation=0, eps=0.0):
+        """sum_m a(r_m; W_m, eps) with r = A v + b - target, A of shape (M, N).
+
+        Returns (value, grad (N,) = A^T a'(r), GN hess (N, N) = A^T diag(a''(r)) A).
+        """
+        A = np.asarray(A, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64).reshape(-1)
+        r = A @ v + np.asarray(b, dtype=np.float64).reshape(-1) - np.asarray(target, dtype=np.float64).reshape(-1)
+        value, slope, curv = self._activation(activation, W, r, eps)
+        return float(np.sum(value)), A.T @ slope, A.T @ (curv[:, None] * A)
+
+    def ee_pos_cost_activated(self, q, p_des, W, activation=0, eps=0.0, ee=0):
+        """End-effector position residual r = p(q) - p_des under an activation.
+
+        Returns (value, grad_x (nx,) = [J_p^T a'(r); 0], GN hess_x (nx, nx) with the
+        q-block J_p^T diag(a''(r)) J_p). The quadratic activation is ee_pos_cost.
+        """
+        nq = self.robot.get_num_pos()
+        nv = self.robot.get_num_vel()
+        nx = nq + nv
+        target = self._ee_target_name(ee)
+        p_des = np.asarray(p_des, dtype=np.float64).reshape(-1)
+        pose = np.asarray(self.end_effector_pose(q, ee_joint_names=target)[0], dtype=np.float64).reshape(-1)
+        Jp = np.asarray(self.end_effector_pose_gradient(q, ee_joint_names=target)[0], dtype=np.float64)[:3, :]
+        value, slope, curv = self._activation(activation, W, pose[:3] - p_des, eps)
+        grad_x = np.zeros(nx, dtype=np.float64)
+        grad_x[:nv] = Jp.T @ slope
+        hess_x = np.zeros((nx, nx), dtype=np.float64)
+        hess_x[:nv, :nv] = Jp.T @ (curv[:, None] * Jp)
+        return float(np.sum(value)), grad_x, hess_x
+
     # ----- CoM-tracking cost (value, grad_x, GN hess_x) -----
 
     def com_cost(self, q, p_des, W):
