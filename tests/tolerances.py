@@ -19,6 +19,16 @@ ALGORITHM_TOLERANCES = {
     "inverse_dynamics": DEFAULT_TOLERANCE,
     "minv": DEFAULT_TOLERANCE,
     "aba": DEFAULT_TOLERANCE,
+    "inverse_dynamics_gradient": Tolerance(
+        rtol=1e-7,
+        atol=1e-9,
+        note="First-order inverse-dynamics gradients (dtau/dq, dtau/dqd) are analytic on both sides and hold to the primary first-order bucket; before 2026-10-20 this key existed only as the gen3 override, so every other robot compared under the default bucket with the same values.",
+    ),
+    "forward_dynamics": Tolerance(
+        rtol=1e-7,
+        atol=1e-9,
+        note="Forward dynamics composes the verified inverse dynamics and Minv (or ABA), so it holds to the primary first-order bucket; the robots whose inverse-dynamics bucket is widened by continuous-joint or integrator round-off carry the same widening here.",
+    ),
     "pose_gradient": Tolerance(
         rtol=1e-6,
         atol=1e-8,
@@ -87,6 +97,11 @@ ROBOT_ALGORITHM_TOLERANCES = {
         atol=5e-9,
         note="Baxter fixed-base ABA agrees with Pinocchio to within a few nanounits; this narrowly scoped absolute tolerance avoids failing on near-zero residuals.",
     ),
+    ("h1_2", "forward_dynamics"): Tolerance(
+        rtol=3e-4,
+        atol=3e-6,
+        note="Mirror of the h1_2 inverse_dynamics bucket (2026-10-20): forward dynamics on h1_2 was checked under that bucket before the forward_dynamics key existed, so the allowance is unchanged. See that note.",
+    ),
     ("h1_2", "inverse_dynamics"): Tolerance(
         rtol=3e-4,
         atol=3e-6,
@@ -117,6 +132,11 @@ ROBOT_ALGORITHM_TOLERANCES = {
         rtol=5e-4,
         atol=5e-5,
         note="gen3 continuous-joint RUBZ cross-library round-off; this bucket also fronts the kinematics-pose, forward-dynamics-gradient and integrator equivalence checks (worst ~2.4e-4 relative on the high-energy samples). The integrator q-residual is compared against EXACT ZEROS (scale=0, so only atol applies) and carries continuous-joint tangent-space round-off up to ~2e-5 on the semi_implicit_euler step (q += dt*(v + dt*qdd) folds in the velocity update's round-off), so the absolute floor is 5e-5 (a structural integration error would be O(dt*|qdd|), orders of magnitude larger). See the gen3 round-off block comment.",
+    ),
+    ("gen3", "forward_dynamics"): Tolerance(
+        rtol=5e-4,
+        atol=5e-5,
+        note="Mirror of the gen3 inverse_dynamics bucket (2026-10-20): forward dynamics and ABA on gen3 were checked under that bucket before the forward_dynamics key existed. Measured with external forces on every dynamics sample: the project and pinocchio differ by 8.2e-3 absolute at output scale 2.4e3 (fixed) and 6.6e3 (floating), 1.2e-6 to 3.4e-6 relative to scale; without forces the residual is the same class. See the gen3 round-off block comment.",
     ),
     ("gen3", "inverse_dynamics_gradient"): Tolerance(
         rtol=5e-4,
@@ -176,8 +196,30 @@ ROBOT_ALGORITHM_TOLERANCES = {
 }
 
 def get_tolerance(algorithm: str, robot_id: str | None = None) -> Tolerance:
+    """The bucket for ``algorithm``, with the per-robot override when one exists.
+
+    An unknown algorithm key is an error, never the default bucket: GRiD's CUDA
+    equivalence modules passed keys this table did not have ("forward_dynamics",
+    "f_ext_grad", "fd") and silently compared under the 1e-7 default, which made
+    gen3's continuous-joint round-off look like a failure (2026-10-20).
+    """
+    if algorithm not in ALGORITHM_TOLERANCES:
+        raise KeyError(
+            f"unknown tolerance algorithm {algorithm!r}; known keys: "
+            + ", ".join(sorted(ALGORITHM_TOLERANCES))
+        )
     if robot_id is not None:
         override = ROBOT_ALGORITHM_TOLERANCES.get((robot_id, algorithm))
         if override is not None:
             return override
-    return ALGORITHM_TOLERANCES.get(algorithm, DEFAULT_TOLERANCE)
+    return ALGORITHM_TOLERANCES[algorithm]
+
+
+_UNKNOWN_OVERRIDE_KEYS = sorted(
+    {algo for (_robot, algo) in ROBOT_ALGORITHM_TOLERANCES} - set(ALGORITHM_TOLERANCES)
+)
+if _UNKNOWN_OVERRIDE_KEYS:
+    raise KeyError(
+        "ROBOT_ALGORITHM_TOLERANCES names algorithms missing from ALGORITHM_TOLERANCES: "
+        + ", ".join(_UNKNOWN_OVERRIDE_KEYS)
+    )
