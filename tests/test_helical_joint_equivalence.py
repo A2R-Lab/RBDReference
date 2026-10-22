@@ -121,16 +121,16 @@ def test_helical_dynamics_match_pinocchio():
         qdd = rng.uniform(-1, 1, 3)
         tau = rng.uniform(-1, 1, 3)
 
-        assert_close(ref.inverse_dynamics(q, qd, qdd, normalize_input=False)[0],
+        assert_close(ref.inverse_dynamics(q, qd, qdd)[0],
                      pin.rnea(pmodel, pdata, q, qd, qdd),
                      algorithm="inverse_dynamics", robot_id="helical_arm")
 
         M_p = pin.crba(pmodel, pdata, q)
         M_p = np.triu(M_p) + np.triu(M_p, 1).T  # pin fills upper triangle only
-        assert_close(ref.crba(q, normalize_input=False), M_p,
+        assert_close(ref.crba(q), M_p,
                      algorithm="minv", robot_id="helical_arm")
 
-        assert_close(ref.aba(q, qd, tau, normalize_input=False),
+        assert_close(ref.aba(q, qd, tau),
                      pin.aba(pmodel, pdata, q, qd, tau),
                      algorithm="forward_dynamics", robot_id="helical_arm")
 
@@ -145,8 +145,8 @@ def test_helical_round_trip_id_fd():
         q = rng.uniform(-2, 2, 3)
         qd = rng.uniform(-1, 1, 3)
         qdd = rng.uniform(-1, 1, 3)
-        tau = ref.inverse_dynamics(q, qd, qdd, normalize_input=False)[0]
-        qdd_back = ref.aba(q, qd, tau, normalize_input=False)
+        tau = ref.inverse_dynamics(q, qd, qdd)[0]
+        qdd_back = ref.aba(q, qd, tau)
         np.testing.assert_allclose(qdd_back, qdd, atol=1e-9)
 
 

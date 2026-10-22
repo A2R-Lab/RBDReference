@@ -107,9 +107,9 @@ class _RegressorMixin:
         S^T projection onto each ancestor DOF). The link param blocks are
         ordered by body id (column block i = link i's 10 params).
         """
-        q = self._normalize_q_input(q)
-        qd = self._normalize_v_input(qd)
-        qdd = self._normalize_v_input(qdd)
+        q = np.array(q, dtype=np.float64)
+        qd = np.array(qd, dtype=np.float64)
+        qdd = np.array(qdd, dtype=np.float64)
 
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
@@ -150,7 +150,7 @@ class _RegressorMixin:
                 )
                 Fblk[parent_id] = Fblk[parent_id] + Xmat.T @ Fblk[curr_id]
 
-        return self._denormalize_reduced_q_matrix_output(Y, row_space="v")
+        return Y
 
     def body_regressor_gradient_col(self, v, a, dv, da):
         """6x10 derivative of the body regressor along ONE state direction.
@@ -191,9 +191,9 @@ class _RegressorMixin:
              the RNEA gradient bpass does for its force RHS (fxS idiom),
              here with the 6 x 10*NB block RHS instead of a force vector.
         """
-        q = self._normalize_q_input(q)
-        qd = self._normalize_v_input(qd)
-        qdd = self._normalize_v_input(qdd)
+        q = np.array(q, dtype=np.float64)
+        qd = np.array(qd, dtype=np.float64)
+        qdd = np.array(qdd, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
         W = 10 * NB
@@ -256,10 +256,10 @@ class _RegressorMixin:
                 Fblk[parent_id] += XT @ Fblk[curr_id]
 
         dY_dq = np.stack([
-            self._denormalize_reduced_q_matrix_output(dY_dq[c], row_space="v")
+            dY_dq[c]
             for c in range(nv)])
         dY_dqd = np.stack([
-            self._denormalize_reduced_q_matrix_output(dY_dqd[c], row_space="v")
+            dY_dqd[c]
             for c in range(nv)])
         return dY_dq, dY_dqd
 

@@ -88,7 +88,7 @@ class _EnergyMixin:
         root permutation is applied here (unlike CRBA, which assembles the root
         block with S = I and reorders by hand).
         """
-        q = self._normalize_q_input(q)
+        q = np.array(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
@@ -193,7 +193,5 @@ class _EnergyMixin:
         # [omega; v_lin] permutation block) already maps the user-facing root
         # velocity ordering into the internal spatial ordering, so unlike CRBA
         # (which assembles the root block with S = I and reorders by hand) no
-        # manual root permutation is needed here. Under the pinocchio convention
-        # _denormalize_qv_matrix_output is a no-op; it is kept for the legacy
-        # convention's v-permutation.
-        return self._denormalize_qv_matrix_output(C, row_space="v", col_space="v")
+        # manual root permutation is needed here.
+        return C

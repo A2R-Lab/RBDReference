@@ -181,9 +181,8 @@ The Pinocchio free-flyer convention is native at the API boundary:
 tangent is ordered `[linear; angular]` (`[vx, vy, vz, wx, wy, wz]`). A
 floating-base model without additional spherical joints has `NQ = NV + 1`;
 each additional spherical joint contributes another quaternion coordinate.
-Velocity and force inputs are tangent-width (`NV`). The parser also provides
-a legacy convention; new integrations should use its default `pinocchio`
-convention explicitly.
+Velocity and force inputs are tangent-width (`NV`). This is the only layout
+the parser and the reference expose.
 
 ## Installation
 

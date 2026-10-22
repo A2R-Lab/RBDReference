@@ -112,8 +112,7 @@ def test_tanh_gradient_matches_finite_difference(name, floating):
     ref = RBDReference(robot, use_joint_dynamics=True, friction_model="tanh", friction_width=_W)
     nv = robot.get_num_vel()
     rng = np.random.default_rng(3)
-    q = ref.robot.normalize_floating_base_q_input(rng.standard_normal(robot.get_num_pos())) \
-        if floating else rng.standard_normal(nv)
+    q = rng.standard_normal(robot.get_num_pos())
     qdd = rng.standard_normal(nv)
     h = 1e-6
     for qd in _samples(rng, nv, _W):
@@ -141,8 +140,7 @@ def test_tanh_second_order_matches_finite_difference_of_gradient(name, floating)
     ref = RBDReference(robot, use_joint_dynamics=True, friction_model="tanh", friction_width=_W)
     nv = robot.get_num_vel()
     rng = np.random.default_rng(4)
-    q = ref.robot.normalize_floating_base_q_input(rng.standard_normal(robot.get_num_pos())) \
-        if floating else rng.standard_normal(nv)
+    q = rng.standard_normal(robot.get_num_pos())
     qdd = rng.standard_normal(nv)
     h = 1e-5
     for qd in _samples(rng, nv, _W):

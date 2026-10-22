@@ -183,32 +183,6 @@ def _model_has_mimic(model):
     return False
 
 
-def xfail_if_mimic(request, spec, model, *, reason, only_robots=None):
-    """Gate the remaining T4-owned mimic equivalence residuals. If the robot has
-    mimic joints (optionally restricted to ``only_robots``), mark the current test
-    xfail with ``strict=False`` — the test still RUNS, so when the residual is
-    resolved it surfaces as XPASS instead of staying silently red/green.
-
-    Remaining gated residuals (two convention + integrator gaps below; the f_ext
-    gap is now CLOSED for fr3 — the project per-body f_ext gradient was always
-    correct; the actual bug was the pinocchio oracle covering only non-mimic
-    bodies, fixed in pinocchio_backend.f_ext_gradient). h1_2 f_ext still gates on a
-    ~7e-6 project-vs-pinocchio finger-chain parse/round-off in the (exact) -J^T
-    block — the project is self-consistent (analytic == its own forward FD to 0) —
-    amplified by the near-singular hand Minv (cond ~7e5) and by central-FD noise in
-    the oracle's dJ^T/dq block. Tracked: docs/history/PINOCCHIO_ALIGNMENT_BACKLOG.md (archival). Non-mimic
-    robots are unaffected. ``model`` may be a pinocchio or project adapter.
-
-    ``only_robots``: optional iterable of robot_ids; when given, the xfail applies
-    only to those (so a robot the fix already covers, e.g. fr3, passes cleanly)."""
-    if only_robots is not None and spec.robot_id not in only_robots:
-        return
-    if _model_has_mimic(model):
-        request.applymarker(
-            pytest.mark.xfail(reason=f"{spec.robot_id} (mimic): {reason}", strict=False)
-        )
-
-
 def build_case_params(base_mode=None):
     params = []
     for case in iter_robot_cases(MANIFEST_PATH, base_mode=base_mode):
