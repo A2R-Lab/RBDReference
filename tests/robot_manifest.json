@@ -207,6 +207,25 @@
       ],
       "preferred_variant": "default",
       "notes": "Prefer robot_descriptions as the default Baxter source."
+    },
+    {
+      "robot_id": "signed_axis_arm",
+      "tier": "smoke",
+      "embodiment": "manipulator",
+      "source_kind": "vendored",
+      "description_name": "signed_axis_arm",
+      "source_candidates": [
+        {
+          "source_kind": "vendored",
+          "description_name": "signed_axis_arm"
+        }
+      ],
+      "base_modes": [
+        "fixed",
+        "floating"
+      ],
+      "preferred_variant": "default",
+      "notes": "Vendored four-joint arm with +Z, -Z, +X and -Y revolute axes: locks the signed-axis motion subspace against Pinocchio (GATO issue 22)."
     }
   ]
 }

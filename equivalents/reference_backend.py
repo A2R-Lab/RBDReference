@@ -308,13 +308,11 @@ def build_project_adapter(
     spec,
     resolved_model,
     base_mode: str,
-    floating_base_convention: str = "pinocchio",
 ) -> ProjectModelAdapter:
     floating_base = base_mode == "floating"
     robot, parse_output = strict_parse_robot(
         resolved_model.urdf_path,
         floating_base=floating_base,
-        floating_base_convention=floating_base_convention,
     )
     mismatches = [
         ConventionMismatch(
@@ -327,8 +325,8 @@ def build_project_adapter(
             ConventionMismatch(
                 category="floating_base_quaternion",
                 detail=(
-                    "GRiD floating-base configurations default to Pinocchio-compatible "
-                    "xyzw / [vx, vy, vz, wx, wy, wz] input ordering, with optional legacy parsing."
+                    "GRiD floating-base configurations use Pinocchio's layout: "
+                    "q = [xyz, quaternion xyzw, joints], v = [linear, angular, joints]."
                 ),
             )
         )
@@ -345,7 +343,6 @@ def build_project_adapter(
 def strict_parse_robot(
     urdf_path: str,
     floating_base: bool,
-    floating_base_convention: str = "pinocchio",
 ):
     parser = URDFParser()
     output_capture = io.StringIO()
@@ -361,7 +358,6 @@ def strict_parse_robot(
                 parser.soup["name"],
                 floating_base,
                 True,
-                floating_base_convention=floating_base_convention,
             )
             parser.parse_links()
             parser.parse_joints()

@@ -204,11 +204,10 @@ class PinocchioModelAdapter:
 
         Each `axes_to_reduce` entry is `(axis, space)` with `space` in
         {"q", "v"}. The function FIRST handles continuous-joint reduction
-        (legacy path via `reduce_pinocchio_q_jacobian_to_project` when the
-        axis is "q" and the pin model uses [cos, sin] expansions), THEN
-        folds mimic columns/rows into the mimicked column/row with the URDF
-        multiplier scaling. Inputs without mimic joints fall through to the
-        legacy code path so existing test behavior is bit-identical.
+        (via `reduce_pinocchio_q_jacobian_to_project` when the axis is "q"
+        and the pin model uses [cos, sin] expansions), THEN folds mimic
+        columns/rows into the mimicked column/row with the URDF multiplier
+        scaling. Inputs without mimic joints return after the first step.
         """
         arr = np.asarray(matrix, dtype=np.float64)
         if self.mimic_info is None or self.mimic_info.is_empty():
@@ -1051,9 +1050,8 @@ class PinocchioModelAdapter:
     # ----- Time integrators (canonical via pinocchio.integrate / dIntegrate) -----
 
     def _to_pin_q(self, q):
-        # Mimic-aware project -> pin q expansion. Falls through to the
-        # legacy path when the model has no mimic joints (mimic_info empty),
-        # so existing tests are bit-identical for non-mimic robots.
+        # Mimic-aware project -> pin q expansion (an identity on the joint
+        # block when the model has no mimic joints).
         return self._expand_project_q_to_pin_full(q)
 
     def _from_pin_q_collapse(self, q_pin):
@@ -1171,8 +1169,8 @@ class PinocchioModelAdapter:
         )
         if self.base_mode == "floating":
             q_new_pin = normalize_pin_compatible_quaternion(q_new_pin)
-        # Use mimic-aware collapse if mimic_info is non-empty; otherwise the
-        # legacy path is bit-identical for non-mimic robots.
+        # Mimic-aware collapse when mimic_info is non-empty; the plain
+        # collapse otherwise.
         if self.mimic_info is not None and not self.mimic_info.is_empty():
             return self._from_pin_q_collapse(q_new_pin)
         return collapse_pin_q_to_project(
@@ -1581,35 +1579,71 @@ class PinocchioModelAdapter:
             q[:7] = normalize_pin_compatible_quaternion(q[:7])
         return q
 
-    def end_effector_pose_gradient(self, q, target_name: str, offset=None, step: float = 1e-6):
-        """End-effector pose gradient w.r.t. generalized velocity v (TANGENT space).
+    def _frame_lwa_jacobian(self, q, target_name: str):
+        """Local-world-aligned 6 x nv_pin Jacobian of the target frame at ``q``
+        (rows [linear; angular], columns in pinocchio's tangent layout) and the
+        frame placement, both from pinocchio."""
+        import pinocchio as pin
 
-        Output shape is 6 x nv_project — i.e. one column per project velocity
-        DOF, with mimic joints already folded into their target's column via
-        `_pin_integrate` (which expands `v_dt` to pin layout under the URDF
-        mimic relation, so perturbing v_project[i] moves BOTH the mimicked
-        joint and every joint that mimics it). For non-mimic robots
-        `nv_project == self.model.nv` and this is bit-identical to the
-        legacy FD-over-pin-nv path.
-        """
+        q_pin = self._to_pin_q(q)
+        pin.computeJointJacobians(self.model, self.data, q_pin)
+        pin.updateFramePlacements(self.model, self.data)
+        frame_id = self._resolve_frame_id(target_name)
+        jac = np.asarray(
+            pin.getFrameJacobian(self.model, self.data, frame_id, pin.LOCAL_WORLD_ALIGNED),
+            dtype=np.float64,
+        )
+        return jac, self.data.oMf[frame_id]
+
+    @staticmethod
+    def _rpy_rate_map_inverse(rpy):
+        """E(rpy)^-1 for R = Rz(yaw) Ry(pitch) Rx(roll), where the world angular
+        velocity is omega = E(rpy) d(rpy)/dt with columns
+        E = [Rz(yaw) Ry(pitch) e_x, Rz(yaw) e_y, e_z]. Singular at pitch = +-pi/2,
+        where the roll-pitch-yaw pose itself is."""
+        _roll, pitch, yaw = (float(v) for v in rpy)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        return np.array([
+            [cy / cp, sy / cp, 0.0],
+            [-sy, cy, 0.0],
+            [cy * sp / cp, sy * sp / cp, 1.0],
+        ], dtype=np.float64)
+
+    def end_effector_pose_gradient(self, q, target_name: str, offset=None):
+        """End-effector pose gradient d(pose)/dv (TANGENT space), 6 x nv_project.
+
+        Analytic, from pinocchio's local-world-aligned frame Jacobian: the
+        position rows are the Jacobian of the offset point (frame-origin
+        velocity minus the offset lever arm times the angular rows) and the
+        orientation rows map the world angular velocity to roll-pitch-yaw
+        rates through E(rpy)^-1. Mimic columns are folded into their target's
+        column with the URDF multiplier, so the layout matches the project
+        adapter's. The tangent v is pinocchio's (free-flyer twist in the base
+        frame, then the joint rates), the same v that `_pin_integrate` flows."""
         if offset is None:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
         q = self._normalize_project_q_for_pose_differences(q)
-        nv_project = self._project_nv()
-        gradient = np.zeros((6, nv_project), dtype=np.float64)
-
-        for v_ind in range(nv_project):
-            v = np.zeros(nv_project, dtype=np.float64)
-            v[v_ind] = step
-            q_pos = self._pin_integrate(q, v)
-            q_neg = self._pin_integrate(q, -v)
-            pose_pos = self.end_effector_pose(q_pos, target_name, offset=offset)
-            pose_neg = self.end_effector_pose(q_neg, target_name, offset=offset)
-            diff = pose_pos - pose_neg
-            # angle-wrap the rpy rows so finite differences are sane near branch cuts
-            diff[3:6] = ((diff[3:6] + np.pi) % (2.0 * np.pi)) - np.pi
-            gradient[:, v_ind] = diff / (2.0 * step)
-        return gradient
+        jac, placement = self._frame_lwa_jacobian(q, target_name)
+        off = np.asarray(offset, dtype=np.float64)
+        if off.shape == (4, 4):
+            point_local = off[:3, 3]
+        else:
+            point_local = off.reshape(-1)[:3]
+        lever = np.asarray(placement.rotation, dtype=np.float64) @ point_local
+        skew = np.array([
+            [0.0, -lever[2], lever[1]],
+            [lever[2], 0.0, -lever[0]],
+            [-lever[1], lever[0], 0.0],
+        ])
+        rpy = self.end_effector_pose(q, target_name, offset=offset)[3:6]
+        gradient = np.vstack((
+            jac[:3] - skew @ jac[3:],
+            self._rpy_rate_map_inverse(rpy) @ jac[3:],
+        ))
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            gradient = self._reduce_pin_matrix_to_project(gradient, axes_to_reduce=[(1, "v")])
+        return normalize_matrix(gradient)
 
     def _project_nv(self) -> int:
         """nv in the project layout = pin nv minus the number of mimic joints."""
@@ -1618,62 +1652,24 @@ class PinocchioModelAdapter:
         return int(self.model.nv) - len(self.mimic_info.relations)
 
     def end_effector_pose_hessian(self, q, target_name: str, offset=None, step: float = 1e-5):
-        """End-effector pose Hessian d^2(pose)/dv^2 (TANGENT, pinocchio convention).
-
-        Output shape is 6 x nv x nv. For joint targets uses pinocchio's analytic
-        flow (`computeForwardKinematicsDerivatives` + `computeJointKinematicHessians`
-        + `getJointKinematicHessian(LOCAL_WORLD_ALIGNED)`), which matches the d/dv
-        convention and runs in O(N) instead of O(nv) Jacobian FD calls. Frame
-        targets (and the back-compat path) fall back to central-difference FD on
-        the d/dv Jacobian via `pin.integrate(q, h*e_i)`. The analytic path mirrors
-        the bench harness in `test/benchmarks/baselines/pinocchio/timePinocchio.cpp`."""
-        import pinocchio as pin
-
+        """End-effector pose Hessian d^2(pose)/dv^2 (TANGENT, pinocchio convention),
+        6 x nv_project x nv_project: one central difference of the analytic
+        `end_effector_pose_gradient` along `_pin_integrate(q, +-step e_i)`,
+        symmetrized. With an analytic gradient the difference error is about
+        1e-10, so the fp64 CUDA tolerance class holds. (The installed pinocchio
+        exposes no kinematic-Hessian binding, and differencing a differenced
+        gradient has a noise floor near 1e-5.)"""
         if offset is None:
             offset = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
         q = self._normalize_project_q_for_pose_differences(q)
-        nv = self.model.nv
         nv_project = self._project_nv()
-
-        # Analytic path: joint target with kinematic-hessian API available. Skip
-        # if the user passed a non-default offset (the analytic Hessian is rooted
-        # at the joint placement and ignores the EE offset that FD applies).
-        analytic_ok = (
-            target_name in self.joint_names
-            and hasattr(pin, "computeJointKinematicHessians")
-            and hasattr(pin, "getJointKinematicHessian")
-            and np.allclose(offset, np.array([0.0, 0.0, 0.0, 1.0]))
-        )
-        if analytic_ok:
-            q_pin = self._to_pin_q(q)
-            v_zero = np.zeros(nv, dtype=np.float64)
-            a_zero = np.zeros(nv, dtype=np.float64)
-            pin.computeForwardKinematicsDerivatives(self.model, self.data, q_pin, v_zero, a_zero)
-            pin.computeJointKinematicHessians(self.model, self.data)
-            joint_id = self.model.getJointId(target_name)
-            H = np.asarray(
-                pin.getJointKinematicHessian(self.model, self.data, joint_id, pin.LOCAL_WORLD_ALIGNED),
-                dtype=np.float64,
-            )
-            # Pinocchio returns shape (6, nv_pin, nv_pin). For mimic robots
-            # we fold the mimic rows/cols into their target rows/cols with
-            # the URDF multiplier so the result has shape (6, nv_project,
-            # nv_project) and matches the project adapter's output.
-            if self.mimic_info is not None and not self.mimic_info.is_empty():
-                H = self._reduce_pin_matrix_to_project(H, axes_to_reduce=[(1, "v"), (2, "v")])
-            return H
-
-        # FD fallback (frame target or older pinocchio without kinematic-hessian API).
         hessian = np.zeros((6, nv_project, nv_project), dtype=np.float64)
         for i in range(nv_project):
-            v = np.zeros(nv_project, dtype=np.float64); v[i] = step
-            q_plus = self._pin_integrate(q, v)
-            q_minus = self._pin_integrate(q, -v)
-            Jp = self.end_effector_pose_gradient(q_plus, target_name, offset=offset)
-            Jm = self.end_effector_pose_gradient(q_minus, target_name, offset=offset)
-            hessian[:, :, i] = (Jp - Jm) / (2.0 * step)
-        # Symmetrize: analytic d^2/dv_j dv_i == d^2/dv_i dv_j; FD won't be exact,
-        # so average to suppress per-pair noise.
+            v = np.zeros(nv_project, dtype=np.float64)
+            v[i] = step
+            grad_pos = self.end_effector_pose_gradient(self._pin_integrate(q, v), target_name, offset=offset)
+            grad_neg = self.end_effector_pose_gradient(self._pin_integrate(q, -v), target_name, offset=offset)
+            hessian[:, :, i] = (grad_pos - grad_neg) / (2.0 * step)
         hessian = 0.5 * (hessian + np.transpose(hessian, axes=(0, 2, 1)))
         return hessian
 

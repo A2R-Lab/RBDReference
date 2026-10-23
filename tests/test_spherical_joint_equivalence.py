@@ -178,16 +178,16 @@ def test_floating_spherical_dynamics_match_pinocchio():
         qdd = rng.uniform(-1, 1, nv)
         tau = rng.uniform(-1, 1, nv)
 
-        assert_close(ref.inverse_dynamics(q, qd, qdd, normalize_input=False)[0],
+        assert_close(ref.inverse_dynamics(q, qd, qdd)[0],
                      pin.rnea(pmodel, pdata, q, qd, qdd),
                      algorithm="inverse_dynamics", robot_id="floating_mixed_spherical")
 
         M_p = pin.crba(pmodel, pdata, q)
         M_p = np.triu(M_p) + np.triu(M_p, 1).T
-        assert_close(ref.crba(q, normalize_input=False), M_p,
+        assert_close(ref.crba(q), M_p,
                      algorithm="minv", robot_id="floating_mixed_spherical")
 
-        assert_close(ref.aba(q, qd, tau, normalize_input=False),
+        assert_close(ref.aba(q, qd, tau),
                      pin.aba(pmodel, pdata, q, qd, tau),
                      algorithm="forward_dynamics", robot_id="floating_mixed_spherical")
 
@@ -252,16 +252,16 @@ def test_spherical_dynamics_match_pinocchio(fixture, build_pin, random_q, nq, nv
         qdd = rng.uniform(-1, 1, nv)
         tau = rng.uniform(-1, 1, nv)
 
-        assert_close(ref.inverse_dynamics(q, qd, qdd, normalize_input=False)[0],
+        assert_close(ref.inverse_dynamics(q, qd, qdd)[0],
                      pin.rnea(pmodel, pdata, q, qd, qdd),
                      algorithm="inverse_dynamics", robot_id=fixture)
 
         M_p = pin.crba(pmodel, pdata, q)
         M_p = np.triu(M_p) + np.triu(M_p, 1).T  # pin fills upper triangle only
-        assert_close(ref.crba(q, normalize_input=False), M_p,
+        assert_close(ref.crba(q), M_p,
                      algorithm="minv", robot_id=fixture)
 
-        assert_close(ref.aba(q, qd, tau, normalize_input=False),
+        assert_close(ref.aba(q, qd, tau),
                      pin.aba(pmodel, pdata, q, qd, tau),
                      algorithm="forward_dynamics", robot_id=fixture)
 
@@ -292,7 +292,7 @@ def test_spherical_id_gradient_match_pinocchio(fixture, build_pin, random_q, nq,
         qdd = rng.uniform(-1, 1, nv)
 
         dc_dq, dc_dqd = _split_id_gradient(
-            ref.inverse_dynamics_gradient(q, qd, qdd, normalize_input=False), nv)
+            ref.inverse_dynamics_gradient(q, qd, qdd), nv)
         pin.computeRNEADerivatives(pmodel, pdata, q, qd, qdd)
 
         assert_close(dc_dq, pdata.dtau_dq,
@@ -319,7 +319,7 @@ def test_floating_spherical_id_gradient_match_pinocchio():
         qdd = rng.uniform(-1, 1, nv)
 
         dc_dq, dc_dqd = _split_id_gradient(
-            ref.inverse_dynamics_gradient(q, qd, qdd, normalize_input=False), nv)
+            ref.inverse_dynamics_gradient(q, qd, qdd), nv)
         pin.computeRNEADerivatives(pmodel, pdata, q, qd, qdd)
 
         assert_close(dc_dq, pdata.dtau_dq,

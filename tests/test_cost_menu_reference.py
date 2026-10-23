@@ -68,7 +68,7 @@ def test_activated_terms_against_finite_differences(name, floating):
     nq, nv = ref.robot.get_num_pos(), ref.robot.get_num_vel()
     nx = nq + nv
     rng = np.random.default_rng(5)
-    q = ref.robot.normalize_floating_base_q_input(rng.standard_normal(nq)) if floating else rng.standard_normal(nq)
+    q = rng.standard_normal(nq)
     qd = rng.standard_normal(nv)
     u = rng.standard_normal(nv)
     x = np.concatenate([q, qd])
@@ -108,11 +108,15 @@ def test_frame_zero_is_the_end_effector_cost(name, floating):
     ref = _ref(name, floating)
     nq, nv = ref.robot.get_num_pos(), ref.robot.get_num_vel()
     rng = np.random.default_rng(9)
-    q = ref.robot.normalize_floating_base_q_input(rng.standard_normal(nq)) if floating else rng.standard_normal(nq)
+    q = rng.standard_normal(nq)
     frame = ref.robot.get_joint_by_id(ref.robot.get_leaf_nodes()[0]).get_name()
     W = np.array([10.0, 11.0, 12.0]); p_des = np.array([0.1, -0.2, 0.3]); eps = 0.02
-    for a, b in zip(ref.frame_position_cost(q, frame, p_des, W, 0, 0.0), ref.ee_pos_cost(q, p_des, W)):
-        assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-12)
+    # the frame term is tangent-sized (2 nv), ee_pos_cost is x-sized (nq + nv): equal on the q block,
+    # zero elsewhere on both
+    fv, fg, fh = ref.frame_position_cost(q, frame, p_des, W, 0, 0.0)
+    ev, eg, eh = ref.ee_pos_cost(q, p_des, W)
+    assert np.isclose(fv, ev, atol=1e-12) and np.allclose(fg[:nv], eg[:nv], atol=1e-12) and np.allclose(fh[:nv, :nv], eh[:nv, :nv], atol=1e-12)
+    assert fg.shape == (2 * nv,) and np.count_nonzero(fg[nv:]) == 0 and np.count_nonzero(eg[nv:]) == 0
     val, grad_x, hess_x = ref.frame_position_cost(q, frame, p_des, W, 1, eps)
     assert np.count_nonzero(grad_x[nv:]) == 0 and np.count_nonzero(hess_x[nv:, :]) == 0
     Jp = np.asarray(ref.frame_jacobian(q, frame))[:3, :]
@@ -190,21 +194,83 @@ def test_frame_velocity_cost(name):
         J = np.asarray(ref.frame_jacobian(q, frame))
         Jx = np.hstack([A, J]); curv = ref._activation(1, W, J @ qd - v_des, eps)[2]
         assert np.allclose(hess, Jx.T @ (curv[:, None] * Jx))
+    # floating base: the configuration derivative is taken along the tangent (base twist in the
+    # base frame, then the joint rates); check it against a finite difference through integrate
     go2 = _ref("go2", True)
-    with pytest.raises(NotImplementedError):
-        go2.frame_velocity_cost(go2.robot.normalize_floating_base_q_input(rng.standard_normal(go2.robot.get_num_pos())),
-                                rng.standard_normal(go2.robot.get_num_vel()), _frames(go2)[0], v_des, W, 1, eps)
+    nq, nv = go2.robot.get_num_pos(), go2.robot.get_num_vel()
+    q = rng.standard_normal(nq); q[3:7] /= np.linalg.norm(q[3:7]); qd = rng.standard_normal(nv)
+    for frame in _frames(go2):
+        val, grad, hess = go2.frame_velocity_cost(q, qd, frame, v_des, W, 1, eps)
+        assert grad.shape == (2 * nv,) and hess.shape == (2 * nv, 2 * nv)
+        A = go2._frame_velocity_q_derivative(q, qd, frame)
+        F = np.zeros((6, nv))
+        for k in range(nv):
+            v = np.zeros(nv); v[k] = _H
+            F[:, k] = (go2.frame_jacobian(go2.integrate(q, v), frame) @ qd - go2.frame_jacobian(go2.integrate(q, -v), frame) @ qd) / (2 * _H)
+        assert np.allclose(A, F, atol=1e-6)
+        fd = np.zeros(2 * nv)
+        for k in range(2 * nv):
+            d = np.zeros(2 * nv); d[k] = _H
+            qp, qm = go2.integrate(q, d[:nv]), go2.integrate(q, -d[:nv])
+            fd[k] = (go2.frame_velocity_cost(qp, qd + d[nv:], frame, v_des, W, 1, eps)[0]
+                     - go2.frame_velocity_cost(qm, qd - d[nv:], frame, v_des, W, 1, eps)[0]) / (2 * _H)
+        assert np.allclose(grad, fd, atol=1e-6), np.max(np.abs(grad - fd))
+
+
+def test_state_cost_tangent():
+    """The activated tangent state cost: quadratic activation == quadratic_state_cost_tangent;
+    pseudo-Huber and quadratic-barrier gradients against a finite difference through integrate;
+    the base-pose bounds are ignored; the GN Hessian is J_x^T diag(a'') J_x."""
+    go2 = _ref("go2", True)
+    nq, nv = go2.robot.get_num_pos(), go2.robot.get_num_vel()
+    rng = np.random.default_rng(31)
+    q = rng.standard_normal(nq); q[3:7] /= np.linalg.norm(q[3:7]); qd = rng.standard_normal(nv)
+    x = np.concatenate([q, qd])
+    delta = 0.05 * np.arange(1, nv + 1) * np.where(np.arange(nv) % 2 == 0, 1.0, -1.0)
+    x_des = np.concatenate([go2.integrate(q, delta), qd + 0.03 * np.arange(1, nv + 1)])
+    Q = 1.0 + 0.5 * np.arange(2 * nv)
+    v0, g0, h0 = go2.state_cost_tangent(x, x_des, Q, 0, 0.0)
+    v1, g1, h1 = go2.quadratic_state_cost_tangent(x, x_des, Q, gauss_newton=True)
+    assert np.isclose(v0, v1) and np.allclose(g0, g1) and np.allclose(h0, h1)
+    lo = np.concatenate([np.full(6, np.nan), q[7:] - 0.02, qd - 0.02]); hi = lo + 0.04
+    for kind, e in ((1, 0.05), (3, 0.0), (4, 0.05)):
+        val, grad, hess = go2.state_cost_tangent(x, x_des, Q, kind, e, lo, hi)
+        fd = np.zeros(2 * nv)
+        for k in range(2 * nv):
+            d = np.zeros(2 * nv); d[k] = _H
+            xp = np.concatenate([go2.integrate(q, d[:nv]), qd + d[nv:]]); xm = np.concatenate([go2.integrate(q, -d[:nv]), qd - d[nv:]])
+            fd[k] = (go2.state_cost_tangent(xp, x_des, Q, kind, e, lo, hi)[0] - go2.state_cost_tangent(xm, x_des, Q, kind, e, lo, hi)[0]) / (2 * _H)
+        assert np.allclose(grad, fd, atol=1e-5), (kind, np.max(np.abs(grad - fd)))
+        Jq = go2.dDifference(x_des[:nq], q, "to"); Jx = np.zeros((2 * nv, 2 * nv)); Jx[:nv, :nv] = Jq; Jx[nv:, nv:] = np.eye(nv)
+        r = np.concatenate([go2.difference(x_des[:nq], q), qd - x_des[nq:]])
+        v = np.concatenate([np.zeros(6), q[7:], qd]); lo_t = lo.copy(); hi_t = hi.copy(); lo_t[:6] = -np.inf; hi_t[:6] = np.inf
+        curv = go2._activation(kind, Q, r, e, v, lo_t, hi_t)[2]
+        assert np.allclose(hess, Jx.T @ (curv[:, None] * Jx))
+    # a bound on the base pose entries changes nothing
+    tight = lo.copy(); tight[:6] = 10.0
+    assert np.isclose(go2.state_cost_tangent(x, x_des, Q, 3, 0.0, tight, hi)[0], go2.state_cost_tangent(x, x_des, Q, 3, 0.0, lo, hi)[0])
 
 
 def test_barrier_activations():
     W = np.array([0.1, 0.2, 0.3]); vals = np.array([0.5, 1.95, -0.3])
     lo = np.array([0.0, 0.0, -np.inf]); hi = np.array([2.0, 2.0, 0.0]); delta = 0.1
-    for kind in (2, 3):
+    for kind in (2, 3, 4):
         val, sl, cu = RBDReference._activation(kind, W, vals, delta, vals, lo, hi)
         fd = _central(lambda vv: np.sum(RBDReference._activation(kind, W, vv, delta, vv, lo, hi)[0]), vals)
         assert np.allclose(sl, fd, atol=1e-6)
         fd2 = _central(lambda vv: np.sum(RBDReference._activation(kind, W, vv, delta, vv, lo, hi)[1]), vals)
         assert np.allclose(cu, fd2, atol=1e-4)
+    # smooth hinge: exactly zero inside the bounds, pseudo-Huber in the violation outside; the
+    # curvature is 0 inside and w eps^2 / s^3 outside (w / eps just past a bound)
+    inside = np.array([0.5, 1.0, -0.3]); outside = np.array([-0.2, 2.5, 0.4])
+    assert np.all(RBDReference._activation(4, W, inside, delta, inside, lo, hi)[0] == 0.0)
+    assert np.all(RBDReference._activation(4, W, inside, delta, inside, lo, hi)[2] == 0.0)
+    d = np.array([0.2, 0.5, 0.4]); s = np.sqrt(d * d + delta * delta)
+    val, sl, cu = RBDReference._activation(4, W, outside, delta, outside, lo, hi)
+    assert np.allclose(val, W * (s - delta)) and np.allclose(sl, W * np.array([-1.0, 1.0, 1.0]) * d / s)
+    assert np.allclose(cu, W * delta * delta / s ** 3)
+    with pytest.raises(ValueError):
+        RBDReference._activation(4, W, vals, 0.0, vals, lo, hi)
     # relaxed log barrier: log above delta, finite quadratic extension below and beyond the bound
     v, d1, d2 = RBDReference._relaxed_log_barrier_1d(np.array([0.5, 0.1, 0.05, -1.0]), 0.1, delta)
     assert np.isclose(v[0], -0.1 * np.log(0.5)) and np.isclose(v[1], -0.1 * np.log(0.1))

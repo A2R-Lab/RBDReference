@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<!-- A four-joint serial arm whose revolute axes are +Z, -Z, +X and -Y: the signed-axis
+     case the reference suite locks against Pinocchio (GATO issue 22, 2026-10-22). Every
+     moving link carries a valid inertial; the base is the fixed world link. -->
+<robot name="signed_axis_arm">
+  <link name="base">
+    <inertial>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <mass value="3.0"/>
+      <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.01"/>
+    </inertial>
+  </link>
+  <link name="link1">
+    <inertial>
+      <origin xyz="0.0 0.0 0.15" rpy="0 0 0"/>
+      <mass value="2.0"/>
+      <inertia ixx="0.02" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.004"/>
+    </inertial>
+  </link>
+  <link name="link2">
+    <inertial>
+      <origin xyz="0.12 0.0 0.0" rpy="0 0 0"/>
+      <mass value="1.5"/>
+      <inertia ixx="0.003" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015"/>
+    </inertial>
+  </link>
+  <link name="link3">
+    <inertial>
+      <origin xyz="0.0 0.0 0.1" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.008" ixy="0" ixz="0" iyy="0.008" iyz="0" izz="0.002"/>
+    </inertial>
+  </link>
+  <link name="link4">
+    <inertial>
+      <origin xyz="0.0 0.08 0.0" rpy="0 0 0"/>
+      <mass value="0.5"/>
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.002"/>
+    </inertial>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="base"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.9" upper="2.9" effort="50" velocity="2"/>
+    <dynamics damping="0.1" friction="0.05"/>
+  </joint>
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.3" rpy="0 0 0"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-2.0" upper="2.0" effort="40" velocity="2"/>
+    <dynamics damping="0.1" friction="0.05"/>
+  </joint>
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0.25 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-2.5" upper="2.5" effort="30" velocity="2"/>
+    <dynamics damping="0.05" friction="0.02"/>
+  </joint>
+  <joint name="joint4" type="revolute">
+    <parent link="link3"/>
+    <child link="link4"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2"/>
+    <dynamics damping="0.05" friction="0.02"/>
+  </joint>
+  <joint name="tool_joint" type="fixed">
+    <parent link="link4"/>
+    <child link="tool"/>
+    <origin xyz="0 0.15 0" rpy="0 0 0"/>
+  </joint>
+  <link name="tool"/>
+</robot>

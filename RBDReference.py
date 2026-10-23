@@ -75,65 +75,6 @@ class RBDReference(
         self._spatial_xmat_derivative_func_cache = {}
         self._spatial_xmat_second_derivative_func_cache = {}
 
-    def _normalize_q_input(self, q):
-        return self.robot.normalize_floating_base_q_input(q)
-
-    def _normalize_v_input(self, vec):
-        return self.robot.normalize_floating_base_v_input(vec)
-
-    def _denormalize_v_output(self, vec):
-        return self.robot.denormalize_floating_base_v_output(vec)
-
-    def _permute_matrix_prefix(self, matrix, permutation, axis):
-        if permutation is None:
-            return matrix
-        matrix = np.asarray(matrix, dtype=np.float64).copy()
-        prefix = len(permutation)
-        if axis == 0:
-            matrix[:prefix, :] = matrix[permutation, :]
-        else:
-            matrix[:, :prefix] = matrix[:, permutation]
-        return matrix
-
-    def _denormalize_qv_matrix_output(self, matrix, row_space=None, col_space=None):
-        matrix = np.asarray(matrix, dtype=np.float64).copy()
-        if row_space == "v":
-            matrix = self._permute_matrix_prefix(
-                matrix,
-                self.robot.get_floating_base_v_permutation_from_internal(),
-                axis=0,
-            )
-        elif row_space == "q":
-            matrix = self._permute_matrix_prefix(
-                matrix,
-                self.robot.get_floating_base_q_output_permutation_from_internal(),
-                axis=0,
-            )
-        if col_space == "v":
-            matrix = self._permute_matrix_prefix(
-                matrix,
-                self.robot.get_floating_base_v_permutation_from_internal(),
-                axis=1,
-            )
-        elif col_space == "q":
-            matrix = self._permute_matrix_prefix(
-                matrix,
-                self.robot.get_floating_base_q_output_permutation_from_internal(),
-                axis=1,
-            )
-        return matrix
-
-    def _denormalize_reduced_q_matrix_output(self, matrix, row_space=None):
-        return self._denormalize_qv_matrix_output(matrix, row_space=row_space, col_space=None)
-
-    def _denormalize_inverse_dynamics_gradient_output(self, dc_dq, dc_dqd):
-        return np.hstack(
-            (
-                self._denormalize_reduced_q_matrix_output(dc_dq, row_space="v"),
-                self._denormalize_qv_matrix_output(dc_dqd, row_space="v", col_space="v"),
-            )
-        )
-
     @staticmethod
     def _normalize_xyzw_quaternion(quat):
         quat = np.asarray(quat, dtype=np.float64).copy()
@@ -1873,7 +1814,7 @@ class RBDReference(
 
         (The central-FD form is retained as `_frame_jacobian_dot_fd` for the
         machine-precision cross-check.)"""
-        qd = self._normalize_v_input(np.asarray(qd, dtype=np.float64))
+        qd = np.array(qd, dtype=np.float64)
         reference_frame = str(reference_frame).upper()
         if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
             raise ValueError("reference_frame must be LOCAL/WORLD/LOCAL_WORLD_ALIGNED")
@@ -1983,7 +1924,7 @@ class RBDReference(
                                reference_frame="LOCAL_WORLD_ALIGNED", step=1e-6):
         """Central-FD cross-check for the analytic `frame_jacobian_dot`: differences
         the analytic `frame_jacobian` along the Lie-group integrator flow."""
-        qd = self._normalize_v_input(np.asarray(qd, dtype=np.float64))
+        qd = np.array(qd, dtype=np.float64)
         q_plus = self.integrate(q, step * qd)
         q_minus = self.integrate(q, -step * qd)
         Jp = self.frame_jacobian(q_plus, frame_name, reference_frame)
@@ -2014,10 +1955,9 @@ class RBDReference(
         Implementation: central-difference FD of the (now-correct) d/dv pose
         Jacobian on the Lie-group integrator `self.integrate(q, h*e_i)`. This
         reuses the geometric-Jacobian gradient (machine-precision vs the proven
-        prototype + pinocchio backend) and SYMMETRIZES the result. FD is fine
-        for a reference oracle; the (separate) GPU codegen path is the same
-        FD-on-Jacobian (the analytic d/dv Hessian on GPU is on the backlog --
-        see HANDOFF.md A.1 + docs/d2ee_analytic_derivation.md).
+        prototype + pinocchio backend) and SYMMETRIZES the result. The closed
+        form is `end_effector_pose_hessian_analytic`, which the GPU codegen
+        mirrors; this FD form is its cross-check.
 
         Parameters
         ----------
@@ -2766,8 +2706,6 @@ class RBDReference(
         qdd=None,
         GRAVITY=-9.81,
         f_ext=None,
-        public_output=True,
-        normalize_input=True,
     ):
         """Compute the generalized forces using the Recursive Newton-Euler
         Algorithm (RNEA). This is the canonical inverse-dynamics routine.
@@ -2788,11 +2726,10 @@ class RBDReference(
         (c, v, a, f) : tuple
             Generalized forces and intermediate link quantities.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
-            qd = self._normalize_v_input(qd)
-            if qdd is not None:
-                qdd = self._normalize_v_input(qdd)
+        q = np.array(q, dtype=np.float64)
+        qd = np.array(qd, dtype=np.float64)
+        if qdd is not None:
+            qdd = np.array(qdd, dtype=np.float64)
         # forward pass (external forces are subtracted from f inside fpass)
         (v, a, f) = self.inverse_dynamics_fpass(q, qd, qdd, GRAVITY, f_ext=f_ext)
         # backward pass
@@ -2800,11 +2737,9 @@ class RBDReference(
         # joint-local viscous damping + Coulomb friction bias (no-op when the
         # robot declares neither; gated inside the helper)
         c = c + self._joint_dynamics_bias(qd)
-        if public_output:
-            c = self._denormalize_v_output(c)
         return (c, v, a, f)
 
-    def f_ext_jacobian_transpose(self, q, normalize_input=True):
+    def f_ext_jacobian_transpose(self, q):
         """Stacked body-Jacobian transpose ``J^T`` (nv x 6*NB) for the f_ext column.
 
         Column block ``i`` (6 columns) is the joint-torque produced by a UNIT
@@ -2820,8 +2755,7 @@ class RBDReference(
         ``f_ext_gradient``). This method returns the (un-signed) ``J^T`` so both
         ``-J^T`` (tau) and ``+M^{-1} J^T`` (qdd) consumers can apply their own sign.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
+        q = np.array(q, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
         JT = np.zeros((nv, 6 * NB), dtype=np.float64)
@@ -2836,7 +2770,7 @@ class RBDReference(
                 JT[:, 6 * i + k] = c
         return JT
 
-    def f_ext_jacobian_transpose_dq(self, q, normalize_input=True):
+    def f_ext_jacobian_transpose_dq(self, q):
         """Analytic ``dJ^T/dq`` (nv x 6*NB x nv) of the stacked body-Jacobian
         transpose, for FIXED and FLOATING base (section A.3 oracle).
 
@@ -2884,8 +2818,7 @@ class RBDReference(
         subspace) into the shared (v_j / v_m) entry — the same ``+=`` reduction the
         first-order ``f_ext_jacobian_transpose`` and the GRiD emit perform.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
+        q = np.array(q, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
         dJT = np.zeros((nv, 6 * NB, nv), dtype=np.float64)
@@ -2965,7 +2898,7 @@ class RBDReference(
                             dJT[vj, 6 * i:6 * i + 6, vm] += (alpha_j * alpha_m) * dcol
         return dJT
 
-    def f_ext_gradient(self, q, normalize_input=True):
+    def f_ext_gradient(self, q):
         """Gradients of dynamics w.r.t. external forces ``f_ext`` (the f_ext column).
 
         ``f_ext`` is a per-body spatial wrench in each link's LOCAL frame
@@ -2988,18 +2921,17 @@ class RBDReference(
         (one ``-crm(S_0^{(a)})X[0]`` per root v-slot a). See that method's
         derivation + FD self-check.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
+        q = np.array(q, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
-        JT = self.f_ext_jacobian_transpose(q, normalize_input=False)
-        Minv = self.minv(q, public_output=False, normalize_input=False)
+        JT = self.f_ext_jacobian_transpose(q)
+        Minv = self.minv(q)
 
         dtau_dfext = -JT
         dqdd_dfext = Minv @ JT
 
         # Analytic dJ^T/dq (closed form, no FD) for fixed AND floating base.
-        dJT_dq = self.f_ext_jacobian_transpose_dq(q, normalize_input=False)
+        dJT_dq = self.f_ext_jacobian_transpose_dq(q)
 
         return {
             "dtau_dfext": dtau_dfext,
@@ -3172,7 +3104,7 @@ class RBDReference(
 
         return Minv
 
-    def minv(self, q, output_dense=True, public_output=True, normalize_input=True):
+    def minv(self, q, output_dense=True):
         """Compute the inverse of the joint-space inertia matrix.
 
         Parameters
@@ -3185,8 +3117,7 @@ class RBDReference(
         Minv : numpy.ndarray
             N x N inverse joint-space inertia matrix.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
+        q = np.array(q, dtype=np.float64)
         # CRBA-invert fast path. Two cases route here:
         #  (1) MIMIC: the ABA-based recursion below uses per-body (S, U, d) that
         #      diverge by alpha/alpha^2 factors for mimic joints (see
@@ -3205,18 +3136,10 @@ class RBDReference(
         #      behavior is unchanged -- this only ADDS coverage for spherical,
         #      unblocking the fd / SO oracle paths that compose minv.
         if self._has_mimic_joints() or self._robot_has_multidof_nonfloating_joint():
-            # Invert the INTERNAL-order M so the floating-base v reorder is
-            # applied exactly once (here), not twice: crba's public output
-            # already denormalizes, and the [3,4,5,0,1,2] root reorder is an
-            # involution, so inverting the public M and denormalizing again
-            # would cancel the reorder (legacy output would wrongly come back
-            # in pinocchio order). See crba(public_output=...).
-            M = self.crba(q, normalize_input=False, public_output=False)
+            # Invert the dense M (CRBA and the RNEA bias are mimic- and
+            # multi-DoF-aware; the ABA recursion below is not).
+            M = self.crba(q)
             Minv = np.linalg.inv(M)
-            if public_output:
-                return self._denormalize_qv_matrix_output(
-                    Minv, row_space="v", col_space="v"
-                )
             return Minv
         # based on https://www.researchgate.net/publication/343098270_Analytical_Inverse_of_the_Joint_Space_Inertia_Matrix
         # backward pass
@@ -3233,8 +3156,6 @@ class RBDReference(
                     if col < row:
                         Minv[row, col] = Minv[col, row]
 
-        if public_output:
-            return self._denormalize_qv_matrix_output(Minv, row_space="v", col_space="v")
         return Minv
     
 
@@ -3258,7 +3179,7 @@ class RBDReference(
         return vcross
 
 
-    def aba(self, q, qd, tau, f_ext=[], GRAVITY = -9.81, normalize_input=True):
+    def aba(self, q, qd, tau, f_ext=[], GRAVITY = -9.81):
         """Compute forward dynamics using the Articulated-Body Algorithm.
 
         Parameters
@@ -3277,10 +3198,9 @@ class RBDReference(
         qdd : numpy.ndarray
             N-element joint accelerations.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
-            qd = self._normalize_v_input(qd)
-            tau = self._normalize_v_input(tau)
+        q = np.array(q, dtype=np.float64)
+        qd = np.array(qd, dtype=np.float64)
+        tau = np.array(tau, dtype=np.float64)
         # Mimic-aware fast path: the ABA recursion below uses per-body
         # (S, U, d) that diverge from slot-accumulated by alpha/alpha^2
         # factors for mimic joints. The += CRBA/RNEA-grad pattern is
@@ -3307,14 +3227,10 @@ class RBDReference(
                 q, qd, np.zeros(n),
                 GRAVITY=GRAVITY,
                 f_ext=f_ext,
-                public_output=False,
-                normalize_input=False,
             )[0]
-            Minv = self.minv(
-                q, output_dense=True, public_output=False, normalize_input=False
-            )
+            Minv = self.minv(q, output_dense=True)
             qdd = Minv @ (tau - bias)
-            return self._denormalize_v_output(qdd)
+            return qdd
         # Multi-DOF non-floating joint (spherical/planar mid-chain): the in-place
         # ABA recursion below is written for SCALAR 1-DOF joints (per-body U, d,
         # q[ind]/qd[ind] scalar indexing). Rather than re-derive the multi-column
@@ -3328,15 +3244,10 @@ class RBDReference(
                 q, qd, np.zeros(n),
                 GRAVITY=GRAVITY,
                 f_ext=f_ext,
-                public_output=False,
-                normalize_input=False,
             )[0]
-            # Solve in INTERNAL order (bias/tau are internal here): use the raw
-            # internal-order M so a floating+multidof robot doesn't mix a
-            # denormalized M with an internal-order rhs. Single denormalize on qdd.
-            M = self.crba(q, normalize_input=False, public_output=False)
+            M = self.crba(q)
             qdd = np.linalg.solve(M, tau - bias)
-            return self._denormalize_v_output(qdd)
+            return qdd
         # joint-local viscous damping + Coulomb friction reduce the torque
         # available to accelerate: qdd = Minv*(tau - rnea_bias - dyn_bias).
         # No-op (zero vector) when no joint declares damping/friction.
@@ -3547,34 +3458,25 @@ class RBDReference(
                 qdd[ind] = temp / d[ind]
                 a[:,ind] = a[:,ind] + qdd[ind]*S.T
         
-        return self._denormalize_v_output(qdd)
+        return qdd
 
 
 
 
-    def crba(self, q, normalize_input=True, public_output=True):
+    def crba(self, q):
         """Compute the joint-space inertia matrix using the Composite Rigid Body Algorithm.
 
         Parameters
         ----------
         q : numpy.ndarray
             N-element joint positions.
-        public_output : bool
-            When True (default) the returned matrix is mapped back to the
-            user-facing floating-base v convention (the legacy [3,4,5,0,1,2]
-            root reorder under the legacy convention). Set False to get the
-            raw INTERNAL-order matrix -- used by callers (e.g. ``minv``'s
-            mimic path) that invert/solve in internal order and apply their
-            own single denormalization afterward, so the involution perm is
-            not applied twice.
 
         Returns
         -------
         M : numpy.ndarray
             N x N joint-space inertia matrix.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
+        q = np.array(q, dtype=np.float64)
         if self.robot.floating_base:
             # Floating-base CRBA via the SAME generalized block machinery as the
             # fixed-base path below. The free-flyer ROOT (jid 0) is treated as an
@@ -3696,8 +3598,6 @@ class RBDReference(
                     H[np.ix_(vj, vi)] += block
                     H[np.ix_(vi, vj)] += block.T
 
-        if public_output:
-            return self._denormalize_qv_matrix_output(H, row_space="v", col_space="v")
         return H
 
     ##### Testing original RNEA_grad to help with CUDA 
@@ -3967,8 +3867,6 @@ class RBDReference(
         qdd = None,
         GRAVITY = -9.81,
         f_ext=None,
-        public_output=True,
-        normalize_input=True,
     ):
         """Compute the gradients of RNEA wrt joint positions and velocities.
 
@@ -3987,11 +3885,10 @@ class RBDReference(
             Gradients of generalized forces wrt q and qd.
         """
         
-        if normalize_input:
-            q = self._normalize_q_input(q)
-            qd = self._normalize_v_input(qd)
-            if qdd is not None:
-                qdd = self._normalize_v_input(qdd)
+        q = np.array(q, dtype=np.float64)
+        qd = np.array(qd, dtype=np.float64)
+        if qdd is not None:
+            qdd = np.array(qdd, dtype=np.float64)
         # Key physics: for a CONSTANT local-frame f_ext there is NO new
         # gradient term. f_ext enters only as a constant offset to the
         # per-body force f (f[:,i] -= f_ext[i]); since it is q/qd-independent
@@ -4005,8 +3902,6 @@ class RBDReference(
             qdd,
             GRAVITY,
             f_ext=f_ext,
-            public_output=False,
-            normalize_input=False,
         )
 
         # forward pass, dq
@@ -4023,12 +3918,10 @@ class RBDReference(
         # forward_dynamics_gradient inherits it with no extra plumbing).
         dc_dqd = self.inverse_dynamics_gradient_bpass_dqd(q, df_dqd, qd=qd)
 
-        if public_output:
-            return self._denormalize_inverse_dynamics_gradient_output(dc_dq, dc_dqd)
         return np.hstack((dc_dq, dc_dqd))
 
 
-    def forward_dynamics(self, q, qd, u, f_ext=None, public_output=True, normalize_input=True):
+    def forward_dynamics(self, q, qd, u, f_ext=None):
         """Compute the joint accelerations for the given state and torques.
 
         Parameters
@@ -4045,18 +3938,15 @@ class RBDReference(
         qdd : numpy.ndarray
             N-element joint accelerations.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
-            qd = self._normalize_v_input(qd)
-            u = self._normalize_v_input(u)
-        (c,v,a,f) = self.inverse_dynamics(q, qd, f_ext=f_ext, public_output=False, normalize_input=False)
-        minv = self.minv(q, public_output=False, normalize_input=False)
+        q = np.array(q, dtype=np.float64)
+        qd = np.array(qd, dtype=np.float64)
+        u = np.array(u, dtype=np.float64)
+        (c,v,a,f) = self.inverse_dynamics(q, qd, f_ext=f_ext)
+        minv = self.minv(q)
         qdd = np.matmul(minv, u - c)
-        if public_output:
-            return self._denormalize_v_output(qdd)
         return qdd
     
-    def forward_dynamics_gradient(self, q, qd, u, f_ext=None, normalize_input=True):
+    def forward_dynamics_gradient(self, q, qd, u, f_ext=None):
         """Compute the gradients of the forward dynamics.
 
         Parameters
@@ -4073,25 +3963,24 @@ class RBDReference(
         (qdd_dq, qdd_dqd) : tuple
             Gradients of joint accelerations wrt q and qd.
         """
-        if normalize_input:
-            q = self._normalize_q_input(q)
-            qd = self._normalize_v_input(qd)
-            u = self._normalize_v_input(u)
+        q = np.array(q, dtype=np.float64)
+        qd = np.array(qd, dtype=np.float64)
+        u = np.array(u, dtype=np.float64)
         # f_ext flows into qdd (via forward_dynamics) and into dc_du (via
         # inverse_dynamics_gradient's f_ext-corrected f). For a constant local-frame f_ext
         # there is no additional fd-gradient term: minv is f_ext-independent
         # and the only f_ext dependence is through the qdd/dc_du arguments
         # already threaded here.
-        qdd = self.forward_dynamics(q, qd, u, f_ext=f_ext, public_output=False, normalize_input=False)
-        dc_du = self.inverse_dynamics_gradient(q, qd, qdd, f_ext=f_ext, public_output=False, normalize_input=False)
+        qdd = self.forward_dynamics(q, qd, u, f_ext=f_ext)
+        dc_du = self.inverse_dynamics_gradient(q, qd, qdd, f_ext=f_ext)
         dc_dq, dc_dqd = np.hsplit(dc_du, [len(qd)])
 
-        minv = self.minv(q, public_output=False, normalize_input=False)
+        minv = self.minv(q)
         qdd_dq = np.matmul(-minv, dc_dq)
         qdd_dqd = np.matmul(-minv, dc_dqd)
         return (
-            self._denormalize_reduced_q_matrix_output(qdd_dq, row_space="v"),
-            self._denormalize_qv_matrix_output(qdd_dqd, row_space="v", col_space="v"),
+            qdd_dq,
+            qdd_dqd,
         )
 
     @staticmethod
@@ -4242,8 +4131,7 @@ class RBDReference(
         if not self.robot.floating_base:
             raise ValueError("_floating_gravity_d2tau_dq_lie_direct requires a floating-base robot.")
 
-        q = self._normalize_q_input(q)
-        q = np.asarray(q, dtype=np.float64).copy()
+        q = np.array(q, dtype=np.float64)
         if self.robot.using_quaternion:
             q[3:7] = self._normalize_xyzw_quaternion(q[3:7])
 
@@ -4705,8 +4593,7 @@ class RBDReference(
         Bloated by design (~5× the inner work of `idsva_so`'s subtree-broadcast
         form). Not on any hot path; not GPU-friendly.
         """
-        q = self._normalize_q_input(q)
-        q = np.asarray(q, dtype=np.float64).copy()
+        q = np.array(q, dtype=np.float64)
         if self.robot.floating_base and self.robot.using_quaternion:
             q[3:7] = self._normalize_xyzw_quaternion(q[3:7])
 
@@ -5015,8 +4902,8 @@ class RBDReference(
         """
         from ._regressor import _BASIS_I
 
-        q = self._normalize_q_input(q)
-        qd = self._normalize_v_input(qd)
+        q = np.array(q, dtype=np.float64)
+        qd = np.array(qd, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
         v, _a, _f = self.inverse_dynamics_fpass(q, qd, np.zeros(nv, dtype=np.float64))
