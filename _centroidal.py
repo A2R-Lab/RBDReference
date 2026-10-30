@@ -113,6 +113,8 @@ class _CentroidalMixin:
             R_j = Xw[j][:3, :3]
             p_j = Xw[j][:3, 3]
             scale = self._mimic_multiplier(j)
+            if scale == 0.0:
+                continue
             vinds = self.robot.get_joint_index_v(j)
             if not isinstance(vinds, (list, tuple, np.ndarray)):
                 vinds = [vinds]
@@ -385,6 +387,8 @@ class _CentroidalMixin:
             R_j = Xw[j][:3, :3]
             p_j = Xw[j][:3, 3]
             alpha = self._mimic_multiplier(j)
+            if alpha == 0.0:
+                continue
             vinds = self._as_index_list(r.get_joint_index_v(j))
             for c in range(S.shape[1]):
                 vi = vinds[c] if c < len(vinds) else vinds[-1]

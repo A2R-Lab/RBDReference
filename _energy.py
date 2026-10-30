@@ -125,7 +125,7 @@ class _EnergyMixin:
                 S = S.reshape(6, 1)
             vinds[i] = _vinds(i)
             alpha[i] = self._mimic_multiplier(i)
-            _qd = alpha[i] * qd[vinds[i]]
+            _qd = np.zeros(len(vinds[i])) if alpha[i] == 0.0 else alpha[i] * qd[vinds[i]]
 
             Sw[i] = np.matmul(oXi[i], S)
             vJ = np.matmul(Sw[i], np.asarray(_qd, dtype=np.float64).reshape(-1, 1)).reshape(-1)
@@ -170,6 +170,8 @@ class _EnergyMixin:
             for d in subtree[i]:
                 block = np.matmul(Sw[i].T, dFdv[d])
                 ai = alpha[i] * alpha[d]
+                if ai == 0.0:
+                    continue
                 for a, ia in enumerate(vinds[i]):
                     for b, jb in enumerate(vinds[d]):
                         C[ia, jb] += ai * block[a, b]
@@ -180,6 +182,8 @@ class _EnergyMixin:
             for j in ancestors(i):
                 colblk = np.matmul(Ag.T, dJ[j]) + np.matmul(Mat_tmp, Sw[j])
                 aj = alpha[i] * alpha[j]
+                if aj == 0.0:
+                    continue
                 for a, ia in enumerate(vinds[i]):
                     for b, jb in enumerate(vinds[j]):
                         C[ia, jb] += aj * colblk[a, b]

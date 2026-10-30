@@ -137,6 +137,8 @@ class _RegressorMixin:
             else:
                 inds_f = list(inds_f)
             mimic_scale = self._mimic_multiplier(curr_id)
+            if mimic_scale == 0.0:
+                inds_f = []  # Keep propagating the body's force block upward.
 
             # Project the accumulated 6 x (10*NB) onto this link's DOF rows.
             proj = mimic_scale * (S.T @ Fblk[curr_id])  # (ndof_curr, 10*NB)
@@ -226,6 +228,9 @@ class _RegressorMixin:
             idx = self.robot.get_joint_index_v(curr_id)
             idx_cols = list(idx) if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
             mimic_scale = self._mimic_multiplier(curr_id)
+            if mimic_scale == 0.0:
+                inds_f = []
+                idx_cols = []
 
             # Projection: S is q-independent, so only the block derivative
             # projects (dY[c] rows += alpha * S^T dF[c]).
@@ -255,12 +260,7 @@ class _RegressorMixin:
                         XT @ (self.dual_cross_operator(S_cols[:, j]) @ Fblk[curr_id]))
                 Fblk[parent_id] += XT @ Fblk[curr_id]
 
-        dY_dq = np.stack([
-            dY_dq[c]
-            for c in range(nv)])
-        dY_dqd = np.stack([
-            dY_dqd[c]
-            for c in range(nv)])
+        # Arrays already have shape (nv, nv, W), including nv == 0.
         return dY_dq, dY_dqd
 
     def forward_dynamics_parameter_gradient(self, q, qd, u, GRAVITY=-9.81):

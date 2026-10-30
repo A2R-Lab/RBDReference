@@ -1631,6 +1631,10 @@ class RBDReference(
                 # AND the mimic joint's chain contribution (when both happen
                 # to lie in the same chain).
                 scale = mimic_scale(j)
+                if scale == 0.0:
+                    # Constant joints retain their body transform but have no
+                    # generalized-coordinate column, including when nv == 0.
+                    continue
                 for c in range(S.shape[1]):
                     vi = vinds[c] if c < len(vinds) else vinds[-1]
                     ang_local = S[:3, c]
@@ -1767,6 +1771,8 @@ class RBDReference(
             p_j = Xw[j][:3, 3]
             vinds = vinds_for(j)
             scale = mimic_scale(j)
+            if scale == 0.0:
+                continue
             for c in range(S.shape[1]):
                 vi = vinds[c] if c < len(vinds) else vinds[-1]
                 ang_local = S[:3, c]
@@ -1864,6 +1870,10 @@ class RBDReference(
                 S = S.reshape(-1, 1)
             vinds = vinds_for(j)
             scale = mimic_scale(j)
+            if scale == 0.0:
+                # Rigidly inherit ancestor velocity without reading qd[0].
+                w_of[j], v_of[j] = w_j, v_j
+                continue
             for c in range(S.shape[1]):
                 vi = vinds[c] if c < len(vinds) else vinds[-1]
                 ang_local = S[:3, c]
@@ -1894,6 +1904,8 @@ class RBDReference(
                 S = S.reshape(-1, 1)
             vinds = vinds_for(j)
             scale = mimic_scale(j)
+            if scale == 0.0:
+                continue
             for c in range(S.shape[1]):
                 vi = vinds[c] if c < len(vinds) else vinds[-1]
                 ang_local = S[:3, c]
@@ -2243,6 +2255,9 @@ class RBDReference(
                 vinds = vinds_for(j)
                 scale = mimic_scale(j)
                 this_entries = []
+                if scale == 0.0:
+                    block_entries.append(this_entries)
+                    continue
                 for c in range(S.shape[1]):
                     vi = vinds[c] if c < len(vinds) else vinds[-1]
                     this_entries.append((vi, c, scale))
@@ -2546,13 +2561,13 @@ class RBDReference(
                 a[:, curr_id] = np.matmul(Xmat, a[:, parent_id])
             inds_v = self.robot.get_joint_index_v(curr_id)
             mimic_scale = self._mimic_multiplier(curr_id)
-            _qd = mimic_scale * qd[inds_v]
+            _qd = 0.0 if mimic_scale == 0.0 else mimic_scale * qd[inds_v]
 
             vJ = self._Sq(S, _qd)
             v[:, curr_id] += vJ
             a[:, curr_id] += self.mxS(vJ, v[:, curr_id])
             if qdd is not None:
-                _qdd = mimic_scale * qdd[inds_v]
+                _qdd = 0.0 if mimic_scale == 0.0 else mimic_scale * qdd[inds_v]
                 aJ = self._Sq(S, _qdd)
                 a[:, curr_id] += aJ
             # compute f
@@ -2597,6 +2612,8 @@ class RBDReference(
                 continue
             idx = self.robot.get_joint_index_v(jid)
             alpha = self._mimic_multiplier(jid)
+            if alpha == 0.0:
+                continue
             idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
             for k in idx_list:
                 qd_k = qd[k]
@@ -2642,6 +2659,8 @@ class RBDReference(
                 continue
             idx = self.robot.get_joint_index_v(jid)
             alpha = self._mimic_multiplier(jid)
+            if alpha == 0.0:
+                continue
             idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
             for k in idx_list:
                 if order == 1:
@@ -2689,7 +2708,8 @@ class RBDReference(
             # For non-mimic joints this is `+= 1.0 * (...)`, which is
             # bit-identical to the legacy assign because each non-mimic
             # joint's inds_f is hit exactly once over the bpass.
-            c[inds_f] = c[inds_f] + mimic_scale * np.matmul(np.transpose(S), f[:, curr_id])
+            if mimic_scale != 0.0:
+                c[inds_f] = c[inds_f] + mimic_scale * np.matmul(np.transpose(S), f[:, curr_id])
             # update f if applicable
             if parent_id != -1:
                 _q = self.robot.q_for_joint(curr_id, q)
@@ -2863,6 +2883,8 @@ class RBDReference(
                 # never fires, but it keeps a mid-chain mimic-with-descendants
                 # source correct. α_j = 1 for non-mimic joints (no-op).
                 alpha_j = self._mimic_multiplier(j)
+                if alpha_j == 0.0:
+                    continue
                 # one source geometric-Jacobian column per S column / source v-slot
                 for c in range(S.shape[1]):
                     vj = vj_list[c]
@@ -3515,6 +3537,8 @@ class RBDReference(
             for ind in range(NB):
                 vi = self._as_index_list(self.robot.get_joint_index_v(ind))
                 alpha_i = self._mimic_multiplier(ind)
+                if alpha_i == 0.0:
+                    continue
                 S = self.robot.get_S_by_id(ind)
                 fh = np.matmul(IC[ind], S)
                 diag = (alpha_i * alpha_i) * np.matmul(S.T, fh)
@@ -3527,6 +3551,8 @@ class RBDReference(
                     j = self.robot.get_parent_id(j)
                     S = self.robot.get_S_by_id(j)
                     alpha_j = self._mimic_multiplier(j)
+                    if alpha_j == 0.0:
+                        continue
                     vj = self._as_index_list(self.robot.get_joint_index_v(j))
                     block = (alpha_i * alpha_j) * np.asarray(
                         np.matmul(S.T, fh), dtype=np.float64
@@ -3568,6 +3594,8 @@ class RBDReference(
             for ind in range(NB):
                 vi = self._as_index_list(self.robot.get_joint_index_v(ind))
                 alpha_i = self._mimic_multiplier(ind)
+                if alpha_i == 0.0:
+                    continue
                 S = self.robot.get_S_by_id(ind)
                 # fh = IC_i S_i is (6 x N_i); diag = S_i^T fh is the (N_i x N_i)
                 # joint-block of the mass matrix. For a 1-DOF joint these are
@@ -3587,6 +3615,8 @@ class RBDReference(
                     j = self.robot.get_parent_id(j)
                     S = self.robot.get_S_by_id(j)
                     alpha_j = self._mimic_multiplier(j)
+                    if alpha_j == 0.0:
+                        continue
                     vj = self._as_index_list(self.robot.get_joint_index_v(j))
                     # (N_j x N_i) coupling block H[v_j, v_i] = S_j^T (chain) S_i.
                     block = (alpha_i * alpha_j) * np.asarray(
@@ -3646,7 +3676,8 @@ class RBDReference(
             # dv_du = X * dv_du_parent + (if c == ind){mxS(Xvp)}
             if parent_ind != -1: # note that v_base is zero so dv_du parent contribution is 0
                 dv_dq[:,:,ind] = np.matmul(Xmat,dv_dq[:,:,parent_ind])
-                dv_dq[:,idx,ind] += alpha * self._mxS(S,np.matmul(Xmat,v[:,parent_ind])) # replace with new mxS
+                if alpha != 0.0:
+                    dv_dq[:,idx,ind] += alpha * self._mxS(S,np.matmul(Xmat,v[:,parent_ind]))
 
             # da_du = x*da_du_parent + mxS_onCols(dv_du)*qd + (if c == ind){mxS(Xap)}
             if parent_ind != -1: # note that a_base is constant gravity so da_du parent contribution is 0
@@ -3658,6 +3689,8 @@ class RBDReference(
             # v-block idx has k entries — the mxS_onCols(dv_dq)*qd term is the
             # SUM over the k columns, each scaled by qd[idx[j]].
             idx_cols = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+            if alpha == 0.0:
+                idx_cols = []
             S_cols = np.asarray(S).reshape(6, -1)
             for c in range(n):
                 if parent_ind == -1 and self.robot.floating_base:
@@ -3673,7 +3706,9 @@ class RBDReference(
                     for j, vcol in enumerate(idx_cols):
                         da_dq[:,c,ind] += self._mxS(S_cols[:,j], dv_dq[:,c,ind], alpha * qd[vcol])
 
-            if parent_ind != -1: # note that a_base is just gravity
+            if alpha == 0.0:
+                pass  # No local coordinate; inherited acceleration remains.
+            elif parent_ind != -1: # note that a_base is just gravity
                 da_dq[:,idx,ind] += alpha * self._mxS(S,np.matmul(Xmat,a[:,parent_ind])) # replace with new mxS
             else:
                 if self.robot.floating_base:
@@ -3730,7 +3765,8 @@ class RBDReference(
             # dv_du = X * dv_du_parent + (if c == ind){alpha * S}
             if parent_ind != -1: # note that v_base is zero so dv_du parent contribution is 0
                 dv_dqd[:,:,ind] = np.matmul(Xmat,dv_dqd[:,:,parent_ind])
-            dv_dqd[:,inds_v,ind] += alpha * np.squeeze(np.array(S)) # added squeeze and mxS
+            if alpha != 0.0:
+                dv_dqd[:,inds_v,ind] += alpha * np.squeeze(np.array(S))
             # da_du = x*da_du_parent + mxS_onCols(dv_du)*qd + (if c == ind){mxS(v)}
             if parent_ind != -1: # note that a_base is constant gravity so da_du parent contribution is 0
                 da_dqd[:,:,ind] = np.matmul(Xmat,da_dqd[:,:,parent_ind])
@@ -3742,12 +3778,15 @@ class RBDReference(
             # S by ROW S[ii] — only coincidentally correct for the identity
             # root subspace — with the uniform column form S[:,j].)
             idx_cols = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+            if alpha == 0.0:
+                idx_cols = []
             S_cols = np.asarray(S).reshape(6, -1)
             for c in range(n):
                 for j, vcol in enumerate(idx_cols):
                     da_dqd[:,c,ind] += self._mxS(S_cols[:,j], dv_dqd[:,c,ind], alpha * qd[vcol])
 
-            da_dqd[:,idx,ind] += alpha * self._mxS(S,v[:,ind])
+            if alpha != 0.0:
+                da_dqd[:,idx,ind] += alpha * self._mxS(S,v[:,ind])
             # df_du = I*da_du + fx_onCols(dv_du)*Iv + fx(v)*I*dv_du
             Imat = self.robot.get_Imat_by_id(ind)
 
@@ -3791,7 +3830,8 @@ class RBDReference(
 
             # dc_du is alpha * S^T * df_du (accumulate on shared mimic slots)
             S = self.robot.get_S_by_id(ind)
-            dc_dq[idx,:] += alpha * np.matmul(np.transpose(S),df_dq[:,:,ind])
+            if alpha != 0.0:
+                dc_dq[idx,:] += alpha * np.matmul(np.transpose(S),df_dq[:,:,ind])
             # df_du_parent += X^T*df_du + (if ind == c){alpha * X^T*fxS(f)}
             if parent_ind != -1:
                 _q = self.robot.q_for_joint(ind, q)
@@ -3802,6 +3842,8 @@ class RBDReference(
                 # For a 1-DoF joint this is the single-column scalar case
                 # (byte-identical); for k>1 each column j uses S[:,j].
                 idx_cols = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
+                if alpha == 0.0:
+                    idx_cols = []
                 S_cols = np.asarray(S).reshape(6, -1)
                 for j, vcol in enumerate(idx_cols):
                     delta_dq = np.matmul(np.transpose(Xmat), self.fxS(S_cols[:,j], f[:,ind]))
@@ -3838,7 +3880,8 @@ class RBDReference(
             alpha = self._mimic_multiplier(ind)
             # dc_du is alpha * S^T * df_du
             S = self.robot.get_S_by_id(ind)
-            dc_dqd[idx,:] += alpha * np.matmul(np.transpose(S),df_dqd[:,:,ind])
+            if alpha != 0.0:
+                dc_dqd[idx,:] += alpha * np.matmul(np.transpose(S),df_dqd[:,:,ind])
             # df_du_parent += X^T*df_du
             if parent_ind != -1:
                 _q = self.robot.q_for_joint(ind, q)
@@ -4245,6 +4288,8 @@ class RBDReference(
             R = np.zeros((n_int, n))
             for b in range(NB):
                 a_b = body_alpha[b]
+                if a_b == 0.0:
+                    continue
                 for local_idx, int_slot in enumerate(body_v_inds[b]):
                     true_slot = true_v_inds[b][local_idx]
                     R[int_slot, true_slot] += a_b
@@ -4357,8 +4402,8 @@ class RBDReference(
             # qd / qdd read from the (shared) project v-slot.
             inds_v_true = true_v_inds[i]
             alpha_i = body_alpha[i]
-            _qd = alpha_i * np.atleast_1d(qd[inds_v_true])
-            _qdd = alpha_i * np.atleast_1d(qdd[inds_v_true])
+            _qd = np.zeros(len(inds_v_true)) if alpha_i == 0.0 else alpha_i * np.atleast_1d(qd[inds_v_true])
+            _qdd = np.zeros(len(inds_v_true)) if alpha_i == 0.0 else alpha_i * np.atleast_1d(qdd[inds_v_true])
             vJ[:,i] = np.reshape(np.matmul(S[i], _qd), (6,))
             aJ[:,i] = self.cross_operator(v[:,i])@vJ[:,i] + np.reshape(np.matmul(S[i], _qdd), (6,))
             psid[i] = self.cross_operator(v[:,i])@S[i]
@@ -4548,6 +4593,8 @@ class RBDReference(
             R = np.zeros((n_int, n))
             for b in range(NB):
                 a_b = body_alpha[b]
+                if a_b == 0.0:
+                    continue
                 for local_idx, int_slot in enumerate(body_v_inds[b]):
                     true_slot = true_v_inds[b][local_idx]
                     # Root in floating-base has alpha=1 and a 1:1 internal->true
@@ -4667,8 +4714,8 @@ class RBDReference(
             # body's actual spatial velocity / acceleration contribution.
             inds_v_true = true_v_inds[i]
             alpha_i = body_alpha[i]
-            _qd = alpha_i * np.atleast_1d(qd[inds_v_true])
-            _qdd = alpha_i * np.atleast_1d(qdd[inds_v_true])
+            _qd = np.zeros(len(inds_v_true)) if alpha_i == 0.0 else alpha_i * np.atleast_1d(qd[inds_v_true])
+            _qdd = np.zeros(len(inds_v_true)) if alpha_i == 0.0 else alpha_i * np.atleast_1d(qdd[inds_v_true])
             vJ = (S[i] @ _qd).reshape(6)
             aJ = self.cross_operator(v[:, i]) @ vJ + (S[i] @ _qdd).reshape(6)
             psid[i] = self.cross_operator(v[:, i]) @ S[i]
@@ -4801,6 +4848,8 @@ class RBDReference(
             R = np.zeros((n_int, n))
             for b in range(NB):
                 a_b = body_alpha[b]
+                if a_b == 0.0:
+                    continue
                 for local_idx, int_slot in enumerate(body_v_inds[b]):
                     true_slot = true_v_inds[b][local_idx]
                     R[int_slot, true_slot] += a_b
