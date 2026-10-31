@@ -145,6 +145,22 @@ class RBDReference(
         ], dtype=np.float64)
 
     @staticmethod
+    def _so3_rodrigues_coefficients(theta):
+        """Stable sin(t)/t, (1-cos(t))/t² and (t-sin(t))/t³.
+
+        The last two direct numerators lose precision long before 1e-8.
+        Through t^8 the omitted term below 0.1 is less than 2e-18.
+        """
+        t2 = theta * theta
+        if theta < 0.1:
+            a = 1 + t2*(-1/6 + t2*(1/120 + t2*(-1/5040 + t2/362880)))
+            b = .5 + t2*(-1/24 + t2*(1/720 + t2*(-1/40320 + t2/3628800)))
+            c = 1/6 + t2*(-1/120 + t2*(1/5040 + t2*(-1/362880 + t2/39916800)))
+            return a, b, c
+        return (np.sin(theta)/theta, 2*(np.sin(theta/2)/theta)**2,
+                (theta-np.sin(theta))/(t2*theta))
+
+    @staticmethod
     def _so3_V_matrix(phi):
         """SE(3)-exp 'V' helper: p_delta = V(phi) @ rho where phi = omega*dt
         and rho = v_lin * dt. Same closed-form as Pinocchio's local-frame
@@ -153,12 +169,7 @@ class RBDReference(
         phi = np.asarray(phi, dtype=np.float64)
         theta = float(np.linalg.norm(phi))
         skew_phi = RBDReference._so3_skew(phi)
-        if theta < 1e-8:
-            # Small-angle Taylor:
-            #   V ≈ I + 0.5*[phi]_x + (1/6)*[phi]_x^2
-            return np.eye(3) + 0.5 * skew_phi + (1.0 / 6.0) * (skew_phi @ skew_phi)
-        a = (1.0 - np.cos(theta)) / (theta * theta)
-        b = (theta - np.sin(theta)) / (theta ** 3)
+        _, a, b = RBDReference._so3_rodrigues_coefficients(theta)
         return np.eye(3) + a * skew_phi + b * (skew_phi @ skew_phi)
 
     @staticmethod
@@ -167,10 +178,7 @@ class RBDReference(
         phi = np.asarray(phi, dtype=np.float64)
         theta = float(np.linalg.norm(phi))
         skew_phi = RBDReference._so3_skew(phi)
-        if theta < 1e-8:
-            return np.eye(3) - 0.5 * skew_phi + (1.0 / 6.0) * (skew_phi @ skew_phi)
-        a = (1.0 - np.cos(theta)) / (theta * theta)
-        b = (theta - np.sin(theta)) / (theta ** 3)
+        _, a, b = RBDReference._so3_rodrigues_coefficients(theta)
         return np.eye(3) - a * skew_phi + b * (skew_phi @ skew_phi)
 
     @staticmethod
@@ -221,10 +229,7 @@ class RBDReference(
         phi = np.asarray(phi, dtype=np.float64)
         theta = float(np.linalg.norm(phi))
         Px = RBDReference._so3_skew(phi)
-        if theta < 1e-8:
-            return np.eye(3) + Px + 0.5 * (Px @ Px)
-        sin_t = np.sin(theta) / theta
-        one_minus_cos = (1.0 - np.cos(theta)) / (theta * theta)
+        sin_t, one_minus_cos, _ = RBDReference._so3_rodrigues_coefficients(theta)
         return np.eye(3) + sin_t * Px + one_minus_cos * (Px @ Px)
 
     def _spherical_retract(self, quat_xyzw, omega_dt):
@@ -378,8 +383,8 @@ class RBDReference(
         integrate(q_from, e) == q_to with e = difference(q_from, q_to):
           'to'   : dIntegrate(q_from, e, 'v')^-1
           'from' : -dIntegrate(q_from, e, 'v')^-1 @ dIntegrate(q_from, e, 'q')
-        Matches pin.dDifference(model, q1, q2, ARG0/ARG1). Fixed base
-        collapses to +I / -I.
+        Matches pin.dDifference(model, q1, q2, ARG0/ARG1). Scalar/vector
+        coordinates collapse to +I / -I; fixed-base spherical blocks do not.
         """
         if with_respect_to not in ("from", "to"):
             raise ValueError("with_respect_to must be 'from' or 'to'")
@@ -469,39 +474,19 @@ class RBDReference(
         sensitivity of the time-integration step (e.g. the floating-base
         position rows of a `plant_step_hessian`).
 
-        Structure for the project manifest (free-flyer + revolute joints,
-        optional fixed base):
-
-          * Fixed-base -> identically zero (`integrate` is affine, its
-            Jacobian constant).
-          * The free-flyer `dIntegrate` blocks depend only on ``v_dt`` and
-            never on the base ``q`` (see `dIntegrate`, which discards
-            ``q``), so every ``arg2 == 'q'`` tensor is exactly zero and the
-            only nonzero entries live in the 6x6 free-flyer block over
-            ``arg2 == 'v'``.
-          * Revolute rows/cols are linear in the increment -> zero.
-
-        Implementation note: evaluated by 4th-order (Richardson) central
-        finite differencing of the pinocchio-validated `dIntegrate`
-        (float64, ~1e-8 accurate). The default ``fd_step`` of 1e-3 is
-        deliberately *not* tiny: it sits near the roundoff/truncation
-        optimum for the 4th-order stencil (h ~ eps**(1/5)) and, crucially,
-        keeps the perturbed increments clear of the ill-conditioned
-        small-angle regime of `dIntegrate`'s exact (1-cos)/theta^2 and
-        SE(3) Q-block formulas (cf. the theta < 1e-4 guard in
-        `_se3_Q_block`), which dominate the error as v_dt -> 0. A
-        hand-rolled closed form is deferred
-        until a GPU/codegen consumer for the floating-base position-row
-        Hessian exists; the only current consumers are float64 oracles,
-        where exact-to-1e-9 differencing of an already-exact Jacobian is
-        indistinguishable from a closed form. See
-        docs/open-tasks/f1_plant_step_hessian_plan.md (floating-q rows).
+        Scalar coordinates are affine and contribute zero. Each spherical
+        joint contributes a 3x3x3 SO(3) block, including on a fixed base;
+        each floating joint contributes a 6x6x6 SE(3) block. The first
+        derivatives are independent of base q, so arg2='q' is exactly zero.
+        Values use analytic coefficient derivatives with small-angle series.
+        ``fd_step`` is retained for call compatibility; it is used only by
+        the separate ``_d2Integrate_fd`` diagnostic, not this implementation.
         """
         if arg1 not in ("q", "v") or arg2 not in ("q", "v"):
             raise ValueError("arg1 and arg2 must each be 'q' or 'v'")
         nv = self.robot.get_num_vel()
         H = np.zeros((nv, nv, nv), dtype=np.float64)
-        if not self.robot.floating_base:
+        if not self._joint_retract_specs():
             return H
         if arg2 == "q":
             # The free-flyer dIntegrate blocks are independent of the base
@@ -538,7 +523,7 @@ class RBDReference(
         the analytic `d2Integrate`. Same signature/semantics."""
         nv = self.robot.get_num_vel()
         H = np.zeros((nv, nv, nv), dtype=np.float64)
-        if not self.robot.floating_base or arg2 == "q":
+        if not self._joint_retract_specs() or arg2 == "q":
             return H
         v_dt = np.asarray(v_dt, dtype=np.float64)
 

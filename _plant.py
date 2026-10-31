@@ -169,15 +169,17 @@ class _PlantMixin:
         """Second-order sensitivity of the integrator step x_{k+1} = [q; v].
 
         Returns ``H`` of shape ``(2*nv, 3*nv, 3*nv)`` (the s_d2AB surface),
-        the Hessian of each output-state tangent component w.r.t. the
-        3*nv tangent z = [dq (nv); dqd (nv); du (nv)]:
+        the derivative of the moving-basis plant gradient with respect to
+        the 3*nv tangent z = [dq (nv); dqd (nv); du (nv)]:
 
-            H[o, a, b] = d^2 x_{k+1}[o] / dz[a] dz[b]
-                       = d/dz[a] ( plant_step_gradient[o, b] )
+            H[o, a, b] = d/dz[a] ( plant_step_gradient[o, b] )
 
         so axis ``a`` is the perturbation axis and axis ``b`` the
         gradient-column axis (the convention the FD-of-gradient oracle uses).
         Output rows split as [position-tangent (nv); velocity (nv)].
+        Each gradient has its own input basis and predicted-output anchor.
+        This is not a fixed-chart or shooting-defect Hessian on a manifold;
+        symmetrizing it does not recover the missing transport terms.
 
         **Scope.** ``euler`` and ``semi_implicit_euler`` on both **fixed** and
         **floating** base, fully analytic. Multi-stage RK still raises (its
@@ -186,7 +188,7 @@ class _PlantMixin:
         Velocity rows (both variants, single-stage): the Hessian of
         ``v_{k+1} = qd + dt*qdd(z)`` is ``dt * D2qdd``. We assemble it from
         ``_d2qdd_tangent`` and *transpose its (a,b) axes* so the perturbation
-        axis sits in ``a``. For a fixed base D2qdd is (a,b)-symmetric and the
+        axis sits in ``a``. For scalar fixed-base coordinates D2qdd is symmetric and the
         transpose is a no-op; for a floating base the q-q block is genuinely
         asymmetric (the body-frame ``fdsva_so`` second derivative), and the
         ``(perturb, column)`` ordering is the one matching a finite difference
@@ -215,10 +217,11 @@ class _PlantMixin:
               t2               dt^2 * Vgrad^T : d2Int_vv : Vgrad
               t3               dt^2 * dIntegrate_v . D2qdd
 
-        For a fixed base ``d2Integrate`` is identically zero and
+        For scalar fixed-base coordinates ``d2Integrate`` is zero and
         ``dIntegrate_v = I``, so this collapses to the historical fixed-base
         result (position rows ``0`` for Euler, ``dt^2 * D2qdd`` for SI-Euler).
-        See `docs/open-tasks/f1_plant_step_hessian_plan.md`.
+        Fixed-base spherical joints instead retain their non-affine SO(3)
+        blocks; fixed base does not imply an affine configuration space.
         """
         self._integrator_butcher(integrator_type)
         if integrator_type not in ("euler", "semi_implicit_euler"):
@@ -240,7 +243,7 @@ class _PlantMixin:
         # ---- velocity rows: d^2 v_{k+1} / dz^2 = dt * D2qdd ----
         H[nv:, :, :] = dt * D2T
 
-        if not self.robot.floating_base:
+        if not self._joint_retract_specs():
             # Fixed base: linear retract -> position rows 0 (Euler) or the same
             # dt^2 * D2qdd as the velocity rows (SI-Euler, q_{k+1}=q+dt*v_{k+1}).
             if si:
