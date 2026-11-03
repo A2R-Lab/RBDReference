@@ -1617,6 +1617,75 @@ class PinocchioModelAdapter:
                 else pin.getFrameAcceleration(self.model, self.data, fid, ref)
         return normalize_vector(np.concatenate([np.asarray(m.linear), np.asarray(m.angular)]))
 
+    def _frame_kinematics_derivatives(self, q, qd, qdd, frame_name, reference_frame):
+        """pinocchio's ``getFrameVelocityDerivatives`` / ``getFrameAccelerationDerivatives``
+        (joint targets: the ``getJoint*`` forms) after
+        ``computeForwardKinematicsDerivatives``, as ``(dv_dq, da_dq, da_dqd, da_dqdd)``
+        in the project velocity layout. In LOCAL_WORLD_ALIGNED the acceleration
+        rows are converted to the classical acceleration's derivatives
+        (``a_lin += w x v_lin``) so they differentiate what
+        :meth:`frame_acceleration` returns there."""
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
+        pin.computeForwardKinematicsDerivatives(self.model, self.data, q_pin, qd_pin, qdd_pin)
+        pin.updateFramePlacements(self.model, self.data)
+        ref = self._pin_reference_frame(reference_frame)
+        kind = "joint" if frame_name in self.joint_names else "frame"
+        if kind == "joint":
+            fid = self.model.getJointId(frame_name)
+            dv_dq, da_dq, da_dv, da_da = pin.getJointAccelerationDerivatives(self.model, self.data, fid, ref)
+            v = pin.getVelocity(self.model, self.data, fid, ref)
+        else:
+            fid = self._resolve_frame_id(frame_name)
+            dv_dq, da_dq, da_dv, da_da = pin.getFrameAccelerationDerivatives(self.model, self.data, fid, ref)
+            v = pin.getFrameVelocity(self.model, self.data, fid, ref)
+        mats = [np.array(m, dtype=np.float64) for m in (dv_dq, da_dq, da_dv, da_da)]
+        if str(reference_frame).upper() == "LOCAL_WORLD_ALIGNED":
+            # pinocchio's LOCAL_WORLD_ALIGNED q-derivatives hold the frame origin
+            # fixed (they are the WORLD derivatives shifted to the current
+            # origin). The derivative of the function q -> v_lwa(q, qd), which
+            # finite differences through the chart recover, also moves the
+            # origin: d(w x p_f)/dq = w x dp_f/dq with dp_f/dq the linear rows
+            # of the LWA Jacobian (= dv/dqd here). Same for the spatial
+            # acceleration with its angular acceleration.
+            if kind == "joint":
+                acc = pin.getAcceleration(self.model, self.data, fid, ref)
+            else:
+                acc = pin.getFrameAcceleration(self.model, self.data, fid, ref)
+            w = np.asarray(v.angular, dtype=np.float64)
+            wd = np.asarray(acc.angular, dtype=np.float64)
+            v_lin = np.asarray(v.linear, dtype=np.float64)
+            dp_f = mats[3][:3, :]
+            skw, skv = self._skew3(w), self._skew3(v_lin)
+            mats[0][:3, :] += skw @ dp_f
+            mats[1][:3, :] += self._skew3(wd) @ dp_f
+            # classical = spatial + [w x v_lin; 0]; d/dx adds dw/dx x v_lin + w x dv_lin/dx
+            # with dv/dqd = J = da/dqdd (the spatial Jacobian in this frame).
+            mats[1][:3, :] += -skv @ mats[0][3:, :] + skw @ mats[0][:3, :]
+            mats[2][:3, :] += -skv @ mats[3][3:, :] + skw @ mats[3][:3, :]
+        if self.mimic_info is not None and not self.mimic_info.is_empty():
+            mats = [self._reduce_pin_matrix_to_project(m, axes_to_reduce=[(1, "v")]) for m in mats]
+        return tuple(normalize_matrix(m) for m in mats)
+
+    @staticmethod
+    def _skew3(v):
+        return np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]], dtype=np.float64)
+
+    def frame_velocity_derivatives(self, q, qd, frame_name, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """``(dv/dq, dv/dqd)`` of the frame velocity, pinocchio's
+        ``getFrameVelocityDerivatives`` in the project velocity layout."""
+        dv_dq, _, _, J = self._frame_kinematics_derivatives(
+            q, qd, np.zeros_like(np.asarray(qd, dtype=np.float64)), frame_name, reference_frame)
+        return dv_dq, J
+
+    def frame_acceleration_derivatives(self, q, qd, qdd, frame_name, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """``(dv/dq, da/dq, da/dqd, da/dqdd)`` of the frame velocity and
+        acceleration (classical in LOCAL_WORLD_ALIGNED)."""
+        return self._frame_kinematics_derivatives(q, qd, qdd, frame_name, reference_frame)
+
     def osc_inertia(self, q, frame_name, reference_frame="LOCAL_WORLD_ALIGNED"):
         """Operational-space inertia Lambda = (J M^{-1} J^T)^{-1}, 6 x 6.
         Cross-checks Minv via `pin.computeMinverse` (reduced for mimic)."""

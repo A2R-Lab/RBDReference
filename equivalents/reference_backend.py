@@ -230,6 +230,14 @@ class ProjectModelAdapter:
     def frame_acceleration(self, q, qd, qdd, frame_name: str, reference_frame="LOCAL_WORLD_ALIGNED"):
         return normalize_vector(self.reference.frame_acceleration(q, qd, qdd, frame_name, reference_frame))
 
+    def frame_velocity_derivatives(self, q, qd, frame_name: str, reference_frame="LOCAL_WORLD_ALIGNED"):
+        return tuple(normalize_matrix(m) for m in
+                     self.reference.frame_velocity_derivatives(q, qd, frame_name, reference_frame))
+
+    def frame_acceleration_derivatives(self, q, qd, qdd, frame_name: str, reference_frame="LOCAL_WORLD_ALIGNED"):
+        return tuple(normalize_matrix(m) for m in
+                     self.reference.frame_acceleration_derivatives(q, qd, qdd, frame_name, reference_frame))
+
     def osc_inertia(self, q, frame_name: str, reference_frame="LOCAL_WORLD_ALIGNED"):
         return normalize_matrix(
             self.reference.osc_inertia(q, frame_name, reference_frame)

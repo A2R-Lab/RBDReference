@@ -1806,6 +1806,176 @@ class RBDReference(
         Jdot = self.frame_jacobian_dot(q, qd, frame_name, reference_frame)
         return np.asarray(J @ qdd + Jdot @ qd, dtype=np.float64)
 
+    # ── frame kinematics derivatives (item C of 0.8, 2026-11-03) ─────────────
+    @staticmethod
+    def _motion_cross(v):
+        """6x6 motion cross-product matrix of a ``[linear; angular]`` spatial
+        vector (pinocchio order): ``v x m = [w x m_lin + v_lin x m_ang; w x m_ang]``."""
+        v = np.asarray(v, dtype=np.float64).reshape(6)
+        sk = RBDReference._skew
+        M = np.zeros((6, 6), dtype=np.float64)
+        M[:3, :3] = sk(v[3:])
+        M[:3, 3:] = sk(v[:3])
+        M[3:, 3:] = sk(v[3:])
+        return M
+
+    def _frame_world_spatial_sweep(self, q, qd, qdd):
+        """World-origin Plucker kinematics of every joint, ``[linear; angular]``.
+
+        Returns ``(Xw, cols, ov, oa)``: ``Xw[j]`` the world homogeneous placement
+        of joint j; ``cols`` a list of ``(jid, vslot, alpha, A)`` with ``A`` the
+        world-origin column of the geometric Jacobian for one degree of freedom
+        of joint j (``A = [p_j x a_w + l_w; a_w]`` for the world axis
+        ``a_w = R_j S_ang`` and ``l_w = R_j S_lin``), ``vslot`` its velocity slot
+        and ``alpha`` the mimic multiplier; ``ov[j]`` the world-origin twist of
+        joint j's body and ``oa[j]`` its spatial acceleration
+        (``oa_j = oa_parent + sum_c (A_c qdd_c + (ov_j x A_c) qd_c)``). The same
+        S, R_j and mimic scale as :meth:`frame_jacobian`."""
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        qdd = np.asarray(qdd, dtype=np.float64).reshape(-1)
+        Xw, _ = self._frame_world_placement_and_chain(q)
+        n_joints = self.robot.get_num_joints()
+        cols = []
+        ov = [np.zeros(6, dtype=np.float64) for _ in range(n_joints)]
+        oa = [np.zeros(6, dtype=np.float64) for _ in range(n_joints)]
+        for j in range(n_joints):
+            par = self.robot.get_parent_id(j)
+            v_j = ov[par].copy() if par != -1 else np.zeros(6, dtype=np.float64)
+            a_j = oa[par].copy() if par != -1 else np.zeros(6, dtype=np.float64)
+            joint = self.robot.get_joint_by_id(j)
+            alpha = joint.get_mimic_multiplier() if getattr(joint, "is_mimic", False) else 1.0
+            if alpha == 0.0:
+                ov[j], oa[j] = v_j, a_j
+                continue
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            try:
+                vinds = self.robot.get_joint_index_v(j)
+            except Exception:
+                vinds = self.robot.get_joint_index_q(j)
+            vinds = list(vinds) if isinstance(vinds, (list, tuple, np.ndarray)) else [vinds]
+            R_j = Xw[j][:3, :3]
+            p_j = Xw[j][:3, 3]
+            own = []
+            for c in range(S.shape[1]):
+                vi = vinds[c] if c < len(vinds) else vinds[-1]
+                aw = R_j @ S[:3, c]
+                lw = R_j @ S[3:6, c]
+                A = np.concatenate([np.cross(p_j, aw) + lw, aw])
+                cols.append((j, int(vi), float(alpha), A))
+                own.append((A, alpha * qd[vi], alpha * qdd[vi]))
+                v_j = v_j + A * (alpha * qd[vi])
+            for A, qd_c, qdd_c in own:
+                a_j = a_j + A * qdd_c + (self._motion_cross(v_j) @ A) * qd_c
+            ov[j], oa[j] = v_j, a_j
+        return Xw, cols, ov, oa
+
+    def _frame_kinematics_derivatives(self, q, qd, qdd, frame_name, reference_frame):
+        """Shared body of :meth:`frame_velocity_derivatives` and
+        :meth:`frame_acceleration_derivatives`: ``(dv_dq, J, da_dq, da_dqd)`` for
+        the frame's twist ``v`` and acceleration ``a`` (as :meth:`frame_velocity`
+        and :meth:`frame_acceleration` define them) in the chosen reference
+        frame; ``dv_dqd = da_dqdd = J``. Columns follow the local tangent chart
+        of :meth:`integrate` (the floating root and spherical joints), so the
+        derivatives are pinocchio's ``getFrameVelocityDerivatives`` /
+        ``getFrameAccelerationDerivatives``; in LOCAL_WORLD_ALIGNED the
+        acceleration is the classical one and its derivatives carry the
+        ``w x v_lin`` term.
+
+        World-origin Plucker form, for a column ``A_j`` of joint j with parent
+        ``p`` and the target body ``i`` (``A_j x`` the motion cross product)::
+
+            dv_i/dq_j  = A_j x (ov_i - ov_p)
+            da_i/dq_j  = A_j x (oa_i - oa_p) + (ov_p x A_j) x (ov_i - ov_p)
+            da_i/dqd_j = ov_j x A_j + A_j x (ov_i - ov_p)
+
+        which follow from ``dA_k/dq_j = A_j x A_k`` for every column k at or
+        below j (the root's and a spherical joint's own columns included).
+        LOCAL adds the placement derivative ``-fXo (A_j x w)`` of the
+        frame transform; LOCAL_WORLD_ALIGNED adds the shift of the moving
+        frame origin ``[w_ang x (dp_f/dq_j); 0]``."""
+        reference_frame = str(reference_frame).upper()
+        if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
+            raise ValueError("reference_frame must be LOCAL/WORLD/LOCAL_WORLD_ALIGNED")
+        nv = self.robot.get_num_vel()
+        zeros = np.zeros((6, nv), dtype=np.float64)
+        target_id, X_offset = self._resolve_frame_joint(frame_name)
+        if target_id == -1:
+            return zeros, zeros.copy(), zeros.copy(), zeros.copy()
+        Xw, cols, ov, oa = self._frame_world_spatial_sweep(q, qd, qdd)
+        X_frame = Xw[target_id] @ X_offset
+        R_f = X_frame[:3, :3]
+        p_f = X_frame[:3, 3]
+        chain = set(self.robot.get_ancestors_by_id(target_id)) | {target_id}
+        ov_i, oa_i = ov[target_id], oa[target_id]
+        cross = self._motion_cross
+        J = zeros.copy(); dv_dq = zeros.copy(); da_dq = zeros.copy(); da_dqd = zeros.copy()
+        # columns needed by the frame transforms' own derivatives
+        ov_cols = zeros.copy()   # A_j x ov_i   (LOCAL placement derivative of v)
+        oa_cols = zeros.copy()   # A_j x oa_i   (LOCAL placement derivative of a)
+        for (j, vi, alpha, A) in cols:
+            if j not in chain:
+                continue
+            par = self.robot.get_parent_id(j)
+            ovp = ov[par] if par != -1 else np.zeros(6)
+            oap = oa[par] if par != -1 else np.zeros(6)
+            Ax = cross(A)
+            dvi = Ax @ (ov_i - ovp)
+            J[:, vi] += alpha * A
+            dv_dq[:, vi] += alpha * dvi
+            da_dq[:, vi] += alpha * (Ax @ (oa_i - oap) + cross(cross(ovp) @ A) @ (ov_i - ovp))
+            da_dqd[:, vi] += alpha * (cross(ov[j]) @ A + dvi)
+            ov_cols[:, vi] += alpha * (Ax @ ov_i)
+            oa_cols[:, vi] += alpha * (Ax @ oa_i)
+        if reference_frame == "WORLD":
+            return dv_dq, J, da_dq, da_dqd
+        if reference_frame == "LOCAL":
+            fXo = np.zeros((6, 6), dtype=np.float64)
+            Rt = R_f.T
+            fXo[:3, :3] = Rt
+            fXo[:3, 3:] = -Rt @ self._skew(p_f)
+            fXo[3:, 3:] = Rt
+            return (fXo @ (dv_dq - ov_cols), fXo @ J,
+                    fXo @ (da_dq - oa_cols), fXo @ da_dqd)
+        # LOCAL_WORLD_ALIGNED: shift the reference point to the (moving) frame origin.
+        X = np.eye(6, dtype=np.float64)
+        X[:3, 3:] = -self._skew(p_f)
+        J_lwa = X @ J
+        dp_f = J_lwa[:3, :]                      # d p_f / d q_j = linear LWA column
+        w = ov_i[3:]
+        wd = oa_i[3:]
+        dv = X @ dv_dq
+        dv[:3, :] += self._skew(w) @ dp_f         # d/dq of (w x p_f) at fixed w
+        da = X @ da_dq
+        da[:3, :] += self._skew(wd) @ dp_f
+        da_v = X @ da_dqd
+        # classical acceleration: a_lin += w x v_lin, with v = X ov_i
+        v_lwa = X @ ov_i
+        v_lin = v_lwa[:3]
+        da[:3, :] += -self._skew(v_lin) @ dv[3:, :] + self._skew(w) @ dv[:3, :]
+        da_v[:3, :] += -self._skew(v_lin) @ J_lwa[3:, :] + self._skew(w) @ J_lwa[:3, :]
+        return dv, J_lwa, da, da_v
+
+    def frame_velocity_derivatives(self, q, qd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """``(dv/dq, dv/dqd)`` of :meth:`frame_velocity`, each 6 x nv in the
+        local tangent chart of :meth:`integrate`; pinocchio's
+        ``getFrameVelocityDerivatives`` for LOCAL, WORLD and
+        LOCAL_WORLD_ALIGNED. ``dv/dqd`` is the frame Jacobian."""
+        dv_dq, J, _, _ = self._frame_kinematics_derivatives(q, qd, np.zeros_like(np.asarray(qd, dtype=np.float64)),
+                                                            frame_name, reference_frame)
+        return dv_dq, J
+
+    def frame_acceleration_derivatives(self, q, qd, qdd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """``(dv/dq, da/dq, da/dqd, da/dqdd)`` of :meth:`frame_velocity` and
+        :meth:`frame_acceleration`, each 6 x nv, the tuple of pinocchio's
+        ``getFrameAccelerationDerivatives``. In LOCAL and WORLD these are the
+        spatial acceleration's derivatives; in LOCAL_WORLD_ALIGNED the
+        classical acceleration's (the quantity :meth:`frame_acceleration`
+        returns there). ``da/dqdd`` is the frame Jacobian."""
+        dv_dq, J, da_dq, da_dqd = self._frame_kinematics_derivatives(q, qd, qdd, frame_name, reference_frame)
+        return dv_dq, da_dq, da_dqd, J
+
     def frame_jacobian_dot(self, q, qd, frame_name=None,
                            reference_frame="LOCAL_WORLD_ALIGNED"):
         """ANALYTIC time derivative Jdot of `frame_jacobian` along v = qd, 6 x nv.
