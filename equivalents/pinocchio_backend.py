@@ -1581,6 +1581,42 @@ class PinocchioModelAdapter:
             dJ = self._reduce_pin_matrix_to_project(dJ, axes_to_reduce=[(1, "v")])
         return normalize_matrix(dJ)
 
+    def _frame_kinematics(self, q, qd, qdd, frame_name):
+        import pinocchio as pin
+
+        q_pin = self._to_pin_q(q)
+        qd_pin = self._expand_project_v_to_pin(np.asarray(qd, dtype=np.float64))
+        qdd_pin = self._expand_project_v_to_pin(np.asarray(qdd, dtype=np.float64))
+        pin.forwardKinematics(self.model, self.data, q_pin, qd_pin, qdd_pin)
+        pin.updateFramePlacements(self.model, self.data)
+        if frame_name in self.joint_names:
+            return pin, ("joint", self.model.getJointId(frame_name))
+        return pin, ("frame", self._resolve_frame_id(frame_name))
+
+    def frame_velocity(self, q, qd, frame_name, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """``getFrameVelocity`` / ``getVelocity`` as ``[linear; angular]``."""
+        pin, (kind, fid) = self._frame_kinematics(q, qd, np.zeros_like(np.asarray(qd)), frame_name)
+        ref = self._pin_reference_frame(reference_frame)
+        m = pin.getVelocity(self.model, self.data, fid, ref) if kind == "joint" \
+            else pin.getFrameVelocity(self.model, self.data, fid, ref)
+        return normalize_vector(np.concatenate([np.asarray(m.linear), np.asarray(m.angular)]))
+
+    def frame_acceleration(self, q, qd, qdd, frame_name, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """The time derivative of the frame velocity in the chosen frame: the
+        spatial acceleration (``getFrameAcceleration``) for LOCAL and WORLD, the
+        classical acceleration (``getFrameClassicalAcceleration``) for
+        LOCAL_WORLD_ALIGNED."""
+        pin, (kind, fid) = self._frame_kinematics(q, qd, qdd, frame_name)
+        ref = self._pin_reference_frame(reference_frame)
+        lwa = str(reference_frame).upper() == "LOCAL_WORLD_ALIGNED"
+        if kind == "joint":
+            m = pin.getClassicalAcceleration(self.model, self.data, fid, ref) if lwa \
+                else pin.getAcceleration(self.model, self.data, fid, ref)
+        else:
+            m = pin.getFrameClassicalAcceleration(self.model, self.data, fid, ref) if lwa \
+                else pin.getFrameAcceleration(self.model, self.data, fid, ref)
+        return normalize_vector(np.concatenate([np.asarray(m.linear), np.asarray(m.angular)]))
+
     def osc_inertia(self, q, frame_name, reference_frame="LOCAL_WORLD_ALIGNED"):
         """Operational-space inertia Lambda = (J M^{-1} J^T)^{-1}, 6 x 6.
         Cross-checks Minv via `pin.computeMinverse` (reduced for mimic)."""

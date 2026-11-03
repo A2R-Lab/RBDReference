@@ -1786,6 +1786,26 @@ class RBDReference(
         Rt = R_f.T
         return np.vstack([Rt @ Jv, Rt @ Jw])
 
+    def frame_velocity(self, q, qd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """Twist of a frame, 6 entries ``[linear(3); angular(3)]``, in the chosen
+        reference frame: ``J(q) qd`` with the same ``J`` as :meth:`frame_jacobian`.
+        Matches pinocchio's ``getFrameVelocity`` for LOCAL, WORLD and
+        LOCAL_WORLD_ALIGNED."""
+        J = self.frame_jacobian(q, frame_name, reference_frame)
+        return np.asarray(J @ np.asarray(qd, dtype=np.float64).reshape(-1), dtype=np.float64)
+
+    def frame_acceleration(self, q, qd, qdd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """Time derivative of :meth:`frame_velocity` in the chosen reference frame,
+        ``J qdd + Jdot qd``, 6 entries ``[linear(3); angular(3)]``. In LOCAL and
+        WORLD this is the spatial acceleration (pinocchio's ``getFrameAcceleration``);
+        in LOCAL_WORLD_ALIGNED the linear part is the classical acceleration of the
+        frame origin in world axes (pinocchio's ``getFrameClassicalAcceleration``)."""
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        qdd = np.asarray(qdd, dtype=np.float64).reshape(-1)
+        J = self.frame_jacobian(q, frame_name, reference_frame)
+        Jdot = self.frame_jacobian_dot(q, qd, frame_name, reference_frame)
+        return np.asarray(J @ qdd + Jdot @ qd, dtype=np.float64)
+
     def frame_jacobian_dot(self, q, qd, frame_name=None,
                            reference_frame="LOCAL_WORLD_ALIGNED"):
         """ANALYTIC time derivative Jdot of `frame_jacobian` along v = qd, 6 x nv.
