@@ -81,6 +81,17 @@ class RBDReference(
         self.friction_width = width
         self._spatial_xmat_derivative_func_cache = {}
         self._spatial_xmat_second_derivative_func_cache = {}
+        # Explicit couplings whose fold multiplier varies with the leader (the
+        # polynomial kind) are handled by projecting the full spanning tree
+        # onto the reduced coordinates (_embedding.EmbeddedReference); the
+        # constant mimic fold stays on the reduced recursions below.
+        self._embedding = None
+        if any(getattr(j, "is_mimic", False) and not j.is_linear_coupling()
+               for j in self.robot.get_joints_ordered_by_id()):
+            from ._embedding import EmbeddedReference
+            full = RBDReference(self.robot.full_tree_copy(), use_joint_dynamics=use_joint_dynamics,
+                                friction_model=friction_model, friction_width=friction_width)
+            self._embedding = EmbeddedReference(self.robot, full)
 
     @staticmethod
     def _normalize_xyzw_quaternion(quat):
@@ -1405,6 +1416,8 @@ class RBDReference(
         list of numpy.ndarray
             World-frame poses at the tool offset, including mimic relations.
         """
+        if self._embedding is not None:
+            return self._embedding.end_effector_pose(q, ee_joint_names, ee_offsets)
         # chain up the transforms (version 1 for starting from the root)
         def forwardChain(self, jid, q):
             # first get the joints in the chain
@@ -1722,6 +1735,8 @@ class RBDReference(
           * ``LOCAL``               -- twist expressed in the frame's body axes.
           * ``LOCAL_WORLD_ALIGNED`` -- at the frame origin, world-aligned axes.
         """
+        if self._embedding is not None:
+            return self._embedding.frame_jacobian(q, frame_name, reference_frame)
         reference_frame = str(reference_frame).upper()
         if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
             raise ValueError("reference_frame must be LOCAL/WORLD/LOCAL_WORLD_ALIGNED")
@@ -1791,6 +1806,8 @@ class RBDReference(
         reference frame: ``J(q) qd`` with the same ``J`` as :meth:`frame_jacobian`.
         Matches pinocchio's ``getFrameVelocity`` for LOCAL, WORLD and
         LOCAL_WORLD_ALIGNED."""
+        if self._embedding is not None:
+            return self._embedding.frame_velocity(q, qd, frame_name, reference_frame)
         J = self.frame_jacobian(q, frame_name, reference_frame)
         return np.asarray(J @ np.asarray(qd, dtype=np.float64).reshape(-1), dtype=np.float64)
 
@@ -1800,6 +1817,8 @@ class RBDReference(
         WORLD this is the spatial acceleration (pinocchio's ``getFrameAcceleration``);
         in LOCAL_WORLD_ALIGNED the linear part is the classical acceleration of the
         frame origin in world axes (pinocchio's ``getFrameClassicalAcceleration``)."""
+        if self._embedding is not None:
+            return self._embedding.frame_acceleration(q, qd, qdd, frame_name, reference_frame)
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
         qdd = np.asarray(qdd, dtype=np.float64).reshape(-1)
         J = self.frame_jacobian(q, frame_name, reference_frame)
@@ -2948,6 +2967,8 @@ class RBDReference(
         (c, v, a, f) : tuple
             Generalized forces and intermediate link quantities.
         """
+        if self._embedding is not None:
+            return self._embedding.inverse_dynamics(q, qd, qdd, GRAVITY, f_ext)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         if qdd is not None:
@@ -3343,6 +3364,8 @@ class RBDReference(
         Minv : numpy.ndarray
             N x N inverse joint-space inertia matrix.
         """
+        if self._embedding is not None:
+            return self._embedding.minv(q, output_dense)
         q = np.array(q, dtype=np.float64)
         # CRBA-invert fast path. Two cases route here:
         #  (1) MIMIC: the ABA-based recursion below uses per-body (S, U, d) that
@@ -3424,6 +3447,8 @@ class RBDReference(
         qdd : numpy.ndarray
             N-element joint accelerations.
         """
+        if self._embedding is not None:
+            return self._embedding.aba(q, qd, tau, f_ext=f_ext, GRAVITY=GRAVITY)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         tau = np.array(tau, dtype=np.float64)
@@ -3702,6 +3727,8 @@ class RBDReference(
         M : numpy.ndarray
             N x N joint-space inertia matrix.
         """
+        if self._embedding is not None:
+            return self._embedding.crba(q)
         q = np.array(q, dtype=np.float64)
         if self.robot.floating_base:
             # Floating-base CRBA via the SAME generalized block machinery as the
@@ -4133,6 +4160,8 @@ class RBDReference(
         (dc_dq, dc_dqd) : tuple
             Gradients of generalized forces wrt q and qd.
         """
+        if self._embedding is not None:
+            return self._embedding.inverse_dynamics_gradient(q, qd, qdd, GRAVITY, f_ext)
         
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
@@ -4187,6 +4216,8 @@ class RBDReference(
         qdd : numpy.ndarray
             N-element joint accelerations.
         """
+        if self._embedding is not None:
+            return self._embedding.forward_dynamics(q, qd, u, f_ext=f_ext)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         u = np.array(u, dtype=np.float64)
@@ -4212,6 +4243,8 @@ class RBDReference(
         (qdd_dq, qdd_dqd) : tuple
             Gradients of joint accelerations wrt q and qd.
         """
+        if self._embedding is not None:
+            return self._embedding.forward_dynamics_gradient(q, qd, u, f_ext=f_ext)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         u = np.array(u, dtype=np.float64)

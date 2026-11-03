@@ -47,6 +47,22 @@ def _random_armature(project_model, seed=7):
     return a
 
 
+@pytest.fixture(autouse=True)
+def _restore_armature(request):
+    """The model fixtures are session-cached and shared with every other
+    module; leave them with the zero armature they were built with (a nonzero
+    armature left behind failed the continuous-joint inverse dynamics test
+    that ran next on the same gen3 model, 2026-11-03)."""
+    yield
+    project_model = request.node.funcargs.get("project_model")
+    pinocchio_model = request.node.funcargs.get("pinocchio_model")
+    if project_model is not None:
+        nv = project_model.reference.robot.get_num_vel()
+        project_model.reference.set_armature(np.zeros(nv))
+        if pinocchio_model is not None:
+            pinocchio_model.set_armature(np.zeros(nv))
+
+
 @pytest.mark.parametrize(("spec", "base_mode"), _params())
 def test_armature_matches_pinocchio(spec, base_mode, project_model, pinocchio_model):
     a = _random_armature(project_model)
