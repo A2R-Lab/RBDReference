@@ -391,6 +391,30 @@ class PinocchioModelAdapter:
                                     np.asarray(angular, dtype=np.float64))
         return forces
 
+    def set_armature(self, armature):
+        """Install a rotor armature on the pinocchio model (nv_pin wide; a mimic
+        robot's reduced vector is expanded onto the mimicked joints' slots)."""
+        a = np.asarray(armature, dtype=np.float64).reshape(-1)
+        if self.mimic_info is None or self.mimic_info.is_empty():
+            self.model.armature = a
+        else:
+            # An armature is an inertia, not a velocity: on the unreduced model it
+            # lives on the LEADER joint's slot only (G^T diag(a_pin) G then equals
+            # diag(a) on the reduced slots); a follower slot carries zero. The
+            # velocity expansion would put alpha*a on the follower and the fold
+            # would count it again with alpha^2.
+            prefix = self._floating_prefix_v()
+            project_pos = {name: i for i, name in enumerate(self.project_scalar_joint_names)}
+            suffix = []
+            for name in self.scalar_joint_names:
+                if name in self.mimic_info.relations:
+                    suffix.append(0.0)
+                else:
+                    suffix.append(float(a[prefix + project_pos[name]]))
+            self.model.armature = np.concatenate([a[:prefix], np.asarray(suffix)])
+            if getattr(self, "_native_mimic_model", None) is not None:
+                self._native_mimic_model.armature = a
+
     def inverse_dynamics(self, q, qd, qdd, f_ext=None):
         import pinocchio as pin
 

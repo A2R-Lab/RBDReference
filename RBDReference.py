@@ -62,6 +62,13 @@ class RBDReference(
             raise ValueError(
                 f"friction_model must be 'sign' or 'tanh', got {friction_model!r}")
         self.friction_model = friction_model
+        # Rotor armature (reflected motor inertia), Pinocchio's model.armature:
+        # one entry per v-slot in the reduced coordinates, zero by default (a
+        # URDF carries none), zero on the floating root and on spherical
+        # blocks. set_armature installs it; it is added to the diagonal of the
+        # joint-space inertia: rnea gains a*qdd, crba and minv see M + diag(a),
+        # aba solves with it, forward dynamics and its derivatives follow.
+        self.armature = np.zeros(self.robot.get_num_vel(), dtype=np.float64)
         width = np.asarray(friction_width, dtype=np.float64)
         if width.ndim == 0:
             width = np.full(self.robot.get_num_vel(), float(width))
@@ -2704,6 +2711,26 @@ class RBDReference(
 
         return (c, f)
 
+    def set_armature(self, armature):
+        """Install a rotor armature (length nv, reduced coordinates). Entries on
+        the floating root's six slots or on a spherical block must be zero."""
+        a = np.asarray(armature, dtype=np.float64).reshape(-1)
+        nv = self.robot.get_num_vel()
+        if a.shape != (nv,):
+            raise ValueError(f"armature must be length nv={nv}; got {a.shape}")
+        for jid in range(self.robot.get_num_joints()):
+            if (self.robot.floating_base and jid == 0) or self.robot.joint_is_spherical(jid):
+                inds = self.robot.get_joint_index_v(jid)
+                inds = inds if isinstance(inds, (list, tuple)) else [inds]
+                if np.any(a[list(inds)] != 0.0):
+                    raise ValueError(
+                        f"armature must be zero on the v-slots {list(inds)} of joint {jid} "
+                        "(floating root or spherical block)")
+        self.armature = a.copy()
+
+    def _has_armature(self):
+        return bool(np.any(self.armature != 0.0))
+
     def inverse_dynamics(
         self,
         q,
@@ -2742,6 +2769,8 @@ class RBDReference(
         # joint-local viscous damping + Coulomb friction bias (no-op when the
         # robot declares neither; gated inside the helper)
         c = c + self._joint_dynamics_bias(qd)
+        if qdd is not None and self._has_armature():
+            c = c + self.armature * np.asarray(qdd, dtype=np.float64).reshape(-1)
         return (c, v, a, f)
 
     def f_ext_jacobian_transpose(self, q):
@@ -3017,7 +3046,7 @@ class RBDReference(
                     ind
                 )  # NOTE Can S be an np.array not np.matrix? np.matrix outdated...
                 U[matrix_ind, :] = np.matmul(IA[ind], S).reshape(6,)
-                Dinv[matrix_ind] = np.matmul(S.transpose(), U[matrix_ind, :])
+                Dinv[matrix_ind] = np.matmul(S.transpose(), U[matrix_ind, :]) + self.armature[matrix_ind]
                 # Update Minv and subtrees
                 Minv[matrix_ind, matrix_ind] = 1 / Dinv[matrix_ind]
                 # Deals with issue where result is np.matrix instead of np.array (can't shape np.matrix as 1 dimension)
@@ -3328,7 +3357,7 @@ class RBDReference(
                 Xmat = self.robot.get_Xmat_Func_by_id(ind)(_q)
 
                 U[:, inds_v] = np.squeeze(np.matmul(IA[ind], S))
-                d[ind] = np.matmul(np.transpose(S), U[:, inds_v])
+                d[ind] = np.matmul(np.transpose(S), U[:, inds_v]) + self.armature[inds_v]
                 u[inds_v] = tau[inds_v] - dyn_bias[inds_v] - (np.matmul(S.T, pA[:, ind])) - (np.matmul(U[:, inds_v].T, c[:, ind]))
 
                 if parent_ind != -1:
@@ -3432,7 +3461,7 @@ class RBDReference(
                 parent_ind = self.robot.get_parent_id(ind)
 
                 U[:,ind] = np.squeeze(np.array(np.matmul(IA[:,:,ind],S)))
-                d[ind] = np.matmul(np.transpose(S),U[:,ind])
+                d[ind] = np.matmul(np.transpose(S),U[:,ind]) + self.armature[ind]
                 u[ind] = tau[ind] - dyn_bias[ind] - np.matmul(np.transpose(S),pA[:,ind])
 
                 if parent_ind != -1:
@@ -3613,6 +3642,8 @@ class RBDReference(
                     H[np.ix_(vj, vi)] += block
                     H[np.ix_(vi, vj)] += block.T
 
+        if self._has_armature():
+            H = H + np.diag(self.armature)
         return H
 
     ##### Testing original RNEA_grad to help with CUDA 
