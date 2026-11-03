@@ -1983,6 +1983,8 @@ class RBDReference(
         local tangent chart of :meth:`integrate`; pinocchio's
         ``getFrameVelocityDerivatives`` for LOCAL, WORLD and
         LOCAL_WORLD_ALIGNED. ``dv/dqd`` is the frame Jacobian."""
+        if self._embedding is not None:
+            return self._embedding.frame_velocity_derivatives(q, qd, frame_name, reference_frame)
         dv_dq, J, _, _ = self._frame_kinematics_derivatives(q, qd, np.zeros_like(np.asarray(qd, dtype=np.float64)),
                                                             frame_name, reference_frame)
         return dv_dq, J
@@ -1994,6 +1996,8 @@ class RBDReference(
         spatial acceleration's derivatives; in LOCAL_WORLD_ALIGNED the
         classical acceleration's (the quantity :meth:`frame_acceleration`
         returns there). ``da/dqdd`` is the frame Jacobian."""
+        if self._embedding is not None:
+            return self._embedding.frame_acceleration_derivatives(q, qd, qdd, frame_name, reference_frame)
         dv_dq, J, da_dq, da_dqd = self._frame_kinematics_derivatives(q, qd, qdd, frame_name, reference_frame)
         return dv_dq, da_dq, da_dqd, J
 
@@ -2023,6 +2027,8 @@ class RBDReference(
 
         (The central-FD form is retained as `_frame_jacobian_dot_fd` for the
         machine-precision cross-check.)"""
+        if self._embedding is not None:
+            return self._embedding.frame_jacobian_dot(q, qd, frame_name, reference_frame)
         qd = np.array(qd, dtype=np.float64)
         reference_frame = str(reference_frame).upper()
         if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
@@ -2151,6 +2157,8 @@ class RBDReference(
 
         Composes the frame Jacobian with the inverse joint-space mass matrix
         (`self.minv`) and inverts the resulting 6x6 task-space matrix."""
+        if self._embedding is not None:
+            return self._embedding.osc_inertia(q, frame_name, reference_frame)
         J = self.frame_jacobian(q, frame_name, reference_frame)
         Minv = np.asarray(self.minv(q), dtype=np.float64)
         task = J @ Minv @ J.T

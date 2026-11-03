@@ -71,6 +71,11 @@ def test_linear_mimic_projection_equals_reduced_reference(floating):
             np.testing.assert_allclose(emb.frame_jacobian(q, leaf, rf), ref.frame_jacobian(q, leaf, rf), rtol=0, atol=1e-10)
             np.testing.assert_allclose(emb.frame_velocity(q, qd, leaf, rf), ref.frame_velocity(q, qd, leaf, rf), rtol=0, atol=1e-10)
             np.testing.assert_allclose(emb.frame_acceleration(q, qd, qdd, leaf, rf), ref.frame_acceleration(q, qd, qdd, leaf, rf), rtol=0, atol=1e-9)
+            np.testing.assert_allclose(emb.frame_jacobian_dot(q, qd, leaf, rf), ref.frame_jacobian_dot(q, qd, leaf, rf), rtol=0, atol=1e-9)
+            for a, b in zip(emb.frame_velocity_derivatives(q, qd, leaf, rf), ref.frame_velocity_derivatives(q, qd, leaf, rf)):
+                np.testing.assert_allclose(a, b, rtol=0, atol=1e-9)
+            for a, b in zip(emb.frame_acceleration_derivatives(q, qd, qdd, leaf, rf), ref.frame_acceleration_derivatives(q, qd, qdd, leaf, rf)):
+                np.testing.assert_allclose(a, b, rtol=0, atol=1e-8)
 
 
 _INERTIAL = ('<inertial><origin xyz="0.05 0.02 0.1"/><mass value="1.3"/>'
@@ -175,3 +180,17 @@ def test_polynomial_coupling_projection(tmp_path, floating):
             vp = ref.frame_velocity(ref.integrate(y, h * yd), yd + h * ydd, leaf, rf)
             vm = ref.frame_velocity(ref.integrate(y, -h * yd), yd - h * ydd, leaf, rf)
             np.testing.assert_allclose((vp - vm) / (2 * h), ref.frame_acceleration(y, yd, ydd, leaf, rf), rtol=0, atol=2e-5)
+            # Jdot = d/dt J along the flow; the kinematics derivatives against the chart
+            Jp = ref.frame_jacobian(ref.integrate(y, h * yd), leaf, rf); Jm = ref.frame_jacobian(ref.integrate(y, -h * yd), leaf, rf)
+            np.testing.assert_allclose((Jp - Jm) / (2 * h), ref.frame_jacobian_dot(y, yd, leaf, rf), rtol=0, atol=2e-5)
+            dv_dq, dv_dqd = ref.frame_velocity_derivatives(y, yd, leaf, rf)
+            np.testing.assert_allclose(dv_dq, _chart_fd(ref, lambda yy: ref.frame_velocity(yy, yd, leaf, rf), y, nv), rtol=0, atol=2e-5)
+            np.testing.assert_allclose(dv_dqd, _plain_fd(lambda v: ref.frame_velocity(y, v, leaf, rf), yd), rtol=0, atol=2e-5)
+            dv2, da_dq, da_dqd, da_dqdd = ref.frame_acceleration_derivatives(y, yd, ydd, leaf, rf)
+            np.testing.assert_allclose(dv2, dv_dq, rtol=0, atol=1e-12)
+            np.testing.assert_allclose(da_dq, _chart_fd(ref, lambda yy: ref.frame_acceleration(yy, yd, ydd, leaf, rf), y, nv), rtol=0, atol=5e-5)
+            np.testing.assert_allclose(da_dqd, _plain_fd(lambda v: ref.frame_acceleration(y, v, ydd, leaf, rf), yd), rtol=0, atol=2e-5)
+            np.testing.assert_allclose(da_dqdd, _plain_fd(lambda a: ref.frame_acceleration(y, yd, a, leaf, rf), ydd), rtol=0, atol=2e-5)
+            if nv >= 6:   # the task inertia exists only with six independent coordinates upstream
+                L = ref.osc_inertia(y, leaf, rf)
+                np.testing.assert_allclose(L @ (J @ ref.minv(y) @ J.T), np.eye(6), rtol=0, atol=1e-8)

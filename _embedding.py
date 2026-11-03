@@ -203,3 +203,60 @@ class EmbeddedReference:
     def frame_acceleration(self, y, yd, ydd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
         return self.full.frame_acceleration(self.expand_q(y), self.expand_qd(y, yd), self.expand_qdd(y, yd, ydd),
                                             frame_name, reference_frame)
+
+    # chain-rule blocks: d(G yd)/dy, d(G ydd + Gdot yd)/dy and /dyd (follower rows only)
+    def _dqd_dy(self, y, yd):
+        yd = np.asarray(yd, dtype=np.float64).reshape(-1)
+        out = np.zeros((self.nv_full, self.nv))
+        for fvi, lrv, _, ald, _ in self._alphas(y):
+            out[fvi, lrv] = ald * yd[lrv]
+        return out
+
+    def _dqdd_dy(self, y, yd, ydd):
+        yd = np.asarray(yd, dtype=np.float64).reshape(-1)
+        ydd = np.asarray(ydd, dtype=np.float64).reshape(-1)
+        out = np.zeros((self.nv_full, self.nv))
+        for fvi, lrv, _, ald, aldd in self._alphas(y):
+            out[fvi, lrv] = ald * ydd[lrv] + aldd * yd[lrv] ** 2
+        return out
+
+    def _dqdd_dyd(self, y, yd):
+        yd = np.asarray(yd, dtype=np.float64).reshape(-1)
+        out = np.zeros((self.nv_full, self.nv))
+        for fvi, lrv, _, ald, _ in self._alphas(y):
+            out[fvi, lrv] = 2.0 * ald * yd[lrv]
+        return out
+
+    def frame_jacobian_dot(self, y, yd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """d/dt of J_y = J_f(F(y)) G(y): Jdot_f G + J_f Gdot."""
+        q = self.expand_q(y)
+        qd = self.expand_qd(y, yd)
+        Jd = np.asarray(self.full.frame_jacobian_dot(q, qd, frame_name, reference_frame), dtype=np.float64)
+        J = np.asarray(self.full.frame_jacobian(q, frame_name, reference_frame), dtype=np.float64)
+        return Jd @ self.G(y) + J @ self._dqd_dy(y, yd)
+
+    def frame_velocity_derivatives(self, y, yd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        q = self.expand_q(y)
+        qd = self.expand_qd(y, yd)
+        dv_dq, dv_dqd = (np.asarray(m, dtype=np.float64) for m in
+                         self.full.frame_velocity_derivatives(q, qd, frame_name, reference_frame))
+        G = self.G(y)
+        return dv_dq @ G + dv_dqd @ self._dqd_dy(y, yd), dv_dqd @ G
+
+    def frame_acceleration_derivatives(self, y, yd, ydd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        q = self.expand_q(y)
+        qd = self.expand_qd(y, yd)
+        qdd = self.expand_qdd(y, yd, ydd)
+        dv_dq, da_dq, da_dqd, da_dqdd = (np.asarray(m, dtype=np.float64) for m in
+                                         self.full.frame_acceleration_derivatives(q, qd, qdd, frame_name, reference_frame))
+        G = self.G(y)
+        dqd_dy = self._dqd_dy(y, yd)
+        # dv/dy = dv/dq_f G + J_f d(G yd)/dy, with J_f = dv/dqd_f = da/dqdd_f
+        return (dv_dq @ G + da_dqdd @ dqd_dy,
+                da_dq @ G + da_dqd @ dqd_dy + da_dqdd @ self._dqdd_dy(y, yd, ydd),
+                da_dqd @ G + da_dqdd @ self._dqdd_dyd(y, yd),
+                da_dqdd @ G)
+
+    def osc_inertia(self, y, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        J = np.asarray(self.frame_jacobian(y, frame_name, reference_frame), dtype=np.float64)
+        return np.linalg.inv(J @ self.minv(y) @ J.T)
