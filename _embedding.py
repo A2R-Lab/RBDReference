@@ -257,6 +257,44 @@ class EmbeddedReference:
                 da_dqd @ G + da_dqdd @ self._dqdd_dyd(y, yd),
                 da_dqdd @ G)
 
+    # ── regressors and centroidal quantities ───────────────────────────────
+    def inverse_dynamics_regressor(self, y, yd, ydd, GRAVITY=-9.81):
+        """Y_y = G^T Y_f(F(y), G yd, G ydd + Gdot yd): tau_y = Y_y pi."""
+        Y = np.asarray(self.full.inverse_dynamics_regressor(self.expand_q(y), self.expand_qd(y, yd),
+                                                            self.expand_qdd(y, yd, ydd), GRAVITY=GRAVITY), dtype=np.float64)
+        return self.G(y).T @ Y
+
+    def kinetic_energy_regressor(self, y, yd):
+        return self.full.kinetic_energy_regressor(self.expand_q(y), self.expand_qd(y, yd))
+
+    def potential_energy_regressor(self, y, GRAVITY=-9.81):
+        return self.full.potential_energy_regressor(self.expand_q(y), GRAVITY=GRAVITY)
+
+    def com(self, y):
+        return self.full.com(self.expand_q(y))
+
+    def jacobian_com(self, y):
+        return np.asarray(self.full.jacobian_com(self.expand_q(y)), dtype=np.float64) @ self.G(y)
+
+    def ccrba(self, y, yd):
+        A, h = self.full.ccrba(self.expand_q(y), self.expand_qd(y, yd))
+        return np.asarray(A, dtype=np.float64) @ self.G(y), h
+
+    def generalized_gravity(self, y, GRAVITY=-9.81):
+        return self.reduce(y, self.full.generalized_gravity(self.expand_q(y), GRAVITY=GRAVITY))
+
+    def nonlinear_effects(self, y, yd, GRAVITY=-9.81):
+        return self.bias(y, yd, GRAVITY)
+
+    def kinetic_energy(self, y, yd):
+        return self.full.kinetic_energy(self.expand_q(y), self.expand_qd(y, yd))
+
+    def potential_energy(self, y, GRAVITY=-9.81):
+        return self.full.potential_energy(self.expand_q(y), GRAVITY=GRAVITY)
+
+    def mechanical_energy(self, y, yd, GRAVITY=-9.81):
+        return self.full.mechanical_energy(self.expand_q(y), self.expand_qd(y, yd), GRAVITY=GRAVITY)
+
     def osc_inertia(self, y, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
         J = np.asarray(self.frame_jacobian(y, frame_name, reference_frame), dtype=np.float64)
         return np.linalg.inv(J @ self.minv(y) @ J.T)

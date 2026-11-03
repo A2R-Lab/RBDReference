@@ -107,6 +107,8 @@ class _RegressorMixin:
         S^T projection onto each ancestor DOF). The link param blocks are
         ordered by body id (column block i = link i's 10 params).
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.inverse_dynamics_regressor(q, qd, qdd, GRAVITY)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         qdd = np.array(qdd, dtype=np.float64)

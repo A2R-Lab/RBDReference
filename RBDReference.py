@@ -5198,6 +5198,8 @@ class RBDReference(
         frame-invariant so the local-frame v_i and local-frame I_i agree with the
         world-frame value pinocchio reports). Param blocks are ordered by body id.
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.kinetic_energy_regressor(q, qd)
         from ._regressor import _BASIS_I
 
         q = np.array(q, dtype=np.float64)
@@ -5226,6 +5228,8 @@ class RBDReference(
         (`_world_transforms`) as `_total_mass_and_com`, so y_PE . pi reproduces
         `potential_energy` exactly.
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.potential_energy_regressor(q, GRAVITY)
         NB = self.robot.get_num_bodies()
         g = np.array([0.0, 0.0, GRAVITY], dtype=np.float64)
         Xw = self._world_transforms(q)            # 4x4 homogeneous world transforms

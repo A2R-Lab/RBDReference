@@ -76,6 +76,18 @@ def test_linear_mimic_projection_equals_reduced_reference(floating):
                 np.testing.assert_allclose(a, b, rtol=0, atol=1e-9)
             for a, b in zip(emb.frame_acceleration_derivatives(q, qd, qdd, leaf, rf), ref.frame_acceleration_derivatives(q, qd, qdd, leaf, rf)):
                 np.testing.assert_allclose(a, b, rtol=0, atol=1e-8)
+        # regressors, centroidal and energy quantities through the projection
+        np.testing.assert_allclose(emb.inverse_dynamics_regressor(q, qd, qdd), ref.inverse_dynamics_regressor(q, qd, qdd), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.kinetic_energy_regressor(q, qd), ref.kinetic_energy_regressor(q, qd), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.potential_energy_regressor(q), ref.potential_energy_regressor(q), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.com(q), ref.com(q), rtol=0, atol=1e-10)
+        np.testing.assert_allclose(emb.jacobian_com(q), ref.jacobian_com(q), rtol=0, atol=1e-10)
+        for a, b in zip(emb.ccrba(q, qd), ref.ccrba(q, qd)):
+            np.testing.assert_allclose(a, b, rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.generalized_gravity(q), ref.generalized_gravity(q), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.nonlinear_effects(q, qd), ref.nonlinear_effects(q, qd), rtol=0, atol=1e-9)
+        assert abs(emb.kinetic_energy(q, qd) - ref.kinetic_energy(q, qd)) < 1e-9
+        assert abs(emb.potential_energy(q) - ref.potential_energy(q)) < 1e-9
 
 
 _INERTIAL = ('<inertial><origin xyz="0.05 0.02 0.1"/><mass value="1.3"/>'
@@ -194,3 +206,19 @@ def test_polynomial_coupling_projection(tmp_path, floating):
             if nv >= 6:   # the task inertia exists only with six independent coordinates upstream
                 L = ref.osc_inertia(y, leaf, rf)
                 np.testing.assert_allclose(L @ (J @ ref.minv(y) @ J.T), np.eye(6), rtol=0, atol=1e-8)
+        # regressors: tau = Y pi with the robot's own inertial parameters; KE and PE likewise
+        from RBDReference.tests.test_regressor_equivalence import _project_pi
+        pi = _project_pi(type("M", (), {"robot": robot})())
+        tau = ref.inverse_dynamics(y, yd, ydd)[0]
+        np.testing.assert_allclose(np.asarray(ref.inverse_dynamics_regressor(y, yd, ydd)) @ pi, tau, rtol=0, atol=1e-8)
+        np.testing.assert_allclose(np.asarray(ref.kinetic_energy_regressor(y, yd)).reshape(-1) @ pi, 0.5 * yd @ ref.crba(y) @ yd, rtol=0, atol=1e-8)
+        np.testing.assert_allclose(np.asarray(ref.potential_energy_regressor(y)).reshape(-1) @ pi, ref.potential_energy(y), rtol=0, atol=1e-8)
+        np.testing.assert_allclose(ref.forward_dynamics_parameter_gradient(y, yd, u), -ref.minv(y) @ np.asarray(ref.inverse_dynamics_regressor(y, yd, ref.forward_dynamics(y, yd, u))), rtol=0, atol=1e-8)
+        # centroidal: the CoM Jacobian against the chart, h = A yd, gravity and bias against the inverse dynamics
+        np.testing.assert_allclose(ref.jacobian_com(y), _chart_fd(ref, lambda yy: np.asarray(ref.com(yy)).reshape(-1), y, nv), rtol=0, atol=2e-6)
+        A, hvec = ref.ccrba(y, yd)
+        np.testing.assert_allclose(np.asarray(A) @ yd, np.asarray(hvec).reshape(-1), rtol=0, atol=1e-10)
+        np.testing.assert_allclose(ref.generalized_gravity(y), ref.inverse_dynamics(y, np.zeros(nv), np.zeros(nv))[0], rtol=0, atol=1e-10)
+        np.testing.assert_allclose(ref.nonlinear_effects(y, yd), ref.inverse_dynamics(y, yd, np.zeros(nv))[0], rtol=0, atol=1e-10)
+        assert abs(ref.kinetic_energy(y, yd) - 0.5 * yd @ ref.crba(y) @ yd) < 1e-9
+        assert abs(ref.mechanical_energy(y, yd) - ref.kinetic_energy(y, yd) - ref.potential_energy(y)) < 1e-9

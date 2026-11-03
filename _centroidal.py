@@ -163,6 +163,8 @@ class _CentroidalMixin:
 
     def com(self, q):
         """Center-of-mass world position (3-vector)."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.com(q)
         _m, com = self._total_mass_and_com(q)
         return com
 
@@ -173,6 +175,8 @@ class _CentroidalMixin:
         link i's body Jacobian taken at the link's CoM. Equivalently the linear
         rows of the CMM A divided by M_total (used here, since A already carries
         the mass-weighted linear momentum)."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.jacobian_com(q)
         A, _h, m_total = self._ccrba_core(q, np.zeros(self.robot.get_num_vel()))
         return A[:3, :] / m_total
 
@@ -218,6 +222,8 @@ class _CentroidalMixin:
 
         Matches `pin.ccrba` (data.Ag, data.hg), ordered [linear; angular] at the
         CoM in a world-aligned frame."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.ccrba(q, qd)
         A, h, _m = self._ccrba_core(q, qd)
         return A, h
 
