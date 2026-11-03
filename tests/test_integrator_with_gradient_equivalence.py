@@ -51,6 +51,7 @@ _INTEGRATORS = ("euler", "semi_implicit_euler", "rk4")
 # (robot_id, base_mode). fr3-fixed is the mimic case (NB > NV).
 _CASES = (
     ("iiwa14", "fixed"),
+    ("gen3", "fixed"),
     ("go2", "floating"),
     ("fr3", "floating"),
     ("fr3", "fixed"),

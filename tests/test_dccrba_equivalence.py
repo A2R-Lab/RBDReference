@@ -41,6 +41,7 @@ from RBDReference.tests.state_sampling import build_dynamics_samples
 # oracle is folded to the project layout for the column comparison.
 _DCCRBA_CASES = [
     ("iiwa14", "fixed"),
+    ("gen3", "fixed"),
     ("go2", "floating"),
     ("g1", "floating"),
     ("fr3", "fixed"),

@@ -15,7 +15,7 @@ from RBDReference.tests.state_sampling import build_dynamics_samples
 def _cases(base_mode):
     # build_case_params returns pytest.param objects; filter on their values.
     return [p for p in build_case_params(base_mode)
-            if p.values[0].robot_id in ("iiwa14", "go2")]
+            if p.values[0].robot_id in ("iiwa14", "go2", "gen3")]
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), _cases("fixed") + _cases("floating"))
