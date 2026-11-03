@@ -1569,6 +1569,8 @@ class RBDReference(
         list of numpy.ndarray
             Per end-effector 6 x nv matrix of d(pose)/dv.
         """
+        if self._embedding is not None:
+            return self._embedding.end_effector_pose_gradient(q, ee_joint_names, ee_offsets)
         q = self._normalize_kinematics_q(q)
         ee_offset_Xtools = self._normalize_ee_offset_transforms(ee_offsets)
         nv = self.robot.get_num_vel()

@@ -162,8 +162,12 @@ def test_polynomial_coupling_projection(tmp_path, floating):
         dq, dqd = ref.forward_dynamics_gradient(y, yd, u)
         np.testing.assert_allclose(dq, _chart_fd(ref, lambda yy: ref.forward_dynamics(yy, yd, u), y, nv), rtol=0, atol=2e-5)
         np.testing.assert_allclose(dqd, _plain_fd(lambda v: ref.forward_dynamics(y, v, u), yd), rtol=0, atol=2e-5)
-        # kinematics: v = J yd; a = d/dt v along the flow (classical in LWA)
+        # kinematics: the pose gradient against chart finite differences of the pose
         leaf = robot.get_joint_by_id(int(robot.get_leaf_nodes()[0])).get_name()
+        dpose = np.asarray(ref.end_effector_pose_gradient(y, leaf), dtype=np.float64).reshape(-1, nv)
+        fd = _chart_fd(ref, lambda yy: np.asarray(ref.end_effector_pose(yy, leaf), dtype=np.float64).reshape(-1), y, nv)
+        np.testing.assert_allclose(dpose, fd, rtol=0, atol=2e-6)
+        # v = J yd; a = d/dt v along the flow (classical in LWA)
         for rf in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
             J = ref.frame_jacobian(y, leaf, rf)
             assert J.shape == (6, nv)

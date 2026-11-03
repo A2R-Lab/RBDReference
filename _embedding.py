@@ -188,6 +188,12 @@ class EmbeddedReference:
     def end_effector_pose(self, y, ee_joint_names=None, ee_offsets=None):
         return self.full.end_effector_pose(self.expand_q(y), ee_joint_names, ee_offsets)
 
+    def end_effector_pose_gradient(self, y, ee_joint_names=None, ee_offsets=None):
+        """The full tree's pose gradient right-multiplied by G (chain rule
+        through q = F(y)); the trailing axis is the velocity index."""
+        grad = np.asarray(self.full.end_effector_pose_gradient(self.expand_q(y), ee_joint_names, ee_offsets), dtype=np.float64)
+        return grad @ self.G(y)
+
     def frame_jacobian(self, y, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
         return np.asarray(self.full.frame_jacobian(self.expand_q(y), frame_name, reference_frame)) @ self.G(y)
 
