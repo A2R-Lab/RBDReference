@@ -32,9 +32,12 @@ import numpy as np
 class EmbeddedReference:
     """Projection of a full-tree ``RBDReference`` onto reduced coordinates."""
 
-    def __init__(self, reduced_robot, full_reference):
+    def __init__(self, reduced_robot, full_reference, reduced=None):
         self.robot = reduced_robot
         self.full = full_reference
+        # the reduced RBDReference (joint-dynamics settings: use_joint_dynamics,
+        # friction_model, friction_width per reduced slot); None adds no bias
+        self.reduced = reduced
         self.full_robot = full_reference.robot
         self.nv = reduced_robot.get_num_vel()
         self.nq = reduced_robot.get_num_pos()
@@ -126,7 +129,7 @@ class EmbeddedReference:
         # ydd = 0 is not qdd_full = 0: the followers accelerate by Gdot yd.
         qdd = self.gdot_yd(y, yd) if ydd is None else self.expand_qdd(y, yd, ydd)
         c, v, a, f = self.full.inverse_dynamics(q, qd, qdd, GRAVITY, f_ext=f_ext)
-        return (self.reduce(y, c), v, a, f)
+        return (self.reduce(y, c) + self.joint_dynamics_bias(y, yd), v, a, f)
 
     def crba(self, y):
         G = self.G(y)
@@ -139,7 +142,7 @@ class EmbeddedReference:
         """c_y = G^T rnea_full(F(y), G yd, Gdot yd)."""
         q = self.expand_q(y)
         c, _, _, _ = self.full.inverse_dynamics(q, self.expand_qd(y, yd), self.gdot_yd(y, yd), GRAVITY, f_ext=f_ext)
-        return self.reduce(y, c)
+        return self.reduce(y, c) + self.joint_dynamics_bias(y, yd)
 
     def forward_dynamics(self, y, yd, u, f_ext=None, GRAVITY=-9.81):
         u = np.asarray(u, dtype=np.float64).reshape(-1)
@@ -175,7 +178,83 @@ class EmbeddedReference:
             dG_T_c[lrv, lrv] += ald * c[fvi]
         dtau_dy = G.T @ (dc_dq @ dq_dy + dc_dqd @ dqd_dy + M @ dqdd_dy) + dG_T_c
         dtau_dyd = G.T @ (dc_dqd @ G + M @ dqdd_dyd)
-        return np.hstack([dtau_dy, dtau_dyd])
+        jd_dy, jd_dyd = self.joint_dynamics_gradient(y, yd)
+        return np.hstack([dtau_dy + jd_dy, dtau_dyd + jd_dyd])
+
+    # ── joint dynamics (damping, Coulomb friction) in the reduced coordinates ──
+    def _joint_dynamics_terms(self, y):
+        """(reduced v-slot, alpha, alpha', b, fr) per joint of the reduced
+        robot that declares damping or friction: an independent joint has
+        alpha = 1, a follower alpha(y_l) at its leader's slot. The floating
+        root carries none."""
+        red = self.reduced
+        if red is None or not red.use_joint_dynamics:
+            return []
+        robot = self.robot
+        has_b = robot.robot_has_joint_damping()
+        has_f = robot.robot_has_joint_friction()
+        if not (has_b or has_f):
+            return []
+        y = np.asarray(y, dtype=np.float64).reshape(-1)
+        by_id = {}
+        for joint, fqi, fvi, lfq, lrq, lrv in self.followers:
+            ql = float(y[lrq])
+            by_id[joint.get_id()] = (lrv, joint.coupling_alpha(ql), joint.coupling_alpha_d(ql))
+        out = []
+        for joint in robot.get_joints_ordered_by_id():
+            jid = joint.get_id()
+            if robot.floating_base and robot.get_parent_id(jid) == -1:
+                continue
+            b = float(robot.get_damping_by_id(jid)) if has_b else 0.0
+            fr = float(robot.get_friction_by_id(jid)) if has_f else 0.0
+            if b == 0.0 and fr == 0.0:
+                continue
+            if jid in by_id:
+                lrv, al, ald = by_id[jid]
+                out.append((lrv, al, ald, b, fr))
+            else:
+                for k in self._aslist(robot.get_joint_index_v(jid)):
+                    out.append((int(k), 1.0, 0.0, b, fr))
+        return out
+
+    def _friction_shape_and_slope(self, k, qd_k):
+        """(s(qd), ds/dqd) of the reduced slot's friction shape: sign (slope 0)
+        or tanh(qd / w_k) with slope sech^2 / w_k."""
+        red = self.reduced
+        if red.friction_model == "tanh":
+            w = float(red.friction_width[k])
+            th = np.tanh(qd_k / w)
+            return th, (1.0 - th * th) / w
+        return float(np.sign(qd_k)), 0.0
+
+    def joint_dynamics_bias(self, y, yd):
+        """tau_y += alpha^2 b yd_l + |alpha| fr s(yd_l) per damped joint."""
+        out = np.zeros(self.nv)
+        terms = self._joint_dynamics_terms(y)
+        if not terms:
+            return out
+        yd = np.asarray(yd, dtype=np.float64).reshape(-1)
+        for k, al, _, b, fr in terms:
+            s, _ = self._friction_shape_and_slope(k, float(yd[k]))
+            out[k] += al * al * b * yd[k] + abs(al) * fr * s
+        return out
+
+    def joint_dynamics_gradient(self, y, yd):
+        """(d/dy, d/dyd) of joint_dynamics_bias, both nv x nv: the dyd
+        diagonal alpha^2 b + |alpha| fr s'(yd_l); the dy diagonal (the fold's
+        own dependence on the leader) 2 alpha alpha' b yd_l +
+        sign(alpha) alpha' fr s(yd_l)."""
+        d_y = np.zeros((self.nv, self.nv))
+        d_yd = np.zeros((self.nv, self.nv))
+        terms = self._joint_dynamics_terms(y)
+        if not terms:
+            return d_y, d_yd
+        yd = np.asarray(yd, dtype=np.float64).reshape(-1)
+        for k, al, ald, b, fr in terms:
+            s, sl = self._friction_shape_and_slope(k, float(yd[k]))
+            d_yd[k, k] += al * al * b + abs(al) * fr * sl
+            d_y[k, k] += 2.0 * al * ald * b * yd[k] + np.sign(al) * ald * fr * s
+        return d_y, d_yd
 
     def forward_dynamics_gradient(self, y, yd, u, f_ext=None, GRAVITY=-9.81):
         ydd = self.forward_dynamics(y, yd, u, f_ext=f_ext, GRAVITY=GRAVITY)

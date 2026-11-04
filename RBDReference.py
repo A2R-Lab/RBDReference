@@ -89,9 +89,12 @@ class RBDReference(
         if any(getattr(j, "is_mimic", False) and not j.is_linear_coupling()
                for j in self.robot.get_joints_ordered_by_id()):
             from ._embedding import EmbeddedReference
-            full = RBDReference(self.robot.full_tree_copy(), use_joint_dynamics=use_joint_dynamics,
-                                friction_model=friction_model, friction_width=friction_width)
-            self._embedding = EmbeddedReference(self.robot, full)
+            # The full tree carries no joint dynamics: the projection adds the
+            # reduced-coordinate bias itself (alpha(y)^2 b, |alpha(y)| f, with
+            # the tanh width per reduced slot), the same convention as the
+            # constant fold above and the generated kernels.
+            full = RBDReference(self.robot.full_tree_copy())
+            self._embedding = EmbeddedReference(self.robot, full, reduced=self)
 
     @staticmethod
     def _normalize_xyzw_quaternion(quat):
@@ -2813,9 +2816,11 @@ class RBDReference(
         if not (has_damping or has_friction):
             return bias
         # Iterate bodies and fold each joint's coefficient into its v-slot.
-        # Mimic joints share their target's slot; their damping/friction add
-        # into that shared slot (scaled by the mimic multiplier, matching the
-        # alpha-weighted reduction used throughout the reduced-model path).
+        # Mimic joints share their target's slot: the follower's own torque
+        # b*qd_f + fr*s(qd_f) with qd_f = alpha*qd_l projects onto the leader
+        # through alpha, so the slot gains alpha^2*b*qd_l + |alpha|*fr*s(qd_l)
+        # (the congruence G^T B G; dissipation stays non-negative for a
+        # negative ratio). The tanh width belongs to the reduced slot.
         for jid in range(self.robot.get_num_bodies()):
             b = float(self.robot.get_damping_by_id(jid)) if has_damping else 0.0
             fr = float(self.robot.get_friction_by_id(jid)) if has_friction else 0.0
@@ -2828,7 +2833,7 @@ class RBDReference(
             idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
             for k in idx_list:
                 qd_k = qd[k]
-                bias[k] += alpha * (b * qd_k + fr * self._friction_shape(qd_k, k))
+                bias[k] += alpha * alpha * b * qd_k + abs(alpha) * fr * self._friction_shape(qd_k, k)
         return bias
 
     def _friction_shape(self, qd_k, k):
@@ -2841,11 +2846,12 @@ class RBDReference(
         """Per-v-slot derivative of the joint-dynamics bias with respect to the
         slot's own velocity: the first (order=1) or second (order=2) derivative.
 
-        order=1 is alpha*(damping + (friction/w) sech^2(qd/w)) under the tanh
-        model and alpha*damping under the sign model (the Coulomb term has zero
-        subgradient almost everywhere). order=2 is alpha*(-(2 friction/w^2)
-        tanh(qd/w) sech^2(qd/w)) under tanh and zero under sign (damping is
-        linear in qd). Mirrors _joint_dynamics_bias: iterate bodies, map each to
+        order=1 is alpha^2*damping + |alpha|*(friction/w) sech^2(qd/w) under
+        the tanh model and alpha^2*damping under the sign model (the Coulomb
+        term has zero subgradient almost everywhere). order=2 is
+        |alpha|*(-(2 friction/w^2) tanh(qd/w) sech^2(qd/w)) under tanh and zero
+        under sign (damping is linear in qd). The powers of alpha are those of
+        _joint_dynamics_bias. Mirrors _joint_dynamics_bias: iterate bodies, map each to
         its reduced v-slot with the mimic multiplier, skip the floating root, and
         accumulate so mimic joints sharing a slot sum. Zero when
         use_joint_dynamics is False or no joint declares damping/friction.
@@ -2874,19 +2880,17 @@ class RBDReference(
                 continue
             idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
             for k in idx_list:
-                if order == 1:
-                    val = b
-                else:
-                    val = 0.0
+                val_b = b if order == 1 else 0.0
+                val_f = 0.0
                 if tanh_model and fr != 0.0:
                     w = self.friction_width[k]
                     th = np.tanh(qd[k] / w)
                     sech2 = 1.0 - th * th
                     if order == 1:
-                        val += (fr / w) * sech2
+                        val_f = (fr / w) * sech2
                     else:
-                        val += -(2.0 * fr / (w * w)) * th * sech2
-                diag[k] += alpha * val
+                        val_f = -(2.0 * fr / (w * w)) * th * sech2
+                diag[k] += alpha * alpha * val_b + abs(alpha) * val_f
         return diag
 
     def inverse_dynamics_bpass(self, q, f):

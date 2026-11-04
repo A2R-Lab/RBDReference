@@ -66,8 +66,8 @@ def test_sign_model_is_the_default_and_unchanged():
         for jid in range(robot.get_num_bodies()):
             k = robot.get_joint_index_v(jid)
             alpha = ref._mimic_multiplier(jid)
-            expected[k] += alpha * (robot.get_damping_by_id(jid) * qd[k]
-                                    + robot.get_friction_by_id(jid) * np.sign(qd[k]))
+            expected[k] += (alpha * alpha * robot.get_damping_by_id(jid) * qd[k]
+                            + abs(alpha) * robot.get_friction_by_id(jid) * np.sign(qd[k]))
         assert np.allclose(bias, expected, rtol=0, atol=1e-12)
         # the sign model carries no friction slope anywhere and no second derivative
         assert np.allclose(ref._joint_dynamics_derivative_diag(qd, 2), 0.0)
@@ -75,7 +75,7 @@ def test_sign_model_is_the_default_and_unchanged():
         damping_only = np.zeros(nv)
         for jid in range(robot.get_num_bodies()):
             k = robot.get_joint_index_v(jid)
-            damping_only[k] += ref._mimic_multiplier(jid) * robot.get_damping_by_id(jid)
+            damping_only[k] += ref._mimic_multiplier(jid) ** 2 * robot.get_damping_by_id(jid)
         assert np.allclose(grad, damping_only, rtol=0, atol=1e-12)
 
 
@@ -95,9 +95,9 @@ def test_tanh_bias_and_slopes_match_closed_form(width):
             b = robot.get_damping_by_id(jid)
             c = robot.get_friction_by_id(jid)
             th = np.tanh(qd[k] / w[k]); s2 = 1.0 - th * th
-            bias[k] += a * (b * qd[k] + c * th)
-            g1[k] += a * (b + c / w[k] * s2)
-            g2[k] += a * (-2.0 * c / w[k] ** 2 * th * s2)
+            bias[k] += a * a * b * qd[k] + abs(a) * c * th
+            g1[k] += a * a * b + abs(a) * c / w[k] * s2
+            g2[k] += abs(a) * (-2.0 * c / w[k] ** 2 * th * s2)
         assert np.allclose(ref._joint_dynamics_bias(qd), bias, rtol=0, atol=1e-12)
         assert np.allclose(ref._joint_dynamics_derivative_diag(qd, 1), g1, rtol=0, atol=1e-12)
         assert np.allclose(ref._joint_dynamics_derivative_diag(qd, 2), g2, rtol=0, atol=1e-12)
