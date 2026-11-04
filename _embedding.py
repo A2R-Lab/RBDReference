@@ -373,6 +373,42 @@ class EmbeddedReference:
         A, h = self.full.ccrba(self.expand_q(y), self.expand_qd(y, yd))
         return np.asarray(A, dtype=np.float64) @ self.G(y), h
 
+    def _Gdot(self, y, yd):
+        yd = np.asarray(yd, dtype=np.float64).reshape(-1)
+        Gdot = np.zeros((self.nv_full, self.nv))
+        for fvi, lrv, _, ald, _ in self._alphas(y):
+            Gdot[fvi, lrv] = ald * yd[lrv]
+        return Gdot
+
+    def dccrba(self, y):
+        """dA_y[:, k, i] of A_y = A_f(F(y)) G(y): the full tensor contracted
+        with G on both the column and the tangent, plus A_f[:, fv] alpha' at
+        the leader's diagonal cell of every follower."""
+        q = self.expand_q(y)
+        G = self.G(y)
+        dA = np.asarray(self.full.dccrba(q), dtype=np.float64)
+        out = np.einsum("ajm,jk,mi->aki", dA, G, G)
+        A = np.asarray(self.full.ccrba(q, np.zeros(self.nv_full))[0], dtype=np.float64)
+        for fvi, lrv, _, ald, _ in self._alphas(y):
+            out[:, lrv, lrv] += A[:, fvi] * ald
+        return out
+
+    def cmm_time_variation(self, y, yd):
+        """Adot_y = Adot_f G + A_f Gdot."""
+        q = self.expand_q(y)
+        G = self.G(y)
+        qd = G @ np.asarray(yd, dtype=np.float64).reshape(-1)
+        Adot = np.asarray(self.full.cmm_time_variation(q, qd), dtype=np.float64)
+        A = np.asarray(self.full.ccrba(q, qd)[0], dtype=np.float64)
+        return Adot @ G + A @ self._Gdot(y, yd)
+
+    def centroidal_momentum_time_variation(self, y, yd, ydd):
+        """hdot = A_y ydd + Adot_y yd, both terms analytic (the full tree's
+        hdot sources its bias from finite differences)."""
+        ydd = np.asarray(ydd, dtype=np.float64).reshape(-1)
+        A, _ = self.ccrba(y, yd)
+        return np.asarray(A, dtype=np.float64) @ ydd + self.cmm_time_variation(y, yd) @ np.asarray(yd, dtype=np.float64).reshape(-1)
+
     def generalized_gravity(self, y, GRAVITY=-9.81):
         return self.reduce(y, self.full.generalized_gravity(self.expand_q(y), GRAVITY=GRAVITY))
 

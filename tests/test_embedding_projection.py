@@ -86,6 +86,12 @@ def test_linear_mimic_projection_equals_reduced_reference(floating):
             np.testing.assert_allclose(a, b, rtol=0, atol=1e-9)
         np.testing.assert_allclose(emb.generalized_gravity(q), ref.generalized_gravity(q), rtol=0, atol=1e-9)
         np.testing.assert_allclose(emb.coriolis_matrix(q, qd), ref.coriolis_matrix(q, qd), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.dccrba(q), ref.dccrba(q), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.cmm_time_variation(q, qd), ref.cmm_time_variation(q, qd), rtol=0, atol=1e-9)
+        # the reduced reference's hdot sources its bias from finite differences; the analytic pieces agree exactly
+        np.testing.assert_allclose(emb.centroidal_momentum_time_variation(q, qd, qdd),
+                                   np.asarray(ref.ccrba(q, qd)[0]) @ qdd + ref.cmm_time_variation(q, qd) @ qd, rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.centroidal_momentum_time_variation(q, qd, qdd), ref.centroidal_momentum_time_variation(q, qd, qdd), rtol=0, atol=1e-6)
         np.testing.assert_allclose(emb.nonlinear_effects(q, qd), ref.nonlinear_effects(q, qd), rtol=0, atol=1e-9)
         assert abs(emb.kinetic_energy(q, qd) - ref.kinetic_energy(q, qd)) < 1e-9
         assert abs(emb.potential_energy(q) - ref.potential_energy(q)) < 1e-9
@@ -177,6 +183,19 @@ def test_polynomial_coupling_projection(tmp_path, floating):
         np.testing.assert_allclose(C @ yd + ref.generalized_gravity(y), ref.nonlinear_effects(y, yd), rtol=0, atol=1e-9)
         Mp = ref.crba(ref.integrate(y, h * yd)); Mm = ref.crba(ref.integrate(y, -h * yd))
         np.testing.assert_allclose(C + C.T, (Mp - Mm) / (2 * h), rtol=0, atol=2e-5)
+        # the momentum matrix derivatives: the tensor against the chart, Adot along the flow, hdot = A ydd + Adot yd
+        A = np.asarray(ref.ccrba(y, yd)[0], dtype=np.float64)
+        dA = ref.dccrba(y)
+        for i in range(nv):
+            e = np.zeros(nv); e[i] = h
+            fd = (np.asarray(ref.ccrba(ref.integrate(y, e), yd)[0]) - np.asarray(ref.ccrba(ref.integrate(y, -e), yd)[0])) / (2 * h)
+            np.testing.assert_allclose(dA[:, :, i], fd, rtol=0, atol=2e-5)
+        Ap = np.asarray(ref.ccrba(ref.integrate(y, h * yd), yd)[0]); Am = np.asarray(ref.ccrba(ref.integrate(y, -h * yd), yd)[0])
+        Adot = ref.cmm_time_variation(y, yd)
+        np.testing.assert_allclose(Adot, (Ap - Am) / (2 * h), rtol=0, atol=2e-5)
+        np.testing.assert_allclose(np.einsum("abi,i->ab", dA, yd), Adot, rtol=0, atol=1e-9)
+        hp = np.asarray(ref.ccrba(ref.integrate(y, h * yd), yd + h * ydd)[1]); hm = np.asarray(ref.ccrba(ref.integrate(y, -h * yd), yd - h * ydd)[1])
+        np.testing.assert_allclose(ref.centroidal_momentum_time_variation(y, yd, ydd), (hp - hm) / (2 * h), rtol=0, atol=2e-5)
         # gradients against chart finite differences of the projected values
         dc = ref.inverse_dynamics_gradient(y, yd, ydd)
         np.testing.assert_allclose(dc[:, :nv], _chart_fd(ref, lambda yy: ref.inverse_dynamics(yy, yd, ydd)[0], y, nv), rtol=0, atol=2e-5)

@@ -291,6 +291,8 @@ class _CentroidalMixin:
 
         The `A qdd` term is exact (the value-layer CMM); the bias `Adot qd` is
         the FD-sourced `_centroidal_bias`."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.centroidal_momentum_time_variation(q, qd, qdd)
         return self._hdot_fast(q, qd, qdd)
 
     # ---- centroidal dynamics derivatives ----
@@ -516,6 +518,8 @@ class _CentroidalMixin:
         valid for fixed- and floating-base. Matches the FD tensor to ~1e-7 and
         both pinocchio contractions to ~1e-12 (relative ~1e-9 on big robots).
         See `dccrba_fd` for the finite-difference cross-check."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.dccrba(q)
         return self._dccrba_analytic(q)
 
     def dccrba_fd(self, q, fd_step=1e-5):
@@ -555,6 +559,8 @@ class _CentroidalMixin:
         `dccrba` contractions. `Adot @ qd == centroidal_bias` (the `Adot qd`
         term of `hdot`) and `Adot @ qdd + (Adot qd)` matches
         `centroidal_momentum_time_variation`."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.cmm_time_variation(q, qd)
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
         dA = self._dccrba_analytic(q)
         return np.einsum("abi,i->ab", dA, qd)
