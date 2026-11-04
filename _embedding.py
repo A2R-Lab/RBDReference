@@ -409,6 +409,24 @@ class EmbeddedReference:
         A, _ = self.ccrba(y, yd)
         return np.asarray(A, dtype=np.float64) @ ydd + self.cmm_time_variation(y, yd) @ np.asarray(yd, dtype=np.float64).reshape(-1)
 
+    # ── external-force gradients ──────────────────────────────────────────
+    def f_ext_jacobian_transpose(self, y):
+        """J_y^T = G^T J_f^T (nv x 6 NB; the bodies are those of the full tree)."""
+        return self.G(y).T @ np.asarray(self.full.f_ext_jacobian_transpose(self.expand_q(y)), dtype=np.float64)
+
+    def f_ext_jacobian_transpose_dq(self, y):
+        """d(G^T J_f^T)/dy (nv x 6 NB x nv): the full tensor contracted with G
+        on the row and the tangent, plus alpha' J_f^T[fv, :] at row l of the
+        slice l of every follower (the derivative of G itself)."""
+        q = self.expand_q(y)
+        G = self.G(y)
+        JT = np.asarray(self.full.f_ext_jacobian_transpose(q), dtype=np.float64)
+        dJT = np.asarray(self.full.f_ext_jacobian_transpose_dq(q), dtype=np.float64)
+        out = np.einsum("jr,jcm,mi->rci", G, dJT, G)
+        for fvi, lrv, _, ald, _ in self._alphas(y):
+            out[lrv, :, lrv] += ald * JT[fvi, :]
+        return out
+
     def generalized_gravity(self, y, GRAVITY=-9.81):
         return self.reduce(y, self.full.generalized_gravity(self.expand_q(y), GRAVITY=GRAVITY))
 

@@ -3014,6 +3014,8 @@ class RBDReference(
         ``f_ext_gradient``). This method returns the (un-signed) ``J^T`` so both
         ``-J^T`` (tau) and ``+M^{-1} J^T`` (qdd) consumers can apply their own sign.
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.f_ext_jacobian_transpose(q)
         q = np.array(q, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
@@ -3077,6 +3079,8 @@ class RBDReference(
         subspace) into the shared (v_j / v_m) entry — the same ``+=`` reduction the
         first-order ``f_ext_jacobian_transpose`` and the GRiD emit perform.
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.f_ext_jacobian_transpose_dq(q)
         q = np.array(q, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()

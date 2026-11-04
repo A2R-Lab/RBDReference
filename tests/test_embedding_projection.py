@@ -87,6 +87,8 @@ def test_linear_mimic_projection_equals_reduced_reference(floating):
         np.testing.assert_allclose(emb.generalized_gravity(q), ref.generalized_gravity(q), rtol=0, atol=1e-9)
         np.testing.assert_allclose(emb.coriolis_matrix(q, qd), ref.coriolis_matrix(q, qd), rtol=0, atol=1e-9)
         np.testing.assert_allclose(emb.dccrba(q), ref.dccrba(q), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.f_ext_jacobian_transpose(q), ref.f_ext_jacobian_transpose(q), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.f_ext_jacobian_transpose_dq(q), ref.f_ext_jacobian_transpose_dq(q), rtol=0, atol=1e-9)
         np.testing.assert_allclose(emb.cmm_time_variation(q, qd), ref.cmm_time_variation(q, qd), rtol=0, atol=1e-9)
         # the reduced reference's hdot sources its bias from finite differences; the analytic pieces agree exactly
         np.testing.assert_allclose(emb.centroidal_momentum_time_variation(q, qd, qdd),
@@ -194,6 +196,16 @@ def test_polynomial_coupling_projection(tmp_path, floating):
         Adot = ref.cmm_time_variation(y, yd)
         np.testing.assert_allclose(Adot, (Ap - Am) / (2 * h), rtol=0, atol=2e-5)
         np.testing.assert_allclose(np.einsum("abi,i->ab", dA, yd), Adot, rtol=0, atol=1e-9)
+        # external forces: tau is affine in f_ext with slope -J^T; dJ^T/dq against the chart
+        fe = ref.f_ext_gradient(y)
+        NB = robot.get_num_bodies()
+        for col in rng.choice(6 * NB, 4, replace=False):
+            f_ext = np.zeros((NB, 6)); f_ext[col // 6, col % 6] = 1.0   # per body, local [angular; linear]
+            dtau = ref.inverse_dynamics(y, yd, ydd, f_ext=f_ext)[0] - tau
+            np.testing.assert_allclose(dtau, fe["dtau_dfext"][:, col], rtol=0, atol=1e-9)
+        np.testing.assert_allclose(fe["dqdd_dfext"], ref.minv(y) @ ref.f_ext_jacobian_transpose(y), rtol=0, atol=1e-9)
+        dJT = _chart_fd(ref, lambda yy: ref.f_ext_jacobian_transpose(yy).reshape(-1), y, nv).reshape(nv, 6 * NB, nv)
+        np.testing.assert_allclose(-dJT, fe["did_du_dfext_dq"], rtol=0, atol=2e-5)
         hp = np.asarray(ref.ccrba(ref.integrate(y, h * yd), yd + h * ydd)[1]); hm = np.asarray(ref.ccrba(ref.integrate(y, -h * yd), yd - h * ydd)[1])
         np.testing.assert_allclose(ref.centroidal_momentum_time_variation(y, yd, ydd), (hp - hm) / (2 * h), rtol=0, atol=2e-5)
         # gradients against chart finite differences of the projected values
