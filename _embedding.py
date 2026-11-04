@@ -144,6 +144,20 @@ class EmbeddedReference:
         c, _, _, _ = self.full.inverse_dynamics(q, self.expand_qd(y, yd), self.gdot_yd(y, yd), GRAVITY, f_ext=f_ext)
         return self.reduce(y, c) + self.joint_dynamics_bias(y, yd)
 
+    def coriolis_matrix(self, y, yd, GRAVITY=-9.81):
+        """C_y = G^T C_f G + G^T M_f Gdot, so that C_y yd + g_y is the bias
+        (the follower accelerates by Gdot yd at ydd = 0) and
+        C_y + C_y^T = d/dt M_y (the Pinocchio convention of C_f is kept)."""
+        yd = np.asarray(yd, dtype=np.float64).reshape(-1)
+        q = self.expand_q(y)
+        G = self.G(y)
+        C = np.asarray(self.full.coriolis_matrix(q, G @ yd, GRAVITY), dtype=np.float64)
+        M = np.asarray(self.full.crba(q), dtype=np.float64)
+        Gdot = np.zeros((self.nv_full, self.nv))
+        for fvi, lrv, _, ald, _ in self._alphas(y):
+            Gdot[fvi, lrv] = ald * yd[lrv]
+        return G.T @ C @ G + G.T @ M @ Gdot
+
     def forward_dynamics(self, y, yd, u, f_ext=None, GRAVITY=-9.81):
         u = np.asarray(u, dtype=np.float64).reshape(-1)
         return np.linalg.solve(self.crba(y), u - self.bias(y, yd, GRAVITY, f_ext))

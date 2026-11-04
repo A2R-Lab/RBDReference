@@ -98,6 +98,8 @@ class _EnergyMixin:
         root permutation is applied here (unlike CRBA, which assembles the root
         block with S = I and reorders by hand).
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.coriolis_matrix(q, qd, GRAVITY)
         q = np.array(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
         NB = self.robot.get_num_bodies()

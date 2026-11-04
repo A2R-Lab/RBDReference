@@ -85,6 +85,7 @@ def test_linear_mimic_projection_equals_reduced_reference(floating):
         for a, b in zip(emb.ccrba(q, qd), ref.ccrba(q, qd)):
             np.testing.assert_allclose(a, b, rtol=0, atol=1e-9)
         np.testing.assert_allclose(emb.generalized_gravity(q), ref.generalized_gravity(q), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(emb.coriolis_matrix(q, qd), ref.coriolis_matrix(q, qd), rtol=0, atol=1e-9)
         np.testing.assert_allclose(emb.nonlinear_effects(q, qd), ref.nonlinear_effects(q, qd), rtol=0, atol=1e-9)
         assert abs(emb.kinetic_energy(q, qd) - ref.kinetic_energy(q, qd)) < 1e-9
         assert abs(emb.potential_energy(q) - ref.potential_energy(q)) < 1e-9
@@ -171,6 +172,11 @@ def test_polynomial_coupling_projection(tmp_path, floating):
         assert np.all(np.linalg.eigvalsh(M) > 0)
         np.testing.assert_allclose(_plain_fd(lambda a: ref.inverse_dynamics(y, yd, a)[0], ydd), M, rtol=0, atol=1e-6)
         np.testing.assert_allclose(ref.minv(y) @ M, np.eye(nv), rtol=0, atol=1e-9)
+        # the Coriolis matrix: C yd + g is the bias and C + C^T is the time derivative of M
+        C = ref.coriolis_matrix(y, yd)
+        np.testing.assert_allclose(C @ yd + ref.generalized_gravity(y), ref.nonlinear_effects(y, yd), rtol=0, atol=1e-9)
+        Mp = ref.crba(ref.integrate(y, h * yd)); Mm = ref.crba(ref.integrate(y, -h * yd))
+        np.testing.assert_allclose(C + C.T, (Mp - Mm) / (2 * h), rtol=0, atol=2e-5)
         # gradients against chart finite differences of the projected values
         dc = ref.inverse_dynamics_gradient(y, yd, ydd)
         np.testing.assert_allclose(dc[:, :nv], _chart_fd(ref, lambda yy: ref.inverse_dynamics(yy, yd, ydd)[0], y, nv), rtol=0, atol=2e-5)
