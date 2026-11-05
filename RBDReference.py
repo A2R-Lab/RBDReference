@@ -2712,21 +2712,31 @@ class RBDReference(
         return (c, f)
 
     def set_armature(self, armature):
-        """Install a rotor armature (length nv, reduced coordinates). Entries on
-        the floating root's six slots or on a spherical block must be zero."""
-        a = np.asarray(armature, dtype=np.float64).reshape(-1)
+        """Install a finite nonnegative vector of shape (nv,) in reduced order.
+
+        Floating-root and spherical slots must be zero. Invalid input leaves
+        the installed vector unchanged; a valid input is copied.
+        """
+        raw = np.asarray(armature)
         nv = self.robot.get_num_vel()
-        if a.shape != (nv,):
-            raise ValueError(f"armature must be length nv={nv}; got {a.shape}")
+        if raw.shape != (nv,) or raw.dtype.kind not in "biuf":
+            raise ValueError(f"armature must be a real vector of shape ({nv},); got {raw.shape}")
+        if not np.all(np.isfinite(raw)) or np.any(raw < 0):
+            raise ValueError("armature must be finite and nonnegative in every slot")
         for jid in range(self.robot.get_num_joints()):
             if (self.robot.floating_base and jid == 0) or self.robot.joint_is_spherical(jid):
                 inds = self.robot.get_joint_index_v(jid)
                 inds = inds if isinstance(inds, (list, tuple)) else [inds]
-                if np.any(a[list(inds)] != 0.0):
+                if np.any(raw[list(inds)] != 0.0):
                     raise ValueError(
                         f"armature must be zero on the v-slots {list(inds)} of joint {jid} "
                         "(floating root or spherical block)")
-        self.armature = a.copy()
+        with np.errstate(over="ignore", invalid="ignore"):
+            a = np.array(raw, dtype=np.float64, copy=True)
+        if not np.all(np.isfinite(a)):
+            raise ValueError("armature must remain finite in float64")
+        a[a == 0] = 0
+        self.armature = a
 
     def _has_armature(self):
         return bool(np.any(self.armature != 0.0))
@@ -4956,7 +4966,10 @@ class RBDReference(
     # pinocchio's `computeKineticEnergyRegressor` / `computePotentialEnergyRegressor`.
 
     def kinetic_energy_regressor(self, q, qd):
-        """Kinetic-energy regressor y_KE (length 10*NB) with KE = y_KE . pi.
+        """Link-inertia kinetic-energy regressor y_KE (length 10*NB).
+
+        Total KE = y_KE . pi + 0.5 * sum(armature * qd**2). Rotor inertia
+        contributes a separate known offset, not additional inertial columns.
 
         KE = sum_i 1/2 v_i^T I_i v_i is linear in each link's spatial inertia, so
         the k-th column of link i is 1/2 v_i^T (dI_k) v_i with dI_k the k-th basis

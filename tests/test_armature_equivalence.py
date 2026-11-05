@@ -98,3 +98,27 @@ def test_set_armature_refuses_root_and_bad_length(spec, base_mode, project_model
     good = np.zeros(nv); good[6:] = 0.1
     ref.set_armature(good)
     assert np.array_equal(ref.armature, good)
+
+
+@pytest.mark.parametrize(("spec", "base_mode"), [p for p in _params() if p.id == "go2-floating"])
+def test_armature_validation_preserves_installed_values(spec, base_mode, project_model):
+    ref = project_model.reference
+    nv = ref.robot.get_num_vel()
+    good = np.zeros(nv)
+    good[6:] = .2
+    ref.set_armature(good)
+    cases = [good[None], good.astype(complex)]
+    for value in (-.1, -1e-100, np.nan, np.inf):
+        bad = good.copy()
+        bad[6] = value
+        cases.append(bad)
+    bad_root = good.copy()
+    bad_root[0] = 1e-100
+    cases.append(bad_root)
+    for bad in cases:
+        with pytest.raises(ValueError):
+            ref.set_armature(bad)
+        np.testing.assert_array_equal(ref.armature, good)
+    # The model owns a copy, not the caller's input buffer.
+    good[:] = 0
+    assert np.all(ref.armature[6:] == .2)
