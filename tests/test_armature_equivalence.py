@@ -122,3 +122,43 @@ def test_armature_validation_preserves_installed_values(spec, base_mode, project
     # The model owns a copy, not the caller's input buffer.
     good[:] = 0
     assert np.all(ref.armature[6:] == .2)
+
+
+@pytest.mark.parametrize(("spec", "base_mode"), _params())
+def test_compact_armature_regressor_and_fd_sensitivity(spec, base_mode, project_model):
+    ref = project_model.reference
+    a = _random_armature(project_model)
+    ref.set_armature(a)
+    slots = list(ref.armature_slots)
+    assert len(slots) == len(set(slots))
+    sample = next(s for s in build_dynamics_samples(project_model) if s.name == "conservative")
+    q, qd, qdd = sample.q, sample.qd, sample.qdd
+    y = ref.armature_regressor(qdd)
+    assert np.linalg.norm(y) > 0
+    assert y.shape == (ref.robot.get_num_vel(), len(slots))
+    np.testing.assert_array_equal(y @ a[slots], a * qdd)
+    tau, *_ = ref.inverse_dynamics(q, qd, qdd)
+    ref.set_armature(np.zeros_like(a))
+    plain, *_ = ref.inverse_dynamics(q, qd, qdd)
+    ref.set_armature(a)
+    np.testing.assert_allclose(tau - plain, y @ a[slots], rtol=1e-10, atol=1e-10)
+    # Nonzero external loads belong to the actual acceleration, not to Y_a.
+    loads = np.full((ref.robot.get_num_bodies(), 6), .03)
+    for f_ext in (None, loads):
+        analytic = ref.forward_dynamics_armature_gradient(q, qd, tau, f_ext=f_ext)
+        assert np.linalg.norm(analytic) > 0
+        numeric = np.empty_like(analytic)
+        eps = 1e-5
+        try:
+            for column, slot in enumerate(slots):
+                plus, minus = a.copy(), a.copy()
+                plus[slot] += eps
+                minus[slot] -= eps
+                ref.set_armature(plus)
+                upper = ref.forward_dynamics(q, qd, tau, f_ext=f_ext)
+                ref.set_armature(minus)
+                lower = ref.forward_dynamics(q, qd, tau, f_ext=f_ext)
+                numeric[:, column] = (upper - lower) / (2 * eps)
+        finally:
+            ref.set_armature(a)
+        np.testing.assert_allclose(analytic, numeric, rtol=2e-5, atol=2e-6)

@@ -1,9 +1,10 @@
 """Joint-torque regressor numpy reference (D.4 / G.x of the sysID plan).
 
-`tau = Y(q, qd, qdd) . pi`, where `pi = [pi_1; ...; pi_NB]` stacks each link's
+`tau_inertial = Y(q, qd, qdd) . pi`, where `pi = [pi_1; ...; pi_NB]` stacks each link's
 10 standard inertial parameters and `Y` is the joint-torque regressor
 (nv x 10*NB). Inverse dynamics is exactly affine in each link's spatial inertia,
 so `Y = d(tau)/d(pi)` is exact (no finite differences).
+Armature, joint friction and external-force offsets are separate from these columns.
 
 Parameter basis (per link, GRiD/URDF convention):
     pi_i = [ m, h(3)=m*c, I_O(6)=[Ixx, Ixy, Ixz, Iyy, Iyz, Izz] ]
@@ -283,3 +284,43 @@ class _RegressorMixin:
         )
         Minv = np.asarray(self.minv(q), dtype=np.float64)
         return -(Minv @ Y)
+
+    @property
+    def armature_slots(self):
+        """Independent scalar velocity slots, in compact parameter-column order."""
+        slots = []
+        for jid in range(self.robot.get_num_joints()):
+            joint = self.robot.get_joint_by_id(jid)
+            if ((self.robot.floating_base and jid == 0)
+                    or self.robot.joint_is_spherical(jid) or joint.is_mimic):
+                continue
+            slots.append(int(self.robot.get_joint_index_v(jid)))
+        return tuple(sorted(set(slots)))
+
+    def armature_regressor(self, qdd):
+        """Return diag(qdd) S, shape (nv, n_a), in ``armature_slots`` order.
+
+        This block is independent of q and qd. Its qdd derivative is the constant
+        selection structure: column j has derivative one only at row/slot slots[j].
+        Link-inertia regressor columns are unchanged.
+        """
+        qdd = np.asarray(qdd, dtype=np.float64)
+        nv, slots = self.robot.get_num_vel(), self.armature_slots
+        if qdd.shape != (nv,):
+            raise ValueError(f"qdd must have shape ({nv},)")
+        result = np.zeros((nv, len(slots)))
+        result[list(slots), np.arange(len(slots))] = qdd[list(slots)]
+        return result
+
+    def forward_dynamics_armature_gradient(self, q, qd, u, f_ext=None, GRAVITY=-9.81):
+        """Return -Minv_eff diag(qdd_actual) S, shape (nv, n_a).
+
+        State, input torque, gravity and external loads are held fixed. Both the
+        inverse mass and actual acceleration use this model's installed parameters.
+        No derivative of a setter or higher derivative of this result is promised.
+        """
+        bias, *_ = self.inverse_dynamics(q, qd, f_ext=f_ext, GRAVITY=GRAVITY)
+        minv = np.asarray(self.minv(q))
+        qdd = minv @ (np.asarray(u) - bias)
+        slots = list(self.armature_slots)
+        return -minv[:, slots] * qdd[slots][None, :]
