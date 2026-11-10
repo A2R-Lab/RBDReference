@@ -81,6 +81,20 @@ class RBDReference(
         self.friction_width = width
         self._spatial_xmat_derivative_func_cache = {}
         self._spatial_xmat_second_derivative_func_cache = {}
+        # Explicit couplings whose fold multiplier varies with the leader (the
+        # polynomial kind) are handled by projecting the full spanning tree
+        # onto the reduced coordinates (_embedding.EmbeddedReference); the
+        # constant mimic fold stays on the reduced recursions below.
+        self._embedding = None
+        if any(getattr(j, "is_mimic", False) and not j.is_linear_coupling()
+               for j in self.robot.get_joints_ordered_by_id()):
+            from ._embedding import EmbeddedReference
+            # The full tree carries no joint dynamics: the projection adds the
+            # reduced-coordinate bias itself (alpha(y)^2 b, |alpha(y)| f, with
+            # the tanh width per reduced slot), the same convention as the
+            # constant fold above and the generated kernels.
+            full = RBDReference(self.robot.full_tree_copy())
+            self._embedding = EmbeddedReference(self.robot, full, reduced=self)
 
     @staticmethod
     def _normalize_xyzw_quaternion(quat):
@@ -1405,6 +1419,8 @@ class RBDReference(
         list of numpy.ndarray
             World-frame poses at the tool offset, including mimic relations.
         """
+        if self._embedding is not None:
+            return self._embedding.end_effector_pose(q, ee_joint_names, ee_offsets)
         # chain up the transforms (version 1 for starting from the root)
         def forwardChain(self, jid, q):
             # first get the joints in the chain
@@ -1556,6 +1572,8 @@ class RBDReference(
         list of numpy.ndarray
             Per end-effector 6 x nv matrix of d(pose)/dv.
         """
+        if self._embedding is not None:
+            return self._embedding.end_effector_pose_gradient(q, ee_joint_names, ee_offsets)
         q = self._normalize_kinematics_q(q)
         ee_offset_Xtools = self._normalize_ee_offset_transforms(ee_offsets)
         nv = self.robot.get_num_vel()
@@ -1722,6 +1740,8 @@ class RBDReference(
           * ``LOCAL``               -- twist expressed in the frame's body axes.
           * ``LOCAL_WORLD_ALIGNED`` -- at the frame origin, world-aligned axes.
         """
+        if self._embedding is not None:
+            return self._embedding.frame_jacobian(q, frame_name, reference_frame)
         reference_frame = str(reference_frame).upper()
         if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
             raise ValueError("reference_frame must be LOCAL/WORLD/LOCAL_WORLD_ALIGNED")
@@ -1786,6 +1806,204 @@ class RBDReference(
         Rt = R_f.T
         return np.vstack([Rt @ Jv, Rt @ Jw])
 
+    def frame_velocity(self, q, qd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """Twist of a frame, 6 entries ``[linear(3); angular(3)]``, in the chosen
+        reference frame: ``J(q) qd`` with the same ``J`` as :meth:`frame_jacobian`.
+        Matches pinocchio's ``getFrameVelocity`` for LOCAL, WORLD and
+        LOCAL_WORLD_ALIGNED."""
+        if self._embedding is not None:
+            return self._embedding.frame_velocity(q, qd, frame_name, reference_frame)
+        J = self.frame_jacobian(q, frame_name, reference_frame)
+        return np.asarray(J @ np.asarray(qd, dtype=np.float64).reshape(-1), dtype=np.float64)
+
+    def frame_acceleration(self, q, qd, qdd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """Time derivative of :meth:`frame_velocity` in the chosen reference frame,
+        ``J qdd + Jdot qd``, 6 entries ``[linear(3); angular(3)]``. In LOCAL and
+        WORLD this is the spatial acceleration (pinocchio's ``getFrameAcceleration``);
+        in LOCAL_WORLD_ALIGNED the linear part is the classical acceleration of the
+        frame origin in world axes (pinocchio's ``getFrameClassicalAcceleration``)."""
+        if self._embedding is not None:
+            return self._embedding.frame_acceleration(q, qd, qdd, frame_name, reference_frame)
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        qdd = np.asarray(qdd, dtype=np.float64).reshape(-1)
+        J = self.frame_jacobian(q, frame_name, reference_frame)
+        Jdot = self.frame_jacobian_dot(q, qd, frame_name, reference_frame)
+        return np.asarray(J @ qdd + Jdot @ qd, dtype=np.float64)
+
+    # ── frame kinematics derivatives (item C of 0.8, 2026-11-03) ─────────────
+    @staticmethod
+    def _motion_cross(v):
+        """6x6 motion cross-product matrix of a ``[linear; angular]`` spatial
+        vector (pinocchio order): ``v x m = [w x m_lin + v_lin x m_ang; w x m_ang]``."""
+        v = np.asarray(v, dtype=np.float64).reshape(6)
+        sk = RBDReference._skew
+        M = np.zeros((6, 6), dtype=np.float64)
+        M[:3, :3] = sk(v[3:])
+        M[:3, 3:] = sk(v[:3])
+        M[3:, 3:] = sk(v[3:])
+        return M
+
+    def _frame_world_spatial_sweep(self, q, qd, qdd):
+        """World-origin Plucker kinematics of every joint, ``[linear; angular]``.
+
+        Returns ``(Xw, cols, ov, oa)``: ``Xw[j]`` the world homogeneous placement
+        of joint j; ``cols`` a list of ``(jid, vslot, alpha, A)`` with ``A`` the
+        world-origin column of the geometric Jacobian for one degree of freedom
+        of joint j (``A = [p_j x a_w + l_w; a_w]`` for the world axis
+        ``a_w = R_j S_ang`` and ``l_w = R_j S_lin``), ``vslot`` its velocity slot
+        and ``alpha`` the mimic multiplier; ``ov[j]`` the world-origin twist of
+        joint j's body and ``oa[j]`` its spatial acceleration
+        (``oa_j = oa_parent + sum_c (A_c qdd_c + (ov_j x A_c) qd_c)``). The same
+        S, R_j and mimic scale as :meth:`frame_jacobian`."""
+        qd = np.asarray(qd, dtype=np.float64).reshape(-1)
+        qdd = np.asarray(qdd, dtype=np.float64).reshape(-1)
+        Xw, _ = self._frame_world_placement_and_chain(q)
+        n_joints = self.robot.get_num_joints()
+        cols = []
+        ov = [np.zeros(6, dtype=np.float64) for _ in range(n_joints)]
+        oa = [np.zeros(6, dtype=np.float64) for _ in range(n_joints)]
+        for j in range(n_joints):
+            par = self.robot.get_parent_id(j)
+            v_j = ov[par].copy() if par != -1 else np.zeros(6, dtype=np.float64)
+            a_j = oa[par].copy() if par != -1 else np.zeros(6, dtype=np.float64)
+            joint = self.robot.get_joint_by_id(j)
+            alpha = joint.get_mimic_multiplier() if getattr(joint, "is_mimic", False) else 1.0
+            if alpha == 0.0:
+                ov[j], oa[j] = v_j, a_j
+                continue
+            S = np.asarray(self.robot.get_S_by_id(j), dtype=np.float64)
+            if S.ndim == 1:
+                S = S.reshape(-1, 1)
+            try:
+                vinds = self.robot.get_joint_index_v(j)
+            except Exception:
+                vinds = self.robot.get_joint_index_q(j)
+            vinds = list(vinds) if isinstance(vinds, (list, tuple, np.ndarray)) else [vinds]
+            R_j = Xw[j][:3, :3]
+            p_j = Xw[j][:3, 3]
+            own = []
+            for c in range(S.shape[1]):
+                vi = vinds[c] if c < len(vinds) else vinds[-1]
+                aw = R_j @ S[:3, c]
+                lw = R_j @ S[3:6, c]
+                A = np.concatenate([np.cross(p_j, aw) + lw, aw])
+                cols.append((j, int(vi), float(alpha), A))
+                own.append((A, alpha * qd[vi], alpha * qdd[vi]))
+                v_j = v_j + A * (alpha * qd[vi])
+            for A, qd_c, qdd_c in own:
+                a_j = a_j + A * qdd_c + (self._motion_cross(v_j) @ A) * qd_c
+            ov[j], oa[j] = v_j, a_j
+        return Xw, cols, ov, oa
+
+    def _frame_kinematics_derivatives(self, q, qd, qdd, frame_name, reference_frame):
+        """Shared body of :meth:`frame_velocity_derivatives` and
+        :meth:`frame_acceleration_derivatives`: ``(dv_dq, J, da_dq, da_dqd)`` for
+        the frame's twist ``v`` and acceleration ``a`` (as :meth:`frame_velocity`
+        and :meth:`frame_acceleration` define them) in the chosen reference
+        frame; ``dv_dqd = da_dqdd = J``. Columns follow the local tangent chart
+        of :meth:`integrate` (the floating root and spherical joints), so the
+        derivatives are pinocchio's ``getFrameVelocityDerivatives`` /
+        ``getFrameAccelerationDerivatives``; in LOCAL_WORLD_ALIGNED the
+        acceleration is the classical one and its derivatives carry the
+        ``w x v_lin`` term.
+
+        World-origin Plucker form, for a column ``A_j`` of joint j with parent
+        ``p`` and the target body ``i`` (``A_j x`` the motion cross product)::
+
+            dv_i/dq_j  = A_j x (ov_i - ov_p)
+            da_i/dq_j  = A_j x (oa_i - oa_p) + (ov_p x A_j) x (ov_i - ov_p)
+            da_i/dqd_j = ov_j x A_j + A_j x (ov_i - ov_p)
+
+        which follow from ``dA_k/dq_j = A_j x A_k`` for every column k at or
+        below j (the root's and a spherical joint's own columns included).
+        LOCAL adds the placement derivative ``-fXo (A_j x w)`` of the
+        frame transform; LOCAL_WORLD_ALIGNED adds the shift of the moving
+        frame origin ``[w_ang x (dp_f/dq_j); 0]``."""
+        reference_frame = str(reference_frame).upper()
+        if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
+            raise ValueError("reference_frame must be LOCAL/WORLD/LOCAL_WORLD_ALIGNED")
+        nv = self.robot.get_num_vel()
+        zeros = np.zeros((6, nv), dtype=np.float64)
+        target_id, X_offset = self._resolve_frame_joint(frame_name)
+        if target_id == -1:
+            return zeros, zeros.copy(), zeros.copy(), zeros.copy()
+        Xw, cols, ov, oa = self._frame_world_spatial_sweep(q, qd, qdd)
+        X_frame = Xw[target_id] @ X_offset
+        R_f = X_frame[:3, :3]
+        p_f = X_frame[:3, 3]
+        chain = set(self.robot.get_ancestors_by_id(target_id)) | {target_id}
+        ov_i, oa_i = ov[target_id], oa[target_id]
+        cross = self._motion_cross
+        J = zeros.copy(); dv_dq = zeros.copy(); da_dq = zeros.copy(); da_dqd = zeros.copy()
+        # columns needed by the frame transforms' own derivatives
+        ov_cols = zeros.copy()   # A_j x ov_i   (LOCAL placement derivative of v)
+        oa_cols = zeros.copy()   # A_j x oa_i   (LOCAL placement derivative of a)
+        for (j, vi, alpha, A) in cols:
+            if j not in chain:
+                continue
+            par = self.robot.get_parent_id(j)
+            ovp = ov[par] if par != -1 else np.zeros(6)
+            oap = oa[par] if par != -1 else np.zeros(6)
+            Ax = cross(A)
+            dvi = Ax @ (ov_i - ovp)
+            J[:, vi] += alpha * A
+            dv_dq[:, vi] += alpha * dvi
+            da_dq[:, vi] += alpha * (Ax @ (oa_i - oap) + cross(cross(ovp) @ A) @ (ov_i - ovp))
+            da_dqd[:, vi] += alpha * (cross(ov[j]) @ A + dvi)
+            ov_cols[:, vi] += alpha * (Ax @ ov_i)
+            oa_cols[:, vi] += alpha * (Ax @ oa_i)
+        if reference_frame == "WORLD":
+            return dv_dq, J, da_dq, da_dqd
+        if reference_frame == "LOCAL":
+            fXo = np.zeros((6, 6), dtype=np.float64)
+            Rt = R_f.T
+            fXo[:3, :3] = Rt
+            fXo[:3, 3:] = -Rt @ self._skew(p_f)
+            fXo[3:, 3:] = Rt
+            return (fXo @ (dv_dq - ov_cols), fXo @ J,
+                    fXo @ (da_dq - oa_cols), fXo @ da_dqd)
+        # LOCAL_WORLD_ALIGNED: shift the reference point to the (moving) frame origin.
+        X = np.eye(6, dtype=np.float64)
+        X[:3, 3:] = -self._skew(p_f)
+        J_lwa = X @ J
+        dp_f = J_lwa[:3, :]                      # d p_f / d q_j = linear LWA column
+        w = ov_i[3:]
+        wd = oa_i[3:]
+        dv = X @ dv_dq
+        dv[:3, :] += self._skew(w) @ dp_f         # d/dq of (w x p_f) at fixed w
+        da = X @ da_dq
+        da[:3, :] += self._skew(wd) @ dp_f
+        da_v = X @ da_dqd
+        # classical acceleration: a_lin += w x v_lin, with v = X ov_i
+        v_lwa = X @ ov_i
+        v_lin = v_lwa[:3]
+        da[:3, :] += -self._skew(v_lin) @ dv[3:, :] + self._skew(w) @ dv[:3, :]
+        da_v[:3, :] += -self._skew(v_lin) @ J_lwa[3:, :] + self._skew(w) @ J_lwa[:3, :]
+        return dv, J_lwa, da, da_v
+
+    def frame_velocity_derivatives(self, q, qd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """``(dv/dq, dv/dqd)`` of :meth:`frame_velocity`, each 6 x nv in the
+        local tangent chart of :meth:`integrate`; pinocchio's
+        ``getFrameVelocityDerivatives`` for LOCAL, WORLD and
+        LOCAL_WORLD_ALIGNED. ``dv/dqd`` is the frame Jacobian."""
+        if self._embedding is not None:
+            return self._embedding.frame_velocity_derivatives(q, qd, frame_name, reference_frame)
+        dv_dq, J, _, _ = self._frame_kinematics_derivatives(q, qd, np.zeros_like(np.asarray(qd, dtype=np.float64)),
+                                                            frame_name, reference_frame)
+        return dv_dq, J
+
+    def frame_acceleration_derivatives(self, q, qd, qdd, frame_name=None, reference_frame="LOCAL_WORLD_ALIGNED"):
+        """``(dv/dq, da/dq, da/dqd, da/dqdd)`` of :meth:`frame_velocity` and
+        :meth:`frame_acceleration`, each 6 x nv, the tuple of pinocchio's
+        ``getFrameAccelerationDerivatives``. In LOCAL and WORLD these are the
+        spatial acceleration's derivatives; in LOCAL_WORLD_ALIGNED the
+        classical acceleration's (the quantity :meth:`frame_acceleration`
+        returns there). ``da/dqdd`` is the frame Jacobian."""
+        if self._embedding is not None:
+            return self._embedding.frame_acceleration_derivatives(q, qd, qdd, frame_name, reference_frame)
+        dv_dq, J, da_dq, da_dqd = self._frame_kinematics_derivatives(q, qd, qdd, frame_name, reference_frame)
+        return dv_dq, da_dq, da_dqd, J
+
     def frame_jacobian_dot(self, q, qd, frame_name=None,
                            reference_frame="LOCAL_WORLD_ALIGNED"):
         """ANALYTIC time derivative Jdot of `frame_jacobian` along v = qd, 6 x nv.
@@ -1812,6 +2030,8 @@ class RBDReference(
 
         (The central-FD form is retained as `_frame_jacobian_dot_fd` for the
         machine-precision cross-check.)"""
+        if self._embedding is not None:
+            return self._embedding.frame_jacobian_dot(q, qd, frame_name, reference_frame)
         qd = np.array(qd, dtype=np.float64)
         reference_frame = str(reference_frame).upper()
         if reference_frame not in ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED"):
@@ -1940,6 +2160,8 @@ class RBDReference(
 
         Composes the frame Jacobian with the inverse joint-space mass matrix
         (`self.minv`) and inverts the resulting 6x6 task-space matrix."""
+        if self._embedding is not None:
+            return self._embedding.osc_inertia(q, frame_name, reference_frame)
         J = self.frame_jacobian(q, frame_name, reference_frame)
         Minv = np.asarray(self.minv(q), dtype=np.float64)
         task = J @ Minv @ J.T
@@ -2594,9 +2816,11 @@ class RBDReference(
         if not (has_damping or has_friction):
             return bias
         # Iterate bodies and fold each joint's coefficient into its v-slot.
-        # Mimic joints share their target's slot; their damping/friction add
-        # into that shared slot (scaled by the mimic multiplier, matching the
-        # alpha-weighted reduction used throughout the reduced-model path).
+        # Mimic joints share their target's slot: the follower's own torque
+        # b*qd_f + fr*s(qd_f) with qd_f = alpha*qd_l projects onto the leader
+        # through alpha, so the slot gains alpha^2*b*qd_l + |alpha|*fr*s(qd_l)
+        # (the congruence G^T B G; dissipation stays non-negative for a
+        # negative ratio). The tanh width belongs to the reduced slot.
         for jid in range(self.robot.get_num_bodies()):
             b = float(self.robot.get_damping_by_id(jid)) if has_damping else 0.0
             fr = float(self.robot.get_friction_by_id(jid)) if has_friction else 0.0
@@ -2609,7 +2833,7 @@ class RBDReference(
             idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
             for k in idx_list:
                 qd_k = qd[k]
-                bias[k] += alpha * (b * qd_k + fr * self._friction_shape(qd_k, k))
+                bias[k] += alpha * alpha * b * qd_k + abs(alpha) * fr * self._friction_shape(qd_k, k)
         return bias
 
     def _friction_shape(self, qd_k, k):
@@ -2622,11 +2846,12 @@ class RBDReference(
         """Per-v-slot derivative of the joint-dynamics bias with respect to the
         slot's own velocity: the first (order=1) or second (order=2) derivative.
 
-        order=1 is alpha*(damping + (friction/w) sech^2(qd/w)) under the tanh
-        model and alpha*damping under the sign model (the Coulomb term has zero
-        subgradient almost everywhere). order=2 is alpha*(-(2 friction/w^2)
-        tanh(qd/w) sech^2(qd/w)) under tanh and zero under sign (damping is
-        linear in qd). Mirrors _joint_dynamics_bias: iterate bodies, map each to
+        order=1 is alpha^2*damping + |alpha|*(friction/w) sech^2(qd/w) under
+        the tanh model and alpha^2*damping under the sign model (the Coulomb
+        term has zero subgradient almost everywhere). order=2 is
+        |alpha|*(-(2 friction/w^2) tanh(qd/w) sech^2(qd/w)) under tanh and zero
+        under sign (damping is linear in qd). The powers of alpha are those of
+        _joint_dynamics_bias. Mirrors _joint_dynamics_bias: iterate bodies, map each to
         its reduced v-slot with the mimic multiplier, skip the floating root, and
         accumulate so mimic joints sharing a slot sum. Zero when
         use_joint_dynamics is False or no joint declares damping/friction.
@@ -2655,19 +2880,17 @@ class RBDReference(
                 continue
             idx_list = idx if isinstance(idx, (list, tuple, np.ndarray)) else [idx]
             for k in idx_list:
-                if order == 1:
-                    val = b
-                else:
-                    val = 0.0
+                val_b = b if order == 1 else 0.0
+                val_f = 0.0
                 if tanh_model and fr != 0.0:
                     w = self.friction_width[k]
                     th = np.tanh(qd[k] / w)
                     sech2 = 1.0 - th * th
                     if order == 1:
-                        val += (fr / w) * sech2
+                        val_f = (fr / w) * sech2
                     else:
-                        val += -(2.0 * fr / (w * w)) * th * sech2
-                diag[k] += alpha * val
+                        val_f = -(2.0 * fr / (w * w)) * th * sech2
+                diag[k] += alpha * alpha * val_b + abs(alpha) * val_f
         return diag
 
     def inverse_dynamics_bpass(self, q, f):
@@ -2768,6 +2991,8 @@ class RBDReference(
         (c, v, a, f) : tuple
             Generalized forces and intermediate link quantities.
         """
+        if self._embedding is not None:
+            return self._embedding.inverse_dynamics(q, qd, qdd, GRAVITY, f_ext)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         if qdd is not None:
@@ -2799,6 +3024,8 @@ class RBDReference(
         ``f_ext_gradient``). This method returns the (un-signed) ``J^T`` so both
         ``-J^T`` (tau) and ``+M^{-1} J^T`` (qdd) consumers can apply their own sign.
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.f_ext_jacobian_transpose(q)
         q = np.array(q, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
@@ -2862,6 +3089,8 @@ class RBDReference(
         subspace) into the shared (v_j / v_m) entry — the same ``+=`` reduction the
         first-order ``f_ext_jacobian_transpose`` and the GRiD emit perform.
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.f_ext_jacobian_transpose_dq(q)
         q = np.array(q, dtype=np.float64)
         NB = self.robot.get_num_bodies()
         nv = self.robot.get_num_vel()
@@ -3163,6 +3392,8 @@ class RBDReference(
         Minv : numpy.ndarray
             N x N inverse joint-space inertia matrix.
         """
+        if self._embedding is not None:
+            return self._embedding.minv(q, output_dense)
         q = np.array(q, dtype=np.float64)
         # CRBA-invert fast path. Two cases route here:
         #  (1) MIMIC: the ABA-based recursion below uses per-body (S, U, d) that
@@ -3244,6 +3475,8 @@ class RBDReference(
         qdd : numpy.ndarray
             N-element joint accelerations.
         """
+        if self._embedding is not None:
+            return self._embedding.aba(q, qd, tau, f_ext=f_ext, GRAVITY=GRAVITY)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         tau = np.array(tau, dtype=np.float64)
@@ -3522,6 +3755,8 @@ class RBDReference(
         M : numpy.ndarray
             N x N joint-space inertia matrix.
         """
+        if self._embedding is not None:
+            return self._embedding.crba(q)
         q = np.array(q, dtype=np.float64)
         if self.robot.floating_base:
             # Floating-base CRBA via the SAME generalized block machinery as the
@@ -3953,6 +4188,8 @@ class RBDReference(
         (dc_dq, dc_dqd) : tuple
             Gradients of generalized forces wrt q and qd.
         """
+        if self._embedding is not None:
+            return self._embedding.inverse_dynamics_gradient(q, qd, qdd, GRAVITY, f_ext)
         
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
@@ -4007,6 +4244,8 @@ class RBDReference(
         qdd : numpy.ndarray
             N-element joint accelerations.
         """
+        if self._embedding is not None:
+            return self._embedding.forward_dynamics(q, qd, u, f_ext=f_ext)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         u = np.array(u, dtype=np.float64)
@@ -4032,6 +4271,8 @@ class RBDReference(
         (qdd_dq, qdd_dqd) : tuple
             Gradients of joint accelerations wrt q and qd.
         """
+        if self._embedding is not None:
+            return self._embedding.forward_dynamics_gradient(q, qd, u, f_ext=f_ext)
         q = np.array(q, dtype=np.float64)
         qd = np.array(qd, dtype=np.float64)
         u = np.array(u, dtype=np.float64)
@@ -4978,6 +5219,8 @@ class RBDReference(
         frame-invariant so the local-frame v_i and local-frame I_i agree with the
         world-frame value pinocchio reports). Param blocks are ordered by body id.
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.kinetic_energy_regressor(q, qd)
         from ._regressor import _BASIS_I
 
         q = np.array(q, dtype=np.float64)
@@ -5006,6 +5249,8 @@ class RBDReference(
         (`_world_transforms`) as `_total_mass_and_com`, so y_PE . pi reproduces
         `potential_energy` exactly.
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.potential_energy_regressor(q, GRAVITY)
         NB = self.robot.get_num_bodies()
         g = np.array([0.0, 0.0, GRAVITY], dtype=np.float64)
         Xw = self._world_transforms(q)            # 4x4 homogeneous world transforms

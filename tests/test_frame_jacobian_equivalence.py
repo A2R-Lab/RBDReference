@@ -22,6 +22,7 @@ from RBDReference.tests.model_sources import iter_robot_cases
 from RBDReference.tests import MANIFEST_PATH
 from RBDReference.tests.state_sampling import build_dynamics_samples
 from RBDReference.tests.comparators import assert_close
+from RBDReference.tests.tolerances import get_tolerance
 
 
 REFERENCE_FRAMES = ("LOCAL", "WORLD", "LOCAL_WORLD_ALIGNED")
@@ -46,7 +47,7 @@ def _make_frame_case_params(base_mode):
     params = []
     for case in iter_robot_cases(MANIFEST_PATH, base_mode=base_mode):
         spec = case["spec"]
-        if spec.robot_id not in ("iiwa14", "go2"):
+        if spec.robot_id not in ("iiwa14", "go2", "gen3"):
             continue
         marks = [pytest.mark.pinocchio_equivalence, pytest.mark.developer_only,
                  pytest.mark.robot_smoke]
@@ -70,7 +71,7 @@ def test_frame_jacobian_matches_pinocchio(spec, base_mode, project_model, pinocc
             for ref in REFERENCE_FRAMES:
                 actual = project_model.frame_jacobian(sample.q, target, ref)
                 expected = pinocchio_model.frame_jacobian(sample.q, target, ref)
-                assert_close(actual, expected, algorithm="minv", robot_id=spec.robot_id)
+                assert_close(actual, expected, algorithm="frame_jacobian", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), _PARAMS)
@@ -83,8 +84,7 @@ def test_frame_jacobian_dot_matches_pinocchio(spec, base_mode, project_model, pi
             for ref in REFERENCE_FRAMES:
                 actual = project_model.frame_jacobian_dot(sample.q, sample.qd, target, ref)
                 expected = pinocchio_model.frame_jacobian_dot(sample.q, sample.qd, target, ref)
-                # central-FD oracle vs analytic pinocchio: loosen to FD tolerance.
-                np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+                assert_close(actual, expected, algorithm="frame_jacobian_dot", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), _PARAMS)
@@ -92,21 +92,39 @@ def test_osc_inertia_matches_pinocchio(spec, base_mode, project_model, pinocchio
     _, osc_targets = _frame_targets(project_model, pinocchio_model)
     if not osc_targets:
         pytest.skip(f"No OSC frame targets for {spec.robot_id}")
-    checked = 0
+    # Lambda = inv(A), A = J Minv J^T. A float64 inverse carries an entrywise
+    # relative error of about u*cond(A), u = 2^-53, so the entrywise class is
+    # meaningful below cond(A) ~1e8 and ill-posed above it; the check that
+    # holds at every conditioning is the normwise backward error of each
+    # column of the reference Lambda as the solution of A_pin x = e_j
+    # (Rigal and Gaches 1967; the same two-tier treatment as the CUDA
+    # harness, guide 7.z48). A sample used to be skipped above cond 1e8 and
+    # the cell skipped when every sample was; now every sample is checked.
     for target in osc_targets:
         for sample in build_dynamics_samples(project_model):
             for ref in REFERENCE_FRAMES:
-                # Skip rank-deficient task spaces (J M^-1 J^T singular): OSC
-                # inertia is only defined when the frame is reachable by >= 6
-                # independent DOFs. Probe via the Jacobian-derived task matrix.
                 J = pinocchio_model.frame_jacobian(sample.q, target, ref)
                 Minv = pinocchio_model.minv(sample.q)
-                task = J @ Minv @ J.T
-                if np.linalg.cond(task) > 1e8:
+                A = J @ Minv @ J.T
+                cond = float(np.linalg.cond(A))
+                tag = f"{spec.robot_id}-{base_mode} target {target} {ref} cond {cond:.2e}"
+                try:
+                    L = np.asarray(project_model.osc_inertia(sample.q, target, ref), dtype=np.float64)
+                except np.linalg.LinAlgError:
+                    L = None
+                if L is None or not np.isfinite(L).all():
+                    # The reference's inverse refuses (or returns non-finite) only
+                    # where A is singular at float64 working precision: the q=0
+                    # corner of a planar-reachable arm. Anywhere else it is a bug.
+                    assert cond >= 2.0 ** 53, f"Lambda {tag}: no inverse although A is nonsingular at float64"
                     continue
-                actual = project_model.osc_inertia(sample.q, target, ref)
-                expected = pinocchio_model.osc_inertia(sample.q, target, ref)
-                assert_close(actual, expected, algorithm="minv", robot_id=spec.robot_id)
-                checked += 1
-    if checked == 0:
-        pytest.skip(f"No well-conditioned OSC task space for {spec.robot_id}")
+                resid = A @ L - np.eye(6)
+                norm_a = float(np.linalg.norm(A, 2))
+                eta = max(float(np.linalg.norm(resid[:, j]))
+                          / (norm_a * max(float(np.linalg.norm(L[:, j])), np.finfo(np.float64).tiny))
+                          for j in range(6))
+                eta_tol = get_tolerance("minv", robot_id=spec.robot_id).rtol
+                assert eta <= eta_tol, f"Lambda {tag}: normwise backward error {eta:.3e} > {eta_tol:.0e}"
+                if cond < 1e8:
+                    expected = pinocchio_model.osc_inertia(sample.q, target, ref)
+                    assert_close(L, expected, algorithm="osc_inertia", robot_id=spec.robot_id)

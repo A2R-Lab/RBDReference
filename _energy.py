@@ -23,6 +23,8 @@ class _EnergyMixin:
 
     def generalized_gravity(self, q, GRAVITY=-9.81):
         """g(q) = RNEA(q, 0, 0): the generalized gravity torque (size nv)."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.generalized_gravity(q, GRAVITY)
         n = self.robot.get_num_vel()
         zero = np.zeros(n, dtype=np.float64)
         c, _v, _a, _f = self.inverse_dynamics(q, zero, zero, GRAVITY=GRAVITY)
@@ -30,6 +32,8 @@ class _EnergyMixin:
 
     def nonlinear_effects(self, q, qd, GRAVITY=-9.81):
         """c(q, qd) = RNEA(q, qd, 0) = C(q,qd) qd + g(q) (size nv)."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.nonlinear_effects(q, qd, GRAVITY)
         n = self.robot.get_num_vel()
         zero = np.zeros(n, dtype=np.float64)
         c, _v, _a, _f = self.inverse_dynamics(q, qd, zero, GRAVITY=GRAVITY)
@@ -37,6 +41,8 @@ class _EnergyMixin:
 
     def kinetic_energy(self, q, qd):
         """KE = 1/2 qd^T M(q) qd (M from CRBA)."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.kinetic_energy(q, qd)
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
         M = np.asarray(self.crba(q), dtype=np.float64)
         return 0.5 * float(qd @ M @ qd)
@@ -46,12 +52,16 @@ class _EnergyMixin:
 
         Matches Pinocchio's `computePotentialEnergy` (PE increases with height
         for the physical g < 0)."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.potential_energy(q, GRAVITY)
         m_total, com = self._total_mass_and_com(q)
         g_vec = np.array([0.0, 0.0, GRAVITY], dtype=np.float64)
         return -float(m_total) * float(g_vec @ com)
 
     def mechanical_energy(self, q, qd, GRAVITY=-9.81):
         """KE + PE."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.mechanical_energy(q, qd, GRAVITY)
         return self.kinetic_energy(q, qd) + self.potential_energy(q, GRAVITY=GRAVITY)
 
     def coriolis_matrix(self, q, qd, GRAVITY=-9.81):
@@ -88,6 +98,8 @@ class _EnergyMixin:
         root permutation is applied here (unlike CRBA, which assembles the root
         block with S = I and reorders by hand).
         """
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.coriolis_matrix(q, qd, GRAVITY)
         q = np.array(q, dtype=np.float64)
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
         NB = self.robot.get_num_bodies()

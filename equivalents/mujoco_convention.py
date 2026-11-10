@@ -1057,14 +1057,18 @@ def integrator_gradient_pin_to_mjx(dAB_pin, Minv, qdd_pin, qd_pin, u_pin, R, dt,
     Assembly (validated to the FD floor ~1e-9 vs FD of the mjx integrator value
     along the mjx retract, both integrators, multiple seeds):
 
-      * BOTTOM rows  ``qd_{k+1,mjx} = G qd_{k+1,pin}`` — a VELOCITY output (plain
-        ``G``; NO ``omega x v`` accel term). ``qd_{k+1,pin} = qd_pin + dt*qdd_pin``;
-        its pin gradient is the pin dAB BOTTOM block. The columns reframe by the
-        (validated) input-conversion Jacobians shared with
-        :func:`fd_gradient_pin_to_mjx` (``Jq=G^{-1}``; the velocity/force inputs
-        ``qd_pin/u_pin`` track ``R``, so their q-perturbation Jacobians are the
-        ``_cross_cols`` couplings). The 3 base-rotation q-columns additionally pick
-        up the output-map's q-dependence ``g_dot(q) @ qd_{k+1,pin}``.
+      * BOTTOM rows  the MuJoCo velocity step ``qd_{k+1,mjx} = qvel + dt * qacc_mjx``
+        (``mj_Euler``: the world-frame velocity advances by the MuJoCo-frame
+        acceleration, whose base-linear block ``R (a + omega x v)`` carries the
+        ``omega x v`` term; this is NOT ``G`` applied to the pin step, the two
+        differ by ``dt R (omega x v)``, first order in ``dt``). The pin bottom block
+        is ``[dt*Fq | I + dt*Fv | dt*Fu]`` with ``F`` the pin forward-dynamics
+        gradient (``Fu = Minv``), so ``F`` is recovered from it and transformed by
+        the validated :func:`fd_gradient_pin_to_mjx`; the ``u`` block maps by
+        ``G Fu G^{-1}``. (Until 2026-11-03 these rows were the plain ``G`` reframe
+        with the ``g_dot`` term, which disagreed with finite differences of the
+        MuJoCo step by ``dt R ((e_a x omega) x v)`` on the rotation columns and
+        ``dt R (omega x R^T e_a)``, ``dt R (e_a x v)`` on the velocity columns.)
 
       * TOP rows  ``q_{k+1}`` config-tangent. The ANGULAR + JOINT output rows
         coincide with the pin retract (mjx only changes the base-linear position),
@@ -1102,13 +1106,14 @@ def integrator_gradient_pin_to_mjx(dAB_pin, Minv, qdd_pin, qd_pin, u_pin, R, dt,
     Jv_q = _cross_cols(v_lin, -1.0, nv, layout)   # d qd_pin / d xi_q
     Ju_q = _cross_cols(u_lin, -1.0, nv, layout)   # d u_pin  / d xi_q
 
-    # === BOTTOM rows: velocity output (plain G) ===
-    qdkp1_pin = qd_pin + dt * qdd_pin
-    botq = G @ (Bq @ Jq + Bv @ Jv_q + Bu @ Ju_q)
-    botv = G @ (Bv @ Ginv)
-    botu = G @ (Bu @ Ginv)
-    for a in range(3):
-        botq[:, ang0 + a] = botq[:, ang0 + a] + g_dot(R, a, nv, layout) @ qdkp1_pin
+    # === BOTTOM rows: the MuJoCo velocity step qd_{k+1} = qvel + dt * qacc_mjx ===
+    cdt = np.result_type(dAB_pin, G, qd_pin, u_pin, qdd_pin)
+    I_nv = np.eye(nv, dtype=cdt)
+    Fq_pin = Bq / dt; Fv_pin = (Bv - I_nv) / dt; Fu_pin = Bu / dt      # the pin fd gradient, Fu = Minv
+    Fq_mjx, Fv_mjx = fd_gradient_pin_to_mjx(Fq_pin, Fv_pin, Fu_pin, qdd_pin, qd_pin, u_pin, R, layout)
+    botq = dt * Fq_mjx
+    botv = I_nv + dt * Fv_mjx
+    botu = dt * (G @ Fu_pin @ Ginv)
 
     # === TOP rows: config-tangent ===
     # angular + joint rows: pin top block reframed by the input Jacobians.

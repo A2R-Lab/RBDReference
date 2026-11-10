@@ -592,12 +592,17 @@ def _quat_log_rel(ref, qref_xyzw, qc_xyzw):
 def _mjx_integrator_value(ad, q_mjx, v_mjx, u_mjx, dt, it, L):
     """Run the integrator in the mjx convention. Returns (q_kp1_full(nq),
     qd_kp1_mjx(nv)). Mirrors the _integrator.py mjx codegen: mjx inputs -> pin,
-    pin integrator, then mjx GLOBAL base-position step + qd output reframe by G."""
+    pin integrator for the quaternion and the joints, the MuJoCo velocity step
+    qvel_{k+1} = qvel + dt * qacc_mjx (the MuJoCo-frame acceleration carries the
+    omega x v term, so this is not G applied to the pin velocity step), and the
+    mjx GLOBAL base-position step."""
     ref = ad.reference; nq = ad.nq
     q_pin = mc.q_mjx_to_pin(q_mjx, L); R = mc.base_rotation(q_pin, L)
     v_pin = mc.v_mjx_to_pin(v_mjx, R, L); u_pin = mc.force_mjx_to_pin(u_mjx, R, L)
     x_kp1 = np.asarray(ref.integrator(q_pin, v_pin, u_pin, dt, integrator_type=it), float)
-    q_kp1 = x_kp1[:nq].copy(); qd_kp1_mjx = mc.v_pin_to_mjx(x_kp1[nq:], R, L)
+    q_kp1 = x_kp1[:nq].copy()
+    qdd_pin = np.asarray(ref.forward_dynamics(q_pin, v_pin, u_pin), float)
+    qd_kp1_mjx = v_mjx + dt * mc.accel_pin_to_mjx(qdd_pin, v_pin, R, L)
     w_lin = v_mjx[L.lin_slice] if it == "euler" else qd_kp1_mjx[L.lin_slice]
     q_kp1[L.pos_slice] = q_mjx[L.pos_slice] + dt * w_lin   # mjx GLOBAL add
     return q_kp1, qd_kp1_mjx

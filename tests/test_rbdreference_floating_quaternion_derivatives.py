@@ -24,7 +24,7 @@ def _floating_smoke_params():
     params = []
     for case in iter_robot_cases(MANIFEST_PATH, base_mode="floating"):
         spec = case["spec"]
-        if spec.robot_id not in {"iiwa14", "go2"}:
+        if spec.robot_id not in {"iiwa14", "go2", "gen3"}:
             continue
         params.append(pytest.param(
             spec, "floating",

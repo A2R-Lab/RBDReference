@@ -163,6 +163,8 @@ class _CentroidalMixin:
 
     def com(self, q):
         """Center-of-mass world position (3-vector)."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.com(q)
         _m, com = self._total_mass_and_com(q)
         return com
 
@@ -173,6 +175,8 @@ class _CentroidalMixin:
         link i's body Jacobian taken at the link's CoM. Equivalently the linear
         rows of the CMM A divided by M_total (used here, since A already carries
         the mass-weighted linear momentum)."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.jacobian_com(q)
         A, _h, m_total = self._ccrba_core(q, np.zeros(self.robot.get_num_vel()))
         return A[:3, :] / m_total
 
@@ -218,6 +222,8 @@ class _CentroidalMixin:
 
         Matches `pin.ccrba` (data.Ag, data.hg), ordered [linear; angular] at the
         CoM in a world-aligned frame."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.ccrba(q, qd)
         A, h, _m = self._ccrba_core(q, qd)
         return A, h
 
@@ -285,6 +291,8 @@ class _CentroidalMixin:
 
         The `A qdd` term is exact (the value-layer CMM); the bias `Adot qd` is
         the FD-sourced `_centroidal_bias`."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.centroidal_momentum_time_variation(q, qd, qdd)
         return self._hdot_fast(q, qd, qdd)
 
     # ---- centroidal dynamics derivatives ----
@@ -510,6 +518,8 @@ class _CentroidalMixin:
         valid for fixed- and floating-base. Matches the FD tensor to ~1e-7 and
         both pinocchio contractions to ~1e-12 (relative ~1e-9 on big robots).
         See `dccrba_fd` for the finite-difference cross-check."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.dccrba(q)
         return self._dccrba_analytic(q)
 
     def dccrba_fd(self, q, fd_step=1e-5):
@@ -549,6 +559,8 @@ class _CentroidalMixin:
         `dccrba` contractions. `Adot @ qd == centroidal_bias` (the `Adot qd`
         term of `hdot`) and `Adot @ qdd + (Adot qd)` matches
         `centroidal_momentum_time_variation`."""
+        if getattr(self, '_embedding', None) is not None:
+            return self._embedding.cmm_time_variation(q, qd)
         qd = np.asarray(qd, dtype=np.float64).reshape(-1)
         dA = self._dccrba_analytic(q)
         return np.einsum("abi,i->ab", dA, qd)

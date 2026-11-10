@@ -17,6 +17,8 @@ Fixed-base (iiwa14) + floating-base (go2), matching the frame-Jacobian suite.
 import numpy as np
 import pytest
 
+from RBDReference.tests.comparators import assert_close
+
 from RBDReference.tests.conftest import MANIFEST_PATH
 from RBDReference.tests.model_sources import iter_robot_cases
 from RBDReference.tests.state_sampling import build_dynamics_samples
@@ -52,7 +54,7 @@ def _make_params():
     for base_mode in ("fixed", "floating"):
         for case in iter_robot_cases(MANIFEST_PATH, base_mode=base_mode):
             spec = case["spec"]
-            if spec.robot_id not in ("iiwa14", "go2"):
+            if spec.robot_id not in ("iiwa14", "go2", "gen3"):
                 continue
             marks = [pytest.mark.pinocchio_equivalence, pytest.mark.developer_only,
                      pytest.mark.robot_smoke]
@@ -76,11 +78,11 @@ def test_tool_pose_matches_pinocchio(spec, base_mode, project_model, pinocchio_m
         actual = project_model.end_effector_pose(sample.q, target, offset=X_tool)
         expected = pinocchio_model.end_effector_pose(sample.q, target, offset=X_tool)
         # position
-        np.testing.assert_allclose(actual[:3], expected[:3], rtol=1e-8, atol=1e-9)
+        assert_close(actual[:3], expected[:3], algorithm="pose", robot_id=spec.robot_id)
         # orientation via rotation matrix (avoids rpy branch-cut mismatch)
-        np.testing.assert_allclose(pose_vector_to_rotation_matrix(actual),
-                                   pose_vector_to_rotation_matrix(expected),
-                                   rtol=1e-8, atol=1e-9)
+        assert_close(pose_vector_to_rotation_matrix(actual),
+                     pose_vector_to_rotation_matrix(expected),
+                     algorithm="pose", robot_id=spec.robot_id)
 
 
 @pytest.mark.parametrize(("spec", "base_mode"), _PARAMS)
